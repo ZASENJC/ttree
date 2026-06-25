@@ -1,0 +1,77 @@
+/* ─────────────────────────────────────────────
+   设计令牌 — 克制、现代、有层次
+   暖灰中性 + 单一靛蓝强调色，避免模板感
+   ───────────────────────────────────────────── */
+:root {
+  /* 表面 —— 半透明，配合毛玻璃 */
+  --surface: oklch(99% 0.004 280 / 0.72);
+  --surface-raised: oklch(100% 0 0 / 0.55);
+  --surface-sunken: oklch(96% 0.004 280 / 0.6);
+  --border: oklch(80% 0.008 280 / 0.5);
+  --border-strong: oklch(70% 0.01 280 / 0.6);
+
+  /* 文本 */
+  --text: oklch(22% 0.01 280);
+  --text-muted: oklch(52% 0.012 280);
+  --text-faint: oklch(65% 0.01 280);
+
+  /* 强调色 —— 靛蓝 */
+  --accent: oklch(58% 0.19 268);
+  --accent-hover: oklch(52% 0.2 268);
+  --accent-soft: oklch(58% 0.19 268 / 0.12);
+  --accent-text: oklch(98% 0 0);
+
+  /* 状态 */
+  --danger: oklch(58% 0.2 25);
+  --danger-soft: oklch(58% 0.2 25 / 0.12);
+
+  /* 字号 —— 流式缩放 */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.375rem;
+
+  /* 间距节奏 */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+
+  /* 圆角 */
+  --radius-sm: 0.5rem;
+  --radius: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-window: 1.25rem;
+
+  /* 动效 */
+  --duration-fast: 120ms;
+  --duration: 200ms;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.06);
+  --shadow: 0 4px 16px oklch(0% 0 0 / 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: oklch(24% 0.01 280 / 0.72);
+    --surface-raised: oklch(30% 0.012 280 / 0.55);
+    --surface-sunken: oklch(20% 0.01 280 / 0.6);
+    --border: oklch(40% 0.012 280 / 0.5);
+    --border-strong: oklch(50% 0.014 280 / 0.6);
+
+    --text: oklch(94% 0.004 280);
+    --text-muted: oklch(70% 0.01 280);
+    --text-faint: oklch(56% 0.01 280);
+
+    --accent: oklch(70% 0.16 266);
+    --accent-hover: oklch(76% 0.16 266);
+    --accent-soft: oklch(70% 0.16 266 / 0.16);
+    --accent-text: oklch(18% 0.02 266);
+
+    --shadow: 0 8px 28px oklch(0% 0 0 / 0.4);
+  }
+}

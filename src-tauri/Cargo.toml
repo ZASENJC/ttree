@@ -1,0 +1,58 @@
+[package]
+name = "ttree"
+version = "0.1.0"
+description = "轻量 macOS AI 翻译器"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "ttree_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+tauri-plugin-store = "2"
+tauri-plugin-autostart = "2"
+window-vibrancy = "0.7"
+reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
+futures-util = "0.3"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+urlencoding = "2"
+memchr = "2"
+
+# macOS 原生 OCR（Apple Vision）
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSPasteboard",
+    "NSPasteboardItem",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGEvent",
+    "CGEventTypes",
+    "CGRemoteOperation",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+] }
+objc2-vision = { version = "0.3", features = [
+    "VNRequest",
+    "VNRecognizeTextRequest",
+    "VNObservation",
+    "VNRequestHandler",
+    "VNTypes",
+] }
