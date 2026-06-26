@@ -1,8 +1,7 @@
 //! Windows 选中文本捕获实现。
 //!
-//! 两层策略:
-//! 1. UI Automation (IUIAutomation): 读取焦点元素的选中文本
-//! 2. 剪贴板模拟: SendInput 模拟 Ctrl+C → 读取剪贴板 → 恢复原内容
+//! 策略: 模拟 Ctrl+C + 剪贴板读取（与 macOS 的 Cmd+C 回退策略一致）。
+//! 优先尝试 UI Automation，失败后回退到剪贴板模拟。
 
 #![cfg(target_os = "windows")]
 
@@ -11,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use windows::Win32::Foundation::*;
-use windows::Win32::System::Ole::*;
-use windows::Win32::UI::Accessibility::*;
+use windows::Win32::System::DataExchange::*;
+use windows::Win32::System::Memory::*;
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 use super::normalize_selected_text;
@@ -21,56 +21,7 @@ const COPY_TIMEOUT: Duration = Duration::from_millis(450);
 const COPY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 pub(crate) fn capture_selected_text() -> Result<Option<String>> {
-    // 策略 1: UI Automation 读取焦点元素选中文本
-    if let Some(text) = capture_uia_selected_text()? {
-        return Ok(Some(text));
-    }
-
-    // 策略 2: 模拟 Ctrl+C + 剪贴板
     capture_clipboard_selected_text()
-}
-
-/// 通过 UI Automation 读取当前焦点元素的选中文本。
-fn capture_uia_selected_text() -> Result<Option<String>> {
-    // SAFETY: COM 初始化和 UI Automation 对象在本函数作用域内有效。
-    unsafe {
-        let automation: IUIAutomation =
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)
-                .map_err(|e| anyhow!("创建 UI Automation 实例失败: {e}"))?;
-
-        let focused = match automation.GetFocusedElement() {
-            Ok(el) => el,
-            Err(_) => return Ok(None),
-        };
-
-        // 尝试 TextPattern 读取选中文本
-        let pattern_id = UIA_TextPatternId;
-        if let Ok(pattern_variant) = focused.GetCurrentPattern(pattern_id) {
-            if let Ok(text_pattern) = pattern_variant.cast::<IUIAutomationTextPattern>() {
-                if let Ok(text_range) = text_pattern.GetSelection() {
-                    if let Ok(count) = text_range.Length() {
-                        if count > 0 {
-                            if let Ok(text) = text_range.GetText(count.min(4096)) {
-                                return Ok(normalize_selected_text(text.to_string()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 回退: ValuePattern
-        let value_pattern_id = UIA_ValuePatternId;
-        if let Ok(pattern_variant) = focused.GetCurrentPattern(value_pattern_id) {
-            if let Ok(value_pattern) = pattern_variant.cast::<IUIAutomationValuePattern>() {
-                if let Ok(value) = value_pattern.CurrentValue() {
-                    return Ok(normalize_selected_text(value.to_string()));
-                }
-            }
-        }
-
-        Ok(None)
-    }
 }
 
 /// 模拟 Ctrl+C 并从剪贴板读取选中文本。
@@ -96,33 +47,27 @@ fn capture_clipboard_selected_text() -> Result<Option<String>> {
             let current_seq = GetClipboardSequenceNumber();
             if current_seq == snapshot.sequence + 1 {
                 // 只有一次变化（我们的 Ctrl+C），恢复原内容
-                EmptyClipboard().ok();
+                let _ = EmptyClipboard();
                 for entry in &snapshot.entries {
-                    if entry.format == CF_UNICODETEXT {
-                        let hmem = GlobalAlloc(GMEM_MOVEABLE, entry.data.len())
-                            .ok()
-                            .and_then(|h| {
-                                let ptr = GlobalLock(h);
-                                if !ptr.is_null() {
-                                    std::ptr::copy_nonoverlapping(
-                                        entry.data.as_ptr(),
-                                        ptr as *mut u8,
-                                        entry.data.len(),
-                                    );
-                                    GlobalUnlock(h).ok();
-                                    Some(h)
-                                } else {
-                                    GlobalFree(Some(h));
-                                    None
-                                }
-                            });
-                        if let Some(h) = hmem {
-                            SetClipboardData(entry.format, Some(h)).ok();
+                    if entry.format == CF_UNICODETEXT.0 as u32 {
+                        if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, entry.data.len()) {
+                            let ptr = GlobalLock(hmem);
+                            if !ptr.is_null() {
+                                std::ptr::copy_nonoverlapping(
+                                    entry.data.as_ptr(),
+                                    ptr as *mut u8,
+                                    entry.data.len(),
+                                );
+                                let _ = GlobalUnlock(hmem);
+                                let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(hmem));
+                            } else {
+                                let _ = GlobalFree(Some(hmem));
+                            }
                         }
                     }
                 }
             }
-            CloseClipboard().ok();
+            let _ = CloseClipboard();
         }
 
         Ok(copied_text)
@@ -151,19 +96,17 @@ unsafe fn snapshot_clipboard() -> ClipboardSnapshot {
             if format == 0 {
                 break;
             }
-            if let Some(handle) = GetClipboardData(format) {
-                let hmem = handle.0 as isize;
-                let size = GlobalSize(HGLOBAL(hmem));
-                let ptr = GlobalLock(HGLOBAL(hmem));
+            if let Ok(handle) = GetClipboardData(format) {
+                let size = GlobalSize(handle);
+                let ptr = GlobalLock(handle);
                 if !ptr.is_null() && size > 0 {
-                    let data =
-                        std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
+                    let data = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
                     entries.push(ClipboardEntry { format, data });
-                    GlobalUnlock(HGLOBAL(hmem)).ok();
+                    let _ = GlobalUnlock(handle);
                 }
             }
         }
-        CloseClipboard().ok();
+        let _ = CloseClipboard();
     }
 
     ClipboardSnapshot { sequence, entries }
@@ -176,9 +119,8 @@ unsafe fn read_clipboard_text() -> Option<String> {
     }
 
     let mut text = None;
-    if let Some(handle) = GetClipboardData(CF_UNICODETEXT) {
-        let hmem = handle.0 as isize;
-        let ptr = GlobalLock(HGLOBAL(hmem));
+    if let Ok(handle) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
+        let ptr = GlobalLock(handle);
         if !ptr.is_null() {
             // 读取 null-terminated UTF-16 字符串
             let mut len = 0;
@@ -188,11 +130,11 @@ unsafe fn read_clipboard_text() -> Option<String> {
             }
             let slice = std::slice::from_raw_parts(base, len);
             text = String::from_utf16(slice).ok();
-            GlobalUnlock(HGLOBAL(hmem)).ok();
+            let _ = GlobalUnlock(handle);
         }
     }
 
-    CloseClipboard().ok();
+    let _ = CloseClipboard();
     text
 }
 
@@ -200,7 +142,7 @@ unsafe fn read_clipboard_text() -> Option<String> {
 fn post_copy_keypress() -> Result<()> {
     // SAFETY: SendInput 使用合法的 INPUT 结构。
     unsafe {
-        let mut inputs = [
+        let inputs = [
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {

@@ -7,7 +7,7 @@
 
 use windows::core::HSTRING;
 use windows::Graphics::Imaging::BitmapDecoder;
-use windows::Media::Ocr::OcrEngine;
+use windows::Media::Ocr::{IOcrEngineStatics, OcrEngine};
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
 /// 对指定图片文件路径执行 OCR，返回识别文本（按行拼接）。
@@ -27,13 +27,11 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
         writer
             .WriteBytes(bytes)
             .map_err(|e| format!("写入字节失败: {e}"))?;
-        // StoreAsync 返回 IAsyncOperation<u32>，.get() 阻塞等待
         writer
             .StoreAsync()
             .map_err(|e| format!("存储数据失败: {e}"))?
             .get()
             .map_err(|e| format!("等待存储完成失败: {e}"))?;
-        // 将 DataWriter 分离到流中
         writer
             .DetachStream()
             .map_err(|e| format!("分离流失败: {e}"))?;
@@ -66,38 +64,29 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
         .get()
         .map_err(|e| format!("等待 OCR 完成失败: {e}"))?;
 
-    // 拼接识别文本
-    let lines = result
-        .Lines()
-        .map_err(|e| format!("获取识别行失败: {e}"))?;
+    // 拼接识别文本 —— OcrResult.Text() 返回完整文本
+    let text = result
+        .Text()
+        .map_err(|e| format!("获取识别文本失败: {e}"))?;
 
-    let mut text_lines: Vec<String> = Vec::new();
-    for i in 0..lines.Size().map_err(|e| format!("获取行数失败: {e}"))? {
-        let line = lines
-            .GetAt(i)
-            .map_err(|e| format!("获取第 {i} 行失败: {e}"))?;
-        text_lines.push(
-            line.Text()
-                .map_err(|e| format!("读取行文本失败: {e}"))?
-                .to_string(),
-        );
-    }
-
-    Ok(text_lines.join("\n"))
+    Ok(text.to_string())
 }
 
 /// 创建 OCR 引擎：尝试中文简体 → 用户配置语言 → 系统默认。
 fn create_ocr_engine() -> Option<OcrEngine> {
-    // 优先尝试中文简体
-    let zh_lang = HSTRING::from("zh-Hans");
-    if let Ok(engine) = OcrEngine::TryCreateFromLanguage(&zh_lang) {
-        return Some(engine);
-    }
+    // 通过 IOcrEngineStatics 接口访问 TryCreateFromLanguage
+    let result = OcrEngine::IOcrEngineStatics(|statics| {
+        // 优先尝试中文简体
+        let zh_lang = HSTRING::from("zh-Hans");
+        if let Ok(engine) = statics.TryCreateFromLanguage(&zh_lang) {
+            return Ok(engine);
+        }
+        // 回退到用户配置的语言
+        if let Ok(engine) = OcrEngine::TryCreateFromUserProfileLanguages() {
+            return Ok(engine);
+        }
+        Err(windows::core::Error::from_win32())
+    });
 
-    // 回退到用户配置的语言
-    if let Ok(engine) = OcrEngine::TryCreateFromUserProfileLanguages() {
-        return Some(engine);
-    }
-
-    None
+    result.ok()
 }

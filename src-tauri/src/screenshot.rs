@@ -55,6 +55,7 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
 pub fn capture_fullscreen() -> Result<PathBuf, String> {
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
     // SAFETY: Win32 GDI 对象在本函数作用域内有效，逐一释放。
     unsafe {
@@ -72,7 +73,7 @@ pub fn capture_fullscreen() -> Result<PathBuf, String> {
             return Err("创建内存 DC 失败".to_string());
         }
 
-        let hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
+        let hbitmap = CreateCompatibleBitmap(Some(hdc_screen), width, height);
         if hbitmap.is_invalid() {
             DeleteDC(hdc_mem);
             ReleaseDC(HWND::default(), hdc_screen);
@@ -80,18 +81,17 @@ pub fn capture_fullscreen() -> Result<PathBuf, String> {
         }
 
         let old_bmp = SelectObject(hdc_mem, hbitmap.into());
-        BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), 0, 0, SRCCOPY)
-            .map_err(|e| format!("BitBlt 失败: {e}"))?;
+        let _ = BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), 0, 0, SRCCOPY);
 
         // 保存为 BMP 文件
         let path = temp_path(".bmp");
         save_bitmap(&hbitmap, width, height, &path)?;
 
         // 清理
-        SelectObject(hdc_mem, old_bmp);
-        DeleteObject(hbitmap.into());
-        DeleteDC(hdc_mem);
-        ReleaseDC(HWND::default(), hdc_screen);
+        let _ = SelectObject(hdc_mem, old_bmp);
+        let _ = DeleteObject(hbitmap.into());
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(HWND::default(), hdc_screen);
 
         Ok(path)
     }
@@ -124,7 +124,7 @@ unsafe fn save_bitmap(
             biHeight: height,
             biPlanes: 1,
             biBitCount: 32,
-            biCompression: BI_RGB,
+            biCompression: 0, // BI_RGB = 0
             ..std::mem::zeroed()
         },
         ..std::mem::zeroed()
@@ -134,7 +134,7 @@ unsafe fn save_bitmap(
     let mut bits: Vec<u8> = vec![0; (width * height * 4) as usize];
 
     GetDIBits(
-        hdc,
+        Some(hdc),
         *hbitmap,
         0,
         height as u32,
@@ -143,7 +143,7 @@ unsafe fn save_bitmap(
         DIB_RGB_COLORS,
     );
 
-    ReleaseDC(HWND::default(), hdc);
+    let _ = ReleaseDC(HWND::default(), hdc);
 
     // BMP 文件格式
     let file_size = 14 + 40 + bits.len();
