@@ -1,24 +1,67 @@
 //! Windows 选中文本捕获实现。
 //!
-//! 策略: 模拟 Ctrl+C + 剪贴板读取（与 macOS 的 Cmd+C 回退策略一致）。
-//! 优先尝试 UI Automation，失败后回退到剪贴板模拟。
+//! 模拟 Ctrl+C + 剪贴板读取（与 macOS 的 Cmd+C 回退策略一致）。
+//! 使用纯 Win32 FFI 避免 `windows` crate 版本间 API 差异。
 
 #![cfg(target_os = "windows")]
 
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
-use windows::Win32::Foundation::*;
-use windows::Win32::System::DataExchange::*;
-use windows::Win32::System::Memory::*;
-use windows::Win32::System::Ole::CF_UNICODETEXT;
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use anyhow::Result;
 
 use super::normalize_selected_text;
 
 const COPY_TIMEOUT: Duration = Duration::from_millis(450);
 const COPY_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+type HANDLE = *mut core::ffi::c_void;
+type BOOL = i32;
+
+const NULL_HANDLE: HANDLE = std::ptr::null_mut();
+const INPUT_KEYBOARD: u32 = 1;
+const KEYEVENTF_KEYUP: u32 = 2;
+const VK_CONTROL: u16 = 0x11;
+const VK_C: u16 = 0x43;
+const CF_UNICODETEXT: u32 = 13;
+const GMEM_MOVEABLE: u32 = 0x0002;
+
+#[repr(C)]
+struct KEYBDINPUT {
+    wVk: u16,
+    wScan: u16,
+    dwFlags: u32,
+    time: u32,
+    dwExtraInfo: usize,
+}
+
+#[repr(C)]
+union INPUT_0 {
+    ki: KEYBDINPUT,
+    _padding: [u8; 24],
+}
+
+#[repr(C)]
+struct INPUT {
+    r#type: u32,
+    Anonymous: INPUT_0,
+}
+
+extern "system" {
+    fn OpenClipboard(hWndNewOwner: HANDLE) -> BOOL;
+    fn CloseClipboard() -> BOOL;
+    fn EmptyClipboard() -> BOOL;
+    fn GetClipboardData(uFormat: u32) -> HANDLE;
+    fn SetClipboardData(uFormat: u32, hMem: HANDLE) -> HANDLE;
+    fn EnumClipboardFormats(format: u32) -> u32;
+    fn GetClipboardSequenceNumber() -> u32;
+    fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> HANDLE;
+    fn GlobalLock(hMem: HANDLE) -> *mut core::ffi::c_void;
+    fn GlobalUnlock(hMem: HANDLE) -> BOOL;
+    fn GlobalSize(hMem: HANDLE) -> usize;
+    fn GlobalFree(hMem: HANDLE) -> HANDLE;
+    fn SendInput(cInputs: u32, pInputs: *const INPUT, cbSize: i32) -> u32;
+}
 
 pub(crate) fn capture_selected_text() -> Result<Option<String>> {
     capture_clipboard_selected_text()
@@ -43,14 +86,15 @@ fn capture_clipboard_selected_text() -> Result<Option<String>> {
         let copied_text = read_clipboard_text().and_then(normalize_selected_text);
 
         // 如果剪贴板没有被其他进程修改，恢复原始内容
-        if OpenClipboard(HWND::default()).is_ok() {
+        if OpenClipboard(NULL_HANDLE) != 0 {
             let current_seq = GetClipboardSequenceNumber();
             if current_seq == snapshot.sequence + 1 {
                 // 只有一次变化（我们的 Ctrl+C），恢复原内容
-                let _ = EmptyClipboard();
+                EmptyClipboard();
                 for entry in &snapshot.entries {
-                    if entry.format == CF_UNICODETEXT.0 as u32 {
-                        if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, entry.data.len()) {
+                    if entry.format == CF_UNICODETEXT {
+                        let hmem = GlobalAlloc(GMEM_MOVEABLE, entry.data.len());
+                        if !hmem.is_null() {
                             let ptr = GlobalLock(hmem);
                             if !ptr.is_null() {
                                 std::ptr::copy_nonoverlapping(
@@ -58,16 +102,16 @@ fn capture_clipboard_selected_text() -> Result<Option<String>> {
                                     ptr as *mut u8,
                                     entry.data.len(),
                                 );
-                                let _ = GlobalUnlock(hmem);
-                                let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(hmem));
+                                GlobalUnlock(hmem);
+                                SetClipboardData(CF_UNICODETEXT, hmem);
                             } else {
-                                let _ = GlobalFree(Some(hmem));
+                                GlobalFree(hmem);
                             }
                         }
                     }
                 }
             }
-            let _ = CloseClipboard();
+            CloseClipboard();
         }
 
         Ok(copied_text)
@@ -89,24 +133,25 @@ unsafe fn snapshot_clipboard() -> ClipboardSnapshot {
     let sequence = GetClipboardSequenceNumber();
     let mut entries = Vec::new();
 
-    if OpenClipboard(HWND::default()).is_ok() {
+    if OpenClipboard(NULL_HANDLE) != 0 {
         let mut format = 0u32;
         loop {
             format = EnumClipboardFormats(format);
             if format == 0 {
                 break;
             }
-            if let Ok(handle) = GetClipboardData(format) {
+            let handle = GetClipboardData(format);
+            if !handle.is_null() {
                 let size = GlobalSize(handle);
                 let ptr = GlobalLock(handle);
                 if !ptr.is_null() && size > 0 {
                     let data = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
                     entries.push(ClipboardEntry { format, data });
-                    let _ = GlobalUnlock(handle);
+                    GlobalUnlock(handle);
                 }
             }
         }
-        let _ = CloseClipboard();
+        CloseClipboard();
     }
 
     ClipboardSnapshot { sequence, entries }
@@ -114,12 +159,13 @@ unsafe fn snapshot_clipboard() -> ClipboardSnapshot {
 
 /// 读取剪贴板中的 Unicode 文本。
 unsafe fn read_clipboard_text() -> Option<String> {
-    if OpenClipboard(HWND::default()).is_err() {
+    if OpenClipboard(NULL_HANDLE) == 0 {
         return None;
     }
 
     let mut text = None;
-    if let Ok(handle) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
+    let handle = GetClipboardData(CF_UNICODETEXT);
+    if !handle.is_null() {
         let ptr = GlobalLock(handle);
         if !ptr.is_null() {
             // 读取 null-terminated UTF-16 字符串
@@ -130,16 +176,18 @@ unsafe fn read_clipboard_text() -> Option<String> {
             }
             let slice = std::slice::from_raw_parts(base, len);
             text = String::from_utf16(slice).ok();
-            let _ = GlobalUnlock(handle);
+            GlobalUnlock(handle);
         }
     }
 
-    let _ = CloseClipboard();
+    CloseClipboard();
     text
 }
 
 /// 模拟 Ctrl+C 按键。
 fn post_copy_keypress() -> Result<()> {
+    use anyhow::anyhow;
+
     // SAFETY: SendInput 使用合法的 INPUT 结构。
     unsafe {
         let inputs = [
@@ -149,7 +197,7 @@ fn post_copy_keypress() -> Result<()> {
                     ki: KEYBDINPUT {
                         wVk: VK_CONTROL,
                         wScan: 0,
-                        dwFlags: KEYBD_EVENT_FLAGS(0),
+                        dwFlags: 0,
                         time: 0,
                         dwExtraInfo: 0,
                     },
@@ -161,7 +209,7 @@ fn post_copy_keypress() -> Result<()> {
                     ki: KEYBDINPUT {
                         wVk: VK_C,
                         wScan: 0,
-                        dwFlags: KEYBD_EVENT_FLAGS(0),
+                        dwFlags: 0,
                         time: 0,
                         dwExtraInfo: 0,
                     },
@@ -193,7 +241,7 @@ fn post_copy_keypress() -> Result<()> {
             },
         ];
 
-        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        let sent = SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
         if sent != inputs.len() as u32 {
             return Err(anyhow!("SendInput 发送不完整"));
         }

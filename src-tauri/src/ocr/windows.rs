@@ -5,9 +5,8 @@
 
 #![cfg(target_os = "windows")]
 
-use windows::core::HSTRING;
 use windows::Graphics::Imaging::BitmapDecoder;
-use windows::Media::Ocr::{IOcrEngineStatics, OcrEngine};
+use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
 /// 对指定图片文件路径执行 OCR，返回识别文本（按行拼接）。
@@ -54,8 +53,10 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
         .get()
         .map_err(|e| format!("等待位图获取完成失败: {e}"))?;
 
-    // 创建 OCR 引擎 —— 优先中文简体，回退到用户配置语言
-    let engine = create_ocr_engine().ok_or("无法创建 OCR 引擎，请确认 Windows 语言包已安装")?;
+    // 创建 OCR 引擎 —— 使用用户配置语言，回退到系统默认
+    let engine =
+        OcrEngine::TryCreateFromUserProfileLanguages()
+            .map_err(|e| format!("无法创建 OCR 引擎，请确认 Windows 语言包已安装: {e}"))?;
 
     // 执行 OCR
     let result = engine
@@ -70,23 +71,4 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
         .map_err(|e| format!("获取识别文本失败: {e}"))?;
 
     Ok(text.to_string())
-}
-
-/// 创建 OCR 引擎：尝试中文简体 → 用户配置语言 → 系统默认。
-fn create_ocr_engine() -> Option<OcrEngine> {
-    // 通过 IOcrEngineStatics 接口访问 TryCreateFromLanguage
-    let result = OcrEngine::IOcrEngineStatics(|statics| {
-        // 优先尝试中文简体
-        let zh_lang = HSTRING::from("zh-Hans");
-        if let Ok(engine) = statics.TryCreateFromLanguage(&zh_lang) {
-            return Ok(engine);
-        }
-        // 回退到用户配置的语言
-        if let Ok(engine) = OcrEngine::TryCreateFromUserProfileLanguages() {
-            return Ok(engine);
-        }
-        Err(windows::core::Error::from_win32())
-    });
-
-    result.ok()
 }

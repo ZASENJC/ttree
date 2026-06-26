@@ -50,132 +50,159 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
 
 // ── Windows 实现 ────────────────────────────────────────────────────
 
-/// 截取全屏并保存到临时 BMP 文件（Windows）。
+/// Windows 交互式截图入口：截全屏，返回路径（后续由前端处理区域选择）。
+///
+/// 使用纯 Win32 FFI 避免 `windows` crate 版本间 API 签名差异。
 #[cfg(target_os = "windows")]
-pub fn capture_fullscreen() -> Result<PathBuf, String> {
-    use windows::Win32::Foundation::*;
-    use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
+    use std::io::Write;
+
+    // 纯 C FFI 类型
+    type HANDLE = *mut core::ffi::c_void;
+    type BOOL = i32;
+
+    const NULL_HANDLE: HANDLE = std::ptr::null_mut();
+    const SM_CXSCREEN: i32 = 0;
+    const SM_CYSCREEN: i32 = 1;
+    const SRCCOPY: u32 = 0x00CC0020;
+    const DIB_RGB_COLORS: u32 = 0;
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct BITMAPINFOHEADER {
+        biSize: u32,
+        biWidth: i32,
+        biHeight: i32,
+        biPlanes: u16,
+        biBitCount: u16,
+        biCompression: u32,
+        biSizeImage: u32,
+        biXPelsPerMeter: i32,
+        biYPelsPerMeter: i32,
+        biClrUsed: u32,
+        biClrImportant: u32,
+    }
+
+    #[repr(C)]
+    struct BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER,
+    }
+
+    extern "system" {
+        fn GetDC(hWnd: HANDLE) -> HANDLE;
+        fn ReleaseDC(hWnd: HANDLE, hDC: HANDLE) -> i32;
+        fn CreateCompatibleDC(hDC: HANDLE) -> HANDLE;
+        fn DeleteDC(hDC: HANDLE) -> BOOL;
+        fn CreateCompatibleBitmap(hDC: HANDLE, cx: i32, cy: i32) -> HANDLE;
+        fn SelectObject(hDC: HANDLE, h: HANDLE) -> HANDLE;
+        fn DeleteObject(ho: HANDLE) -> BOOL;
+        fn BitBlt(
+            hdc: HANDLE, x: i32, y: i32, cx: i32, cy: i32,
+            hdcSrc: HANDLE, x1: i32, y1: i32, rop: u32,
+        ) -> BOOL;
+        fn GetSystemMetrics(nIndex: i32) -> i32;
+        fn GetDIBits(
+            hdc: HANDLE, hbm: HANDLE, start: u32, cLines: u32,
+            lpvBits: *mut core::ffi::c_void, lpbmi: *mut BITMAPINFO, usage: u32,
+        ) -> i32;
+    }
 
     // SAFETY: Win32 GDI 对象在本函数作用域内有效，逐一释放。
     unsafe {
-        let hdc_screen = GetDC(HWND::default());
-        if hdc_screen.is_invalid() {
+        let hdc_screen = GetDC(NULL_HANDLE);
+        if hdc_screen.is_null() {
             return Err("获取屏幕 DC 失败".to_string());
         }
 
         let width = GetSystemMetrics(SM_CXSCREEN);
         let height = GetSystemMetrics(SM_CYSCREEN);
 
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-        if hdc_mem.is_invalid() {
-            ReleaseDC(HWND::default(), hdc_screen);
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        if hdc_mem.is_null() {
+            ReleaseDC(NULL_HANDLE, hdc_screen);
             return Err("创建内存 DC 失败".to_string());
         }
 
-        let hbitmap = CreateCompatibleBitmap(Some(hdc_screen), width, height);
-        if hbitmap.is_invalid() {
+        let hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
+        if hbitmap.is_null() {
             DeleteDC(hdc_mem);
-            ReleaseDC(HWND::default(), hdc_screen);
+            ReleaseDC(NULL_HANDLE, hdc_screen);
             return Err("创建位图失败".to_string());
         }
 
-        let old_bmp = SelectObject(hdc_mem, hbitmap.into());
-        let _ = BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), 0, 0, SRCCOPY);
+        let old_bmp = SelectObject(hdc_mem, hbitmap);
+        BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY);
 
         // 保存为 BMP 文件
         let path = temp_path(".bmp");
-        save_bitmap(&hbitmap, width, height, &path)?;
+
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+        };
+
+        let mut bits: Vec<u8> = vec![0; (width * height * 4) as usize];
+
+        GetDIBits(
+            hdc_screen,
+            hbitmap,
+            0,
+            height as u32,
+            bits.as_mut_ptr() as *mut _,
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        // BMP 文件格式
+        let file_size = 14 + 40 + bits.len();
+        let mut file =
+            std::fs::File::create(&path).map_err(|e| format!("创建截图文件失败: {e}"))?;
+
+        // BMP 文件头
+        file.write_all(b"BM").map_err(|e| e.to_string())?;
+        file.write_all(&(file_size as u32).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&[0u8; 4]).map_err(|e| e.to_string())?;
+        file.write_all(&54u32.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+
+        // DIB 头
+        file.write_all(&40u32.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&width.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&height.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&1u16.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&32u16.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&0u32.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&(bits.len() as u32).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&[0u8; 16]).map_err(|e| e.to_string())?;
+
+        // BGRA 像素数据
+        file.write_all(&bits).map_err(|e| e.to_string())?;
 
         // 清理
-        let _ = SelectObject(hdc_mem, old_bmp);
-        let _ = DeleteObject(hbitmap.into());
-        let _ = DeleteDC(hdc_mem);
-        let _ = ReleaseDC(HWND::default(), hdc_screen);
+        SelectObject(hdc_mem, old_bmp);
+        DeleteObject(hbitmap);
+        DeleteDC(hdc_mem);
+        ReleaseDC(NULL_HANDLE, hdc_screen);
 
-        Ok(path)
+        Ok(Some(path))
     }
-}
-
-/// Windows 交互式截图入口：截全屏，返回路径（后续由前端处理区域选择）。
-#[cfg(target_os = "windows")]
-pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
-    let path = capture_fullscreen()?;
-    Ok(Some(path))
-}
-
-// ── GDI 工具函数 (Windows) ─────────────────────────────────────────
-
-#[cfg(target_os = "windows")]
-unsafe fn save_bitmap(
-    hbitmap: &windows::Win32::Graphics::Gdi::HBITMAP,
-    width: i32,
-    height: i32,
-    path: &PathBuf,
-) -> Result<(), String> {
-    use std::io::Write;
-    use windows::Win32::Graphics::Gdi::*;
-
-    // 获取位图信息
-    let mut bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0, // BI_RGB = 0
-            ..std::mem::zeroed()
-        },
-        ..std::mem::zeroed()
-    };
-
-    let hdc = GetDC(HWND::default());
-    let mut bits: Vec<u8> = vec![0; (width * height * 4) as usize];
-
-    GetDIBits(
-        Some(hdc),
-        *hbitmap,
-        0,
-        height as u32,
-        Some(bits.as_mut_ptr() as *mut _),
-        &mut bmi,
-        DIB_RGB_COLORS,
-    );
-
-    let _ = ReleaseDC(HWND::default(), hdc);
-
-    // BMP 文件格式
-    let file_size = 14 + 40 + bits.len();
-    let mut file = std::fs::File::create(path).map_err(|e| format!("创建截图文件失败: {e}"))?;
-
-    // BMP 文件头
-    file.write_all(b"BM").map_err(|e| e.to_string())?;
-    file.write_all(&(file_size as u32).to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&[0u8; 4]).map_err(|e| e.to_string())?;
-    file.write_all(&54u32.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-
-    // DIB 头
-    file.write_all(&40u32.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&width.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&height.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&1u16.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&32u16.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&0u32.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&(bits.len() as u32).to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    file.write_all(&[0u8; 16]).map_err(|e| e.to_string())?;
-
-    // BGRA 像素数据
-    file.write_all(&bits).map_err(|e| e.to_string())?;
-
-    Ok(())
 }
