@@ -52,7 +52,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGMjJFMzk5OTZDOTJGRDkKUldUWkw4bVdtZU1pN3c0Tm90TkxybDBxVnVkbW85VDdHUG8vaEpxZVl3RlVSVm9jTkxRUjRsVnUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgOEZCRkNDMDRGMDBDQTQxNApSV1FVcEF6d0JNeS9qM0dGdUpCUUo1ZW5SdUhGeTBxMkhKYlhkMC9jRHhOeG5QcWFnQ1Z0dCt5UAo=",
       "endpoints": [
         "https://github.com/ZASENJC/ttree/releases/latest/download/latest.json"
       ]

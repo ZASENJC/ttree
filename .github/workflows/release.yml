@@ -42,8 +42,12 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      # 使用 tauri-action 构建、签名（自动产出 .sig）、并创建 Release。
+# 使用 tauri-action 构建、签名（自动产出 .sig）、并创建 Release。
       # updaterUrl 指向最新 Release 的 latest.json，应用据此自更新。
+      #
+      # 构建 universal-apple-darwin：单一二进制同时含 arm64 + x86_64，
+      # Intel 与 Apple Silicon 用户装同一份 .dmg/.app 即可原生运行，
+      # 且 `tauri build` 只接受一次 --target（双 target 会被拒绝）。
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -58,4 +62,4 @@ jobs:
           releaseDraft: false
           prerelease: false
           updaterJsonPreferNsis: false
-          args: --target aarch64-apple-darwin --target x86_64-apple-darwin
+          args: --target universal-apple-darwin
