@@ -30,6 +30,12 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # universal-apple-darwin = arm64 + x86_64 合体；runner 默认只装 arm64 目标，
+      # 需显式补装 x86_64，否则 `tauri build --target universal-apple-darwin` 报
+      # "Target x86_64-apple-darwin is not installed"。
+      - name: Add x86_64 target (for universal build)
+        run: rustup target add x86_64-apple-darwin
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -42,7 +48,7 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-# 使用 tauri-action 构建、签名（自动产出 .sig）、并创建 Release。
+      # 使用 tauri-action 构建、签名（自动产出 .sig）、并创建 Release。
       # updaterUrl 指向最新 Release 的 latest.json，应用据此自更新。
       #
       # 构建 universal-apple-darwin：单一二进制同时含 arm64 + x86_64，
