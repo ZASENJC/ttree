@@ -5,11 +5,13 @@
     getOpenAiConfig,
     getPinned,
     getShortcutConfig,
+    getAppearanceConfig,
     setChatAiConfig,
     setOpenAiConfig,
     setPinned,
     setShortcutConfig,
     setShortcutRecording,
+    setAppearanceConfig,
     type ChatAiConfig,
     type OpenAiConfig,
     type ShortcutConfig,
@@ -21,6 +23,8 @@
     type ShortcutField,
   } from "../shortcuts/shortcutRecorder";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+  import { appearance } from "../stores/appearance.svelte";
+  import { updater } from "../stores/update.svelte";
 
   interface Props {
     onClose: () => void;
@@ -28,6 +32,10 @@
   let { onClose }: Props = $props();
 
   let isPinned = $state(false);
+  /** 进入设置页前的固定状态快照；用于离开时恢复（仅当进入前未固定、由本页临时固定时回滚）。 */
+  let pinnedBeforeEnter = false;
+  /** 本页是否主动把窗口临时固定（区分「临时固定」与「用户手动固定」）。 */
+  let pinnedBySettings = false;
 
   let cfg = $state<OpenAiConfig>({
     base_url: "https://api.openai.com/v1",
@@ -68,6 +76,10 @@
   let recordingShortcut = $state<ShortcutField | null>(null);
   const shortcutButtons: Partial<Record<ShortcutField, HTMLButtonElement>> = {};
 
+  // 面板透明度：0–1，实时预览，停止拖动后落盘。
+  let panelOpacity = $state(1);
+  let opacitySaveTimer: ReturnType<typeof setTimeout> | null = null;
+
   const shortcutLabels: Record<ShortcutField, string> = {
     toggle: "呼出翻译",
     ocr: "截图 OCR",
@@ -77,28 +89,52 @@
   };
 
   const shortcutFields: { field: ShortcutField; hint: string }[] = [
-    { field: "toggle", hint: "呼出或收起翻译窗口" },
-    { field: "ocr", hint: "框选屏幕区域并 OCR 翻译" },
-    { field: "ai_dialog", hint: "呼出 AI 对话窗口" },
-    { field: "selection_translate", hint: "捕获选中文本并直接翻译" },
-    { field: "selection_ai_dialog", hint: "捕获选中文本并发送给 AI" },
+    { field: "toggle", hint: "显示或隐藏翻译窗口" },
+    { field: "ocr", hint: "框选屏幕区域，识别文字并翻译" },
+    { field: "ai_dialog", hint: "显示 AI 对话窗口" },
+    { field: "selection_translate", hint: "翻译当前选中的文字" },
+    { field: "selection_ai_dialog", hint: "把选中的文字发给 AI" },
   ];
 
   onMount(async () => {
     cfg = await getOpenAiConfig();
     chatCfg = await getChatAiConfig();
     shortcutCfg = await getShortcutConfig();
-    getPinned().then((pinned) => (isPinned = pinned));
+    // 进入设置页默认固定窗口：填表常需切到别处复制 API Key，固定后失焦不隐藏。
+    // 仅当进入前未固定时临时固定；离开时恢复，避免改变用户原本的固定偏好。
+    const pinned = await getPinned();
+    isPinned = pinned;
+    pinnedBeforeEnter = pinned;
+    if (!pinned) {
+      pinnedBySettings = true;
+      isPinned = await setPinned(true);
+    }
     try {
       autostart = await isEnabled();
     } catch {
       autostart = false;
     }
+    try {
+      const a = await getAppearanceConfig();
+      panelOpacity = a.panel_opacity;
+      appearance.set(panelOpacity);
+    } catch {
+      panelOpacity = 1;
+    }
+    void updater.loadVersion();
   });
 
   onDestroy(() => {
     if (recordingShortcut) {
-      void setShortcutRecording(false);
+      void setShortcutRecording(false).catch(() => {});
+    }
+    if (opacitySaveTimer) {
+      clearTimeout(opacitySaveTimer);
+    }
+    // 离开设置页：若窗口是本页临时固定的（进入前未固定、用户也没手动改），
+    // 恢复到进入前的未固定状态，避免改变用户原本的固定偏好。
+    if (pinnedBySettings && !pinnedBeforeEnter) {
+      void setPinned(false).catch(() => {});
     }
   });
 
@@ -200,6 +236,8 @@
 
   async function togglePinned() {
     isPinned = await setPinned(!isPinned);
+    // 用户手动切换：清除「由本页临时固定」标记，离开时不再自动回滚。
+    pinnedBySettings = false;
   }
 
   async function toggleAutostart() {
@@ -216,6 +254,28 @@
       generalError = "切换开机自启失败，请稍后重试。";
     }
   }
+
+  // 拖动滑块时实时预览；停止拖动后（静默 400ms）再落盘，避免频繁写入。
+  function onOpacityInput(event: Event) {
+    const value = Number((event.currentTarget as HTMLInputElement).value);
+    panelOpacity = value;
+    appearance.set(value);
+    if (opacitySaveTimer) {
+      clearTimeout(opacitySaveTimer);
+    }
+    opacitySaveTimer = setTimeout(() => {
+      void setAppearanceConfig({ panel_opacity: value }).catch(() => {});
+    }, 400);
+  }
+
+  /** 点击「检查更新」：已有待安装版本则直接安装，否则发起检查并在命中时安装。 */
+  async function onCheckUpdate() {
+    const found = await updater.checkForUpdates();
+    if (found) {
+      await updater.downloadAndInstall();
+    }
+  }
+
 </script>
 
 <svelte:window onkeydown={handleShortcutKeydown} />
@@ -255,13 +315,13 @@
     <div class="panel">
       {#if activeSection === "translate"}
         <div class="group">
-          <span class="group-title">AI 翻译配置（OpenAI 兼容）</span>
+          <span class="group-title">AI 翻译（OpenAI 兼容）</span>
           <label class="field">
-            <span>API 地址</span>
+            <span>接口地址</span>
             <input type="text" bind:value={cfg.base_url} placeholder="https://api.openai.com/v1" spellcheck="false" />
           </label>
           <label class="field">
-            <span>API Key</span>
+            <span>API 密钥</span>
             <input type="password" bind:value={cfg.api_key} placeholder="sk-…" spellcheck="false" />
           </label>
           <label class="field">
@@ -270,21 +330,21 @@
           </label>
           <label class="field">
             <span>翻译提示词</span>
-            <textarea bind:value={cfg.translate_prompt} placeholder="使用 &#123;source&#125; 和 &#123;target&#125; 作为语言占位符" spellcheck="false"></textarea>
+            <textarea bind:value={cfg.translate_prompt} placeholder="用 &#123;source&#125; 和 &#123;target&#125; 表示源语言和目标语言" spellcheck="false"></textarea>
           </label>
-          <p class="hint">仅用于翻译页右侧 AI 译文；AI 对话页不会附加这个提示词。</p>
+          <p class="hint">这里只用于翻译页的 AI 译文，不影响 AI 对话。</p>
           <button class="save" onclick={save}>{saved ? "已保存" : "保存"}</button>
         </div>
 
       {:else if activeSection === "chat"}
         <div class="group">
-          <span class="group-title">AI 对话配置（OpenAI 兼容）</span>
+          <span class="group-title">AI 对话（OpenAI 兼容）</span>
           <label class="field">
-            <span>API 地址</span>
+            <span>接口地址</span>
             <input type="text" bind:value={chatCfg.base_url} placeholder="https://api.openai.com/v1" spellcheck="false" />
           </label>
           <label class="field">
-            <span>API Key</span>
+            <span>API 密钥</span>
             <input type="password" bind:value={chatCfg.api_key} placeholder="sk-…" spellcheck="false" />
           </label>
           <label class="field">
@@ -292,10 +352,10 @@
             <input type="text" bind:value={chatCfg.model} placeholder="gpt-4o-mini" spellcheck="false" />
           </label>
           <label class="field">
-            <span>自定义提示词</span>
-            <textarea bind:value={chatCfg.chat_prompt} placeholder="可选，作为 system 提示词附加在对话最前；留空则不附加" spellcheck="false"></textarea>
+            <span>系统提示词</span>
+            <textarea bind:value={chatCfg.chat_prompt} placeholder="可选，会作为系统提示加在对话开头。留空则不加" spellcheck="false"></textarea>
           </label>
-          <p class="hint">仅用于顶部 AI 对话模式；不会使用翻译提示词。提示词留空即关闭。</p>
+          <p class="hint">只用于 AI 对话，不会套用翻译提示词。</p>
           <button class="save" onclick={saveChat}>{chatSaved ? "已保存" : "保存"}</button>
         </div>
 
@@ -313,17 +373,17 @@
                   class:recording={recordingShortcut === field}
                   aria-label={recordingShortcut === field
                     ? "正在录制，按 Esc 取消"
-                    : `当前为 ${shortcutCfg[field] || "未设置"}，点击录制`}
+                    : `${shortcutLabels[field]}，当前 ${shortcutCfg[field] || "未设置"}，点击重新设置`}
                   aria-pressed={recordingShortcut === field}
                   onclick={() => startShortcutRecording(field)}
                 >
                   <span class="shortcut-value">
                     {recordingShortcut === field
-                      ? "按下新的组合键…"
+                      ? "按下新的快捷键…"
                       : shortcutCfg[field] || "未设置"}
                   </span>
                   <span class="shortcut-action">
-                    {recordingShortcut === field ? "Esc 取消" : "点击录制"}
+                    {recordingShortcut === field ? "Esc 取消" : "设置"}
                   </span>
                 </button>
                 <button
@@ -339,23 +399,85 @@
             </div>
           {/each}
           <p class="shortcut-status" aria-live="polite">
-            {recordingShortcut ? `正在录制${shortcutLabels[recordingShortcut]}快捷键，按下包含修饰键的组合键。` : "录制或清空后需点击“保存快捷键”才会生效。"}
+            {recordingShortcut ? `正在录制「${shortcutLabels[recordingShortcut]}」，请按下包含修饰键的组合键。` : "修改后点击“保存快捷键”生效。"}
           </p>
           {#if shortcutError}
             <p class="error" role="alert">{shortcutError}</p>
           {/if}
           <button class="save" onclick={saveShortcuts}>{shortcutSaved ? "已生效" : "保存快捷键"}</button>
-          <p class="hint">每个快捷键都可单独设置或清空（留空即禁用），必须包含 Cmd/Ctrl/Option 修饰键。「呼出翻译」与「划词翻译」、「呼出 AI 对话」与「划词 AI 对话」可设为同一组合：有选中文本时执行划词，否则按呼出处理。示例：<kbd>CmdOrCtrl+Shift+Space</kbd>、<kbd>Option+Space</kbd>。</p>
+          <p class="hint">每个快捷键都能单独设置或清空（留空即关闭）。必须包含 Cmd / Ctrl / Option 修饰键。「呼出翻译」和「划词翻译」、「呼出 AI 对话」和「划词 AI 对话」可以共用同一个键：有选中文本时走划词，没有则走呼出。例如 <kbd>CmdOrCtrl+Shift+Space</kbd>、<kbd>Option+Space</kbd>。</p>
         </div>
 
       {:else if activeSection === "general"}
         <div class="group">
           <span class="group-title">通用</span>
+
+          <div class="opacity-field">
+            <div class="opacity-head">
+              <span>面板透明度</span>
+              <span class="opacity-value">{Math.round(panelOpacity * 100)}%</span>
+            </div>
+            <input
+              class="opacity-slider"
+              type="range"
+              min="0.35"
+              max="1"
+              step="0.01"
+              value={panelOpacity}
+              oninput={onOpacityInput}
+              aria-label="面板透明度"
+            />
+          </div>
+
           <label class="toggle">
             <input type="checkbox" checked={autostart} onchange={toggleAutostart} />
             <span>开机自动启动</span>
           </label>
-          <p class="hint">截图 OCR 需要"屏幕录制"权限。划词捕获优先使用"辅助功能"权限，未授权时会回退到临时复制并尽量恢复剪贴板。</p>
+
+          <div class="update-field">
+            <div class="update-head">
+              <span>版本</span>
+              <span class="update-version">{updater.currentVersion || "—"}</span>
+            </div>
+            {#if updater.releaseNotes}
+              <p class="update-notes">{updater.releaseNotes}</p>
+            {/if}
+            {#if updater.status === "downloading" || updater.status === "installing"}
+              <div class="update-progress">
+                <div class="update-bar" style="width: {Math.round(updater.progress * 100)}%"></div>
+              </div>
+            {/if}
+            <div class="update-actions">
+              <button
+                class="update-btn"
+                onclick={onCheckUpdate}
+                disabled={updater.status === "checking"
+                  || updater.status === "downloading"
+                  || updater.status === "installing"}
+              >
+                {#if updater.status === "checking"}
+                  检查中…
+                {:else if updater.status === "downloading"}
+                  下载中 {Math.round(updater.progress * 100)}%
+                {:else if updater.status === "installing"}
+                  安装中…
+                {:else if updater.status === "available"}
+                  更新到 {updater.newVersion}
+                {:else}
+                  检查更新
+                {/if}
+              </button>
+              {#if updater.message}
+                <span
+                  class="update-msg"
+                  class:error={updater.status === "error"}
+                  aria-live="polite"
+                >{updater.message}</span>
+              {/if}
+            </div>
+          </div>
+
+          <p class="hint">调整面板透明度可让底层桌面透出。截图 OCR 需要"屏幕录制"权限；划词翻译优先使用"辅助功能"权限，未授权时会临时用复制代替。</p>
           {#if generalError}
             <p class="error" role="alert">{generalError}</p>
           {/if}
@@ -367,56 +489,64 @@
 
 <style>
   .settings {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background: var(--surface);
-    border-radius: var(--radius-window);
     overflow: hidden;
+    border-radius: var(--radius-window);
+    background: var(--panel-bg);
   }
   .toolbar {
+    position: relative;
+    z-index: 2;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    padding: var(--space-3) var(--space-4) var(--space-2);
-    border-bottom: 1px solid var(--border);
+    padding: var(--space-2) var(--space-3);
+  }
+  .toolbar::after {
+    content: "";
+    position: absolute;
+    left: var(--space-3);
+    right: var(--space-3);
+    bottom: 0;
+    height: 1px;
+    background: var(--border);
   }
   .title {
     margin: 0;
     font-size: var(--text-lg);
     font-weight: 600;
+    letter-spacing: -0.01em;
   }
   .toolbar-actions {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 2px;
-    border-radius: 999px;
-    background: var(--md-surface-container, var(--surface-sunken));
+    gap: 0;
   }
   .md-icon-button {
     position: relative;
     display: inline-grid;
     place-items: center;
-    width: 40px;
-    height: 40px;
+    width: 34px;
+    height: 34px;
     border: none;
-    border-radius: 999px;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--md-on-surface-variant, var(--text-muted));
+    color: var(--text-muted);
     cursor: pointer;
     overflow: hidden;
     transition:
       color var(--duration-fast) var(--ease),
-      background var(--duration-fast) var(--ease),
-      transform var(--duration-fast) var(--ease);
+      background var(--duration-fast) var(--ease);
   }
   .md-icon-button svg {
     position: relative;
     z-index: 1;
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     fill: currentColor;
   }
   .md-icon-button .state-layer {
@@ -426,62 +556,73 @@
     opacity: 0;
     transition: opacity var(--duration-fast) var(--ease);
   }
-  .md-icon-button:hover .state-layer {
-    opacity: 0.08;
+  .md-icon-button:hover {
+    color: var(--text);
   }
-  .md-icon-button:active {
-    transform: scale(0.96);
+  .md-icon-button:hover .state-layer {
+    opacity: var(--state-hover);
   }
   .md-icon-button:active .state-layer {
-    opacity: 0.12;
+    opacity: var(--state-pressed);
   }
   .md-icon-button.pin.active {
-    background: var(--md-secondary-container, var(--accent-soft));
-    color: var(--md-on-secondary-container, var(--accent));
-    box-shadow: inset 0 0 0 1px oklch(70% 0.16 266 / 0.14);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
   .close {
     border: none;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--accent);
     font-size: var(--text-sm);
-    font-weight: 500;
-    padding: 0 12px;
+    font-weight: 600;
+    padding: 7px 12px;
     cursor: pointer;
+    transition: background var(--duration-fast) var(--ease);
+  }
+  .close:hover {
+    background: var(--accent-soft);
   }
   .layout {
+    position: relative;
+    z-index: 1;
     flex: 1;
     display: grid;
-    grid-template-columns: 120px 1fr;
+    grid-template-columns: 140px 1fr;
     min-height: 0;
   }
   .sidebar {
     display: flex;
     flex-direction: column;
-    padding: var(--space-3) var(--space-2);
-    border-right: 1px solid var(--border);
     gap: 2px;
+    padding: var(--space-2);
+    box-shadow: inset -1px 0 0 var(--border);
   }
   .nav-item {
+    position: relative;
     border: none;
+    border-radius: var(--radius);
     background: transparent;
     color: var(--text-muted);
     font-family: inherit;
     font-size: var(--text-sm);
     font-weight: 500;
     text-align: left;
-    padding: 6px 10px;
-    border-radius: var(--radius-sm);
+    padding: 8px 12px;
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+    overflow: hidden;
+    transition:
+      background var(--duration-fast) var(--ease),
+      color var(--duration-fast) var(--ease);
   }
   .nav-item:hover {
-    background: var(--surface-raised);
+    background: var(--surface-high);
     color: var(--text);
   }
   .nav-item.active {
-    background: var(--accent);
-    color: var(--accent-text);
+    background: var(--accent-container);
+    color: var(--accent-on-container);
+    font-weight: 600;
   }
   .panel {
     overflow-y: auto;
@@ -490,35 +631,39 @@
   .group {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--space-3);
+    max-width: 520px;
   }
   .group-title {
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.07em;
     color: var(--text-faint);
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
   }
   .field span {
     font-size: var(--text-sm);
+    font-weight: 500;
     color: var(--text-muted);
   }
   .field input,
   .field textarea {
     border: 1px solid var(--border);
-    background: var(--surface-raised);
+    background: var(--surface-high);
     color: var(--text);
     font-size: var(--text-base);
-    padding: 7px 10px;
+    padding: 9px 12px;
     border-radius: var(--radius-sm);
     outline: none;
     font-family: inherit;
-    transition: border-color var(--duration-fast) var(--ease);
+    transition:
+      border-color var(--duration-fast) var(--ease),
+      background var(--duration-fast) var(--ease);
   }
   .field textarea {
     min-height: 96px;
@@ -528,6 +673,7 @@
   .field input:focus,
   .field textarea:focus {
     border-color: var(--accent);
+    background: var(--surface-raised);
   }
   .shortcut-row {
     display: flex;
@@ -541,11 +687,11 @@
     justify-content: space-between;
     gap: var(--space-2);
     border: 1px solid var(--border);
-    background: var(--surface-raised);
+    background: var(--surface-high);
     color: var(--text);
     font-family: inherit;
     font-size: var(--text-base);
-    padding: 7px 10px;
+    padding: 9px 12px;
     border-radius: var(--radius-sm);
     outline: none;
     cursor: pointer;
@@ -557,10 +703,12 @@
   .shortcut-recorder:hover,
   .shortcut-recorder:focus-visible {
     border-color: var(--accent);
+    background: var(--surface-raised);
   }
   .shortcut-recorder.recording {
-    background: var(--surface-sunken);
+    background: var(--accent-soft);
     border-color: var(--accent);
+    animation: md-pulse 1.2s var(--ease) infinite;
   }
   .shortcut-value {
     min-width: 0;
@@ -575,23 +723,20 @@
   }
   .shortcut-clear {
     flex: none;
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    color: var(--text-muted);
+    border: none;
+    background: transparent;
+    color: var(--accent);
     font-family: inherit;
     font-size: var(--text-sm);
+    font-weight: 500;
     padding: 0 12px;
     border-radius: var(--radius-sm);
     cursor: pointer;
-    transition:
-      border-color var(--duration-fast) var(--ease),
-      color var(--duration-fast) var(--ease),
-      background var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease);
   }
   .shortcut-clear:hover:not(:disabled),
   .shortcut-clear:focus-visible {
-    border-color: var(--accent);
-    color: var(--accent);
+    background: var(--accent-soft);
   }
   .shortcut-clear:disabled {
     cursor: not-allowed;
@@ -604,20 +749,20 @@
     color: var(--text-muted);
   }
   .field-hint {
-    margin: 2px 0 0;
+    margin: 1px 0 0;
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: 1.45;
     color: var(--text-faint);
   }
   .save {
     align-self: flex-start;
-    margin-top: 4px;
+    margin-top: 2px;
     border: none;
     background: var(--accent);
     color: var(--accent-text);
     font-size: var(--text-sm);
-    font-weight: 500;
-    padding: 7px 18px;
+    font-weight: 600;
+    padding: 8px 20px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: background var(--duration-fast) var(--ease);
@@ -628,22 +773,118 @@
   kbd {
     font-family: inherit;
     font-size: var(--text-xs);
-    background: var(--surface-sunken);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 2px 8px;
+    background: var(--surface-high);
+    border-radius: var(--radius-xs);
+    padding: 2px 6px;
     color: var(--text);
   }
   .toggle {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: var(--space-2);
     font-size: var(--text-sm);
     color: var(--text);
     cursor: pointer;
   }
+  .toggle input {
+    accent-color: var(--accent);
+  }
+  .opacity-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .opacity-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+  .opacity-value {
+    font-variant-numeric: tabular-nums;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+  }
+  .opacity-slider {
+    width: 100%;
+    height: 28px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .update-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .update-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+  .update-version {
+    font-variant-numeric: tabular-nums;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+  }
+  .update-notes {
+    margin: 0;
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+  }
+  .update-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface-high);
+    overflow: hidden;
+  }
+  .update-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width var(--duration) var(--ease);
+  }
+  .update-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .update-btn {
+    border: none;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--duration-fast) var(--ease);
+  }
+  .update-btn:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+  .update-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .update-msg {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+  }
+  .update-msg.error {
+    color: var(--danger);
+  }
   .hint {
-    margin: 4px 0 0;
+    margin: 2px 0 0;
     font-size: var(--text-xs);
     line-height: 1.5;
     color: var(--text-faint);
@@ -652,8 +893,5 @@
     margin: 0;
     font-size: var(--text-xs);
     color: var(--danger);
-    background: var(--danger-soft);
-    border-radius: var(--radius-sm);
-    padding: 6px 8px;
   }
 </style>

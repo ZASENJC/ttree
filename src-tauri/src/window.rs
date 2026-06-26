@@ -38,6 +38,11 @@ pub fn is_main_focused<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(false)
 }
 
+/// 窗口当前是否可见（查询失败时保守返回 false）。
+pub fn is_visible_safe<R: tauri::Runtime>(window: &tauri::Window<R>) -> bool {
+    window.is_visible().unwrap_or(false)
+}
+
 /// 隐藏主窗口。
 pub fn hide_window<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     let _ = window.hide();

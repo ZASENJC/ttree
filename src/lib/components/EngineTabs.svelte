@@ -13,7 +13,8 @@
   ];
 </script>
 
-<div class="segmented" role="tablist" aria-label="模式切换">
+<div class="segmented" role="tablist" aria-label="模式切换" class:chat={mode === "chat"}>
+  <span class="active-pill" aria-hidden="true"></span>
   {#each tabs as tab (tab.id)}
     <button
       role="tab"
@@ -30,34 +31,43 @@
 
 <style>
   .segmented {
+    position: relative;
     display: inline-grid;
     grid-template-columns: repeat(2, 1fr);
+    min-height: 34px;
+    padding: 3px;
     overflow: hidden;
-    border: 1px solid var(--md-outline, var(--border));
-    border-radius: 999px;
-    background: var(--md-surface-container, var(--surface-sunken));
-    box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.05);
+    border-radius: var(--radius);
+  }
+  .active-pill {
+    position: absolute;
+    inset: 3px auto 3px 3px;
+    width: calc(50% - 3px);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    box-shadow: var(--pill-shadow);
+    transition: transform var(--duration) var(--ease-emphasized);
+  }
+  .segmented.chat .active-pill {
+    transform: translateX(100%);
   }
   .segment {
     position: relative;
-    min-width: 72px;
-    min-height: 40px;
+    z-index: 1;
+    min-width: 64px;
+    min-height: 30px;
     border: none;
-    border-right: 1px solid var(--md-outline, var(--border));
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--md-on-surface-variant, var(--text-muted));
+    color: var(--text-muted);
     font-size: var(--text-sm);
     font-weight: 600;
     letter-spacing: 0.01em;
-    padding: 0 16px;
+    padding: 0 14px;
     cursor: pointer;
     overflow: hidden;
     transition:
-      color var(--duration-fast) var(--ease),
-      background var(--duration-fast) var(--ease);
-  }
-  .segment:last-child {
-    border-right: none;
+      color var(--duration-fast) var(--ease);
   }
   .state-layer {
     position: absolute;
@@ -71,13 +81,12 @@
     z-index: 1;
   }
   .segment:hover .state-layer {
-    opacity: 0.08;
+    opacity: var(--state-hover);
   }
   .segment:active .state-layer {
-    opacity: 0.12;
+    opacity: var(--state-pressed);
   }
   .segment.active {
-    background: var(--md-secondary-container, var(--accent-soft));
-    color: var(--md-on-secondary-container, var(--accent));
+    color: var(--text);
   }
 </style>

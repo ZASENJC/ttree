@@ -1,29 +1,63 @@
 /* ─────────────────────────────────────────────
-   设计令牌 — 克制、现代、有层次
-   暖灰中性 + 单一靛蓝强调色，避免模板感
+   Material 3 设计令牌
+   —— 纯扁平化：实色表面 + 小圆角 + MD3 状态层 + 静音色调
+   保留原生 NSVisualEffectMaterial::Popover 通透底，但控件一律实色
    ───────────────────────────────────────────── */
 :root {
-  /* 表面 —— 半透明，配合毛玻璃 */
-  --surface: oklch(99% 0.004 280 / 0.72);
-  --surface-raised: oklch(100% 0 0 / 0.55);
-  --surface-sunken: oklch(96% 0.004 280 / 0.6);
-  --border: oklch(80% 0.008 280 / 0.5);
-  --border-strong: oklch(70% 0.01 280 / 0.6);
+  /* ── MD3 色调方案（浅色） ── */
+  /* 以系统蓝为 seed 色，派生出 MD3 中性 / 强调色调 */
+  --md-primary: oklch(48% 0.19 264);
+  --md-on-primary: oklch(99% 0.01 264);
+  --md-primary-container: oklch(93% 0.04 268);
+  --md-on-primary-container: oklch(20% 0.05 268);
+
+  /* 面板透明度 —— 由「设置 > 通用」滑块实时改写（0–1，默认 1）。
+     用作面板底色 alpha，让底层毛玻璃透出。 */
+  --panel-opacity: 1;
+
+  /* 表面 —— 实色，让控件清晰可辨；整体仍半透明以透出毛玻璃底 */
+  --surface: oklch(98.5% 0.003 264 / 0.86);
+  --surface-raised: oklch(100% 0 0 / 0.92);
+  --surface-sunken: oklch(96% 0.004 264 / 0.86);
+  --surface-popover: oklch(98.5% 0.003 264 / 0.96);
+  --surface-thick: oklch(98.5% 0.003 264);
+  /* 弹层专用 —— 完全不透明，避免悬浮在文本之上时透出底层内容 */
+  --surface-overlay: oklch(99% 0.003 264);
+  --surface-card: oklch(99.5% 0.002 264 / 0.9);
+  --surface-panel: oklch(96.5% 0.004 264 / 0.8);
+  --surface-high: oklch(97% 0.004 264 / 0.92);
+
+  /* 面板底色 —— 跟随透明度滑块；面板容器统一引用此变量。 */
+  --panel-bg: oklch(98.5% 0.003 264 / var(--panel-opacity));
+
+  /* 描边 —— 极淡，默认几乎不可见；主要靠色调表面区分，框线只在交互时浮现 */
+  --border: oklch(72% 0.01 264 / 0.14);
+  --border-strong: oklch(55% 0.012 264 / 0.28);
 
   /* 文本 */
-  --text: oklch(22% 0.01 280);
-  --text-muted: oklch(52% 0.012 280);
-  --text-faint: oklch(65% 0.01 280);
+  --text: oklch(20% 0.01 264);
+  --text-muted: oklch(45% 0.014 264);
+  --text-faint: oklch(55% 0.014 264);
 
-  /* 强调色 —— 靛蓝 */
-  --accent: oklch(58% 0.19 268);
-  --accent-hover: oklch(52% 0.2 268);
-  --accent-soft: oklch(58% 0.19 268 / 0.12);
-  --accent-text: oklch(98% 0 0);
+  /* 强调色 —— MD3 primary，扁平实色 */
+  --accent: var(--md-primary);
+  --accent-hover: oklch(43% 0.18 264);
+  --accent-active: oklch(38% 0.17 264);
+  --accent-soft: oklch(48% 0.19 264 / 0.12);
+  --accent-softer: oklch(48% 0.19 264 / 0.08);
+  --accent-text: var(--md-on-primary);
+  --accent-container: var(--md-primary-container);
+  --accent-on-container: var(--md-on-primary-container);
+  --accent-border: oklch(48% 0.19 264 / 0.6);
+  --accent-border-soft: oklch(48% 0.19 264 / 0.32);
+  --accent-shadow: oklch(48% 0.19 264 / 0.28);
+  --focus-ring: oklch(48% 0.19 264 / 0.5);
 
   /* 状态 */
-  --danger: oklch(58% 0.2 25);
-  --danger-soft: oklch(58% 0.2 25 / 0.12);
+  --danger: oklch(58% 0.22 25);
+  --danger-soft: oklch(58% 0.22 25 / 0.12);
+  --danger-border: oklch(58% 0.22 25 / 0.4);
+  --success: oklch(58% 0.16 150);
 
   /* 字号 —— 流式缩放 */
   --text-xs: 0.75rem;
@@ -39,39 +73,94 @@
   --space-4: 1rem;
   --space-5: 1.5rem;
 
-  /* 圆角 */
-  --radius-sm: 0.5rem;
-  --radius: 0.75rem;
-  --radius-lg: 1rem;
-  --radius-window: 1.25rem;
+  /* 圆角 —— 偏小但有圆润感，避免直角生硬 */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-window: 14px;
 
-  /* 动效 */
+  /* 动效 —— MD3 标准缓动 */
   --duration-fast: 120ms;
   --duration: 200ms;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-slow: 300ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.3, 0, 0, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
 
-  /* 阴影 */
-  --shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.06);
-  --shadow: 0 4px 16px oklch(0% 0 0 / 0.1);
+  /* 滚动条 */
+  --scrollbar-thumb: oklch(20% 0.01 264 / 0.22);
+  --scrollbar-thumb-hover: oklch(20% 0.01 264 / 0.34);
+
+  /* ── MD3 海拔阴影（elevation）—— 扁平、轻量、克制 ── */
+  /* E0: 无阴影（默认表面） */
+  /* E1: 悬浮的卡片/容器 */
+  --shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.1), 0 1px 3px oklch(0% 0 0 / 0.06);
+  /* E2: 浮起按钮 */
+  --shadow: 0 1px 2px oklch(0% 0 0 / 0.1), 0 2px 6px oklch(0% 0 0 / 0.08);
+  /* E3: 弹层/对话框 */
+  --shadow-lg: 0 4px 8px oklch(0% 0 0 / 0.12), 0 1px 3px oklch(0% 0 0 / 0.08);
+  /* E4: 主弹层 */
+  --shadow-pop: 0 6px 12px oklch(0% 0 0 / 0.14), 0 2px 4px oklch(0% 0 0 / 0.1);
+
+  /* MD3 状态层透明度（hover/focus/pressed 叠加） */
+  --state-hover: 0.08;
+  --state-focus: 0.12;
+  --state-pressed: 0.12;
+
+  /* 选中态指示器（分段控件高亮块）—— 纯实色，无光晕 */
+  --pill-shadow: 0 1px 2px oklch(0% 0 0 / 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --surface: oklch(24% 0.01 280 / 0.72);
-    --surface-raised: oklch(30% 0.012 280 / 0.55);
-    --surface-sunken: oklch(20% 0.01 280 / 0.6);
-    --border: oklch(40% 0.012 280 / 0.5);
-    --border-strong: oklch(50% 0.014 280 / 0.6);
+    --md-primary: oklch(72% 0.16 264);
+    --md-on-primary: oklch(16% 0.03 264);
+    --md-primary-container: oklch(30% 0.07 268);
+    --md-on-primary-container: oklch(92% 0.03 268);
 
-    --text: oklch(94% 0.004 280);
-    --text-muted: oklch(70% 0.01 280);
-    --text-faint: oklch(56% 0.01 280);
+    --surface: oklch(20% 0.01 264 / 0.88);
+    --surface-raised: oklch(26% 0.012 264 / 0.92);
+    --surface-sunken: oklch(17% 0.01 264 / 0.86);
+    --surface-popover: oklch(22% 0.012 264 / 0.97);
+    --surface-thick: oklch(20% 0.01 264);
+    --surface-overlay: oklch(26% 0.012 264);
+    --surface-card: oklch(24% 0.012 264 / 0.9);
+    --surface-panel: oklch(18% 0.01 264 / 0.8);
+    --surface-high: oklch(26% 0.012 264 / 0.92);
 
-    --accent: oklch(70% 0.16 266);
-    --accent-hover: oklch(76% 0.16 266);
-    --accent-soft: oklch(70% 0.16 266 / 0.16);
-    --accent-text: oklch(18% 0.02 266);
+    --panel-bg: oklch(20% 0.01 264 / var(--panel-opacity));
 
-    --shadow: 0 8px 28px oklch(0% 0 0 / 0.4);
+    --border: oklch(80% 0.01 264 / 0.12);
+    --border-strong: oklch(90% 0.01 264 / 0.22);
+
+    --text: oklch(95% 0.003 264);
+    --text-muted: oklch(74% 0.01 264);
+    --text-faint: oklch(66% 0.01 264);
+
+    --accent: var(--md-primary);
+    --accent-hover: oklch(78% 0.15 264);
+    --accent-active: oklch(66% 0.16 264);
+    --accent-soft: oklch(72% 0.16 264 / 0.18);
+    --accent-softer: oklch(72% 0.16 264 / 0.1);
+    --accent-text: var(--md-on-primary);
+    --accent-container: var(--md-primary-container);
+    --accent-on-container: var(--md-on-primary-container);
+    --accent-border: oklch(72% 0.16 264 / 0.64);
+    --accent-border-soft: oklch(72% 0.16 264 / 0.34);
+    --accent-shadow: oklch(72% 0.16 264 / 0.32);
+    --focus-ring: oklch(72% 0.16 264 / 0.5);
+
+    --scrollbar-thumb: oklch(95% 0.003 264 / 0.22);
+    --scrollbar-thumb-hover: oklch(95% 0.003 264 / 0.34);
+
+    --shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.4), 0 1px 3px oklch(0% 0 0 / 0.3);
+    --shadow: 0 1px 3px oklch(0% 0 0 / 0.45), 0 2px 6px oklch(0% 0 0 / 0.32);
+    --shadow-lg: 0 4px 10px oklch(0% 0 0 / 0.5), 0 1px 4px oklch(0% 0 0 / 0.35);
+    --shadow-pop: 0 6px 14px oklch(0% 0 0 / 0.55), 0 2px 6px oklch(0% 0 0 / 0.4);
+
+    --pill-shadow: 0 1px 3px oklch(0% 0 0 / 0.45);
   }
 }

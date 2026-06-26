@@ -141,7 +141,7 @@
       bind:value={t.state.input}
       onkeydown={onKeydown}
       class="input"
-      placeholder="输入要翻译的文本，回车翻译"
+      placeholder="输入文字，回车翻译"
       spellcheck="false"
     ></textarea>
   </section>
@@ -179,30 +179,34 @@
 
 <style>
   .panel {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100vh;
     min-height: 0;
-    background: var(--surface);
-    border-radius: var(--radius-window);
     overflow: hidden;
+    border-radius: var(--radius-window);
+    background: var(--panel-bg);
+    /* 阴影交给原生窗口 (tauri shadow:true)，避免双层圆角阴影叠加 */
   }
   .panel.dragging {
     user-select: none;
     cursor: ns-resize;
   }
   .toolbar {
+    position: relative;
+    z-index: 2;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    padding: var(--space-3) var(--space-4) var(--space-2);
+    padding: var(--space-2) var(--space-3);
   }
   .pane {
-    margin-inline: var(--space-4);
+    position: relative;
+    z-index: 1;
     min-height: 0;
     overflow: auto;
-    border-radius: var(--radius);
     scrollbar-width: none;
   }
   .pane::-webkit-scrollbar {
@@ -210,11 +214,18 @@
   }
   .source-pane {
     flex: 0 0 auto;
+    background: var(--surface-panel);
+    box-shadow: inset 0 -1px 0 var(--border);
+    transition: box-shadow var(--duration-fast) var(--ease);
+  }
+  .source-pane:focus-within {
+    box-shadow: inset 0 -2px 0 var(--accent);
   }
   .result-pane {
     flex: 1 1 auto;
     min-height: 120px;
-    margin-bottom: var(--space-4);
+    /* 底部留出窗口圆角的空间，避免内容直角压在圆角窗角上 */
+    padding-bottom: var(--space-2);
   }
   .input {
     width: 100%;
@@ -228,8 +239,9 @@
     background: transparent;
     color: var(--text);
     font-size: var(--text-lg);
-    line-height: 1.5;
+    line-height: 1.55;
     font-family: inherit;
+    padding: var(--space-3) var(--space-4);
   }
   .input::-webkit-scrollbar {
     display: none;
@@ -239,18 +251,14 @@
   }
   .language-strip {
     position: relative;
+    z-index: 2;
     display: flex;
     align-items: center;
     justify-content: flex-start;
     gap: var(--space-3);
-    margin: var(--space-2) var(--space-4) var(--space-2);
-    padding: var(--space-3) 0;
-    border-top: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
-  }
-  .language-strip.active,
-  .language-strip:has(.resize-handle:hover) {
-    border-top-color: var(--accent);
+    padding: var(--space-2) var(--space-4);
+    background: var(--surface);
+    box-shadow: inset 0 -1px 0 var(--border);
   }
   .resize-handle {
     position: absolute;
@@ -263,34 +271,29 @@
   .toolbar-actions {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 2px;
-    border-radius: 999px;
-    background: var(--md-surface-container, var(--surface-sunken));
+    gap: 0;
   }
   .md-icon-button {
     position: relative;
     display: inline-grid;
     place-items: center;
-    width: 40px;
-    height: 40px;
+    width: 34px;
+    height: 34px;
     border: none;
-    border-radius: 999px;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--md-on-surface-variant, var(--text-muted));
+    color: var(--text-muted);
     cursor: pointer;
     overflow: hidden;
     transition:
       color var(--duration-fast) var(--ease),
-      background var(--duration-fast) var(--ease),
-      box-shadow var(--duration-fast) var(--ease),
-      transform var(--duration-fast) var(--ease);
+      background var(--duration-fast) var(--ease);
   }
   .md-icon-button svg {
     position: relative;
     z-index: 1;
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     fill: currentColor;
   }
   .md-icon-button .state-layer {
@@ -300,18 +303,17 @@
     opacity: 0;
     transition: opacity var(--duration-fast) var(--ease);
   }
-  .md-icon-button:hover .state-layer {
-    opacity: 0.08;
+  .md-icon-button:hover {
+    color: var(--text);
   }
-  .md-icon-button:active {
-    transform: scale(0.96);
+  .md-icon-button:hover .state-layer {
+    opacity: var(--state-hover);
   }
   .md-icon-button:active .state-layer {
-    opacity: 0.12;
+    opacity: var(--state-pressed);
   }
   .md-icon-button.pin.active {
-    background: var(--md-secondary-container, var(--accent-soft));
-    color: var(--md-on-secondary-container, var(--accent));
-    box-shadow: inset 0 0 0 1px oklch(70% 0.16 266 / 0.14);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
 </style>

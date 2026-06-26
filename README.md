@@ -1,4 +1,4 @@
-# ttree
+# TTREE
 
 > 轻量 macOS AI 翻译器。快捷键秒级呼出，截图 OCR、划词翻译、AI 对话，多引擎流式输出。
 
@@ -68,7 +68,7 @@ npm run dev
 npm run tauri build    # 产出 .app 与 .dmg
 ```
 
-产物位于 `src-tauri/target/release/bundle/`（含 `bundle/macos/ttree.app` 与 `bundle/dmg/*.dmg`）。
+产物位于 `src-tauri/target/release/bundle/`（含 `bundle/macos/TTREE.app` 与 `bundle/dmg/*.dmg`）。
 
 ## 🏗️ 架构
 

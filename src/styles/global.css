@@ -1,7 +1,7 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
-/* 透明背景 —— 让 macOS 毛玻璃透出来 */
+/* 透明背景 —— 让 macOS 原生 Vibrancy 透出作为底色 */
 html,
 body {
   margin: 0;
@@ -18,11 +18,15 @@ body {
 
 #app {
   height: 100vh;
+  /* 在 webview 整层裁出窗口圆角，任何子元素都不会在圆角处漏出直角，
+     从根上消除「圆角 + 直角叠在一起」。圆角与原生 vibrancy 对齐。 */
+  border-radius: var(--radius-window);
+  overflow: hidden;
 }
 
-/* 全局聚焦态 —— 设计过的焦点环，非浏览器默认 */
+/* 全局聚焦态 —— MD3 primary 描边，克制分明 */
 *:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
@@ -31,22 +35,101 @@ body {
   background: var(--accent-soft);
 }
 
-/* 滚动条 —— 克制 */
+/* ─────────────────────────────────────────────
+   MD3 扁平可复用表面
+   —— 实色填充、纤细描边、无玻璃高光
+   ───────────────────────────────────────────── */
+.md-surface,
+.md-surface-raised,
+.md-popover {
+  border: 1px solid var(--border);
+}
+
+.md-surface {
+  background: var(--surface);
+}
+
+.md-surface-raised {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.md-popover {
+  background: var(--surface-popover);
+  box-shadow: var(--shadow-pop);
+}
+
+/* MD3 状态层 —— 控件 hover/focus/pressed 时叠加的半透明色 */
+.md-state {
+  position: relative;
+  overflow: hidden;
+}
+.md-state::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease);
+}
+.md-state:hover::before {
+  opacity: var(--state-hover);
+}
+.md-state:focus-visible::before {
+  opacity: var(--state-focus);
+}
+.md-state:active::before {
+  opacity: var(--state-pressed);
+}
+
+/* 滚动条 —— 简洁方块，圆角极小 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
+@keyframes md-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes md-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
 }

@@ -18,6 +18,8 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 window-vibrancy = "0.7"
 reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
 futures-util = "0.3"
@@ -27,10 +29,13 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 urlencoding = "2"
 memchr = "2"
+url = "2"
 
 # macOS 原生 OCR（Apple Vision）
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+# macOS Keychain —— 存放 API key，避免明文落盘
+security-framework = "3"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSPasteboard",

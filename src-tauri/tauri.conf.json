@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ttree",
+  "productName": "TTREE",
   "version": "0.1.0",
   "identifier": "com.samwstu.ttree",
   "build": {
@@ -14,8 +14,8 @@
     "windows": [
       {
         "label": "main",
-        "title": "ttree",
-        "width": 680,
+        "title": "TTREE",
+        "width": 480,
         "height": 460,
         "minWidth": 480,
         "minHeight": 300,
@@ -47,6 +47,15 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGMjJFMzk5OTZDOTJGRDkKUldUWkw4bVdtZU1pN3c0Tm90TkxybDBxVnVkbW85VDdHUG8vaEpxZVl3RlVSVm9jTkxRUjRsVnUK",
+      "endpoints": [
+        "https://github.com/ZASENJC/ttree/releases/latest/download/latest.json"
+      ]
     }
   }
 }

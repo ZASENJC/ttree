@@ -23,6 +23,9 @@ pub(crate) fn shared_client(timeout: Duration, cookie_store: bool) -> Client {
         Client::builder()
             .timeout(timeout)
             .cookie_store(cookie_store)
+            // 禁止跟随重定向：OpenAI 兼容接口为单跳 POST，禁止 3xx 可避免
+            // 服务器把带 api_key 的请求重定向到内网/其它地址（防 SSRF 二跳）。
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("构建 HTTP 客户端失败")
     })
@@ -54,6 +57,33 @@ pub struct TranslateRequest {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+/// 允许转发的对话角色（白名单）。其余角色一律拒绝，避免任意 system 注入。
+const ALLOWED_ROLES: &[&str] = &["user", "assistant", "system"];
+/// 单条消息内容长度上限（字节），防御磁盘占用与上游 payload 滥用。
+const MAX_CONTENT_BYTES: usize = 64 * 1024;
+/// 单次对话请求的消息条数上限。
+const MAX_MESSAGES: usize = 200;
+
+/// 校验一组对话消息：角色白名单、单条长度、条数上限。
+/// 在 Tauri 命令边界调用，确保 IPC 来的不可信载荷不会原样落盘或转发上游。
+pub fn validate_messages(msgs: &[ChatMessage]) -> Result<(), String> {
+    if msgs.len() > MAX_MESSAGES {
+        return Err(format!("消息数超出上限 {MAX_MESSAGES} 条"));
+    }
+    for m in msgs {
+        if !ALLOWED_ROLES.contains(&m.role.as_str()) {
+            return Err(format!("非法消息角色: {}", m.role));
+        }
+        if m.content.len() > MAX_CONTENT_BYTES {
+            return Err(format!(
+                "单条消息超出 {} 字节上限",
+                MAX_CONTENT_BYTES
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 流式 chunk 事件载荷（emit 到前端）。

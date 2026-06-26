@@ -21,9 +21,42 @@ export interface ChatMessage {
   content: string;
 }
 
+/** 单段对话：一组消息 + 摘要（首句用户提问，用作列表标题）。 */
+export interface Conversation {
+  /** 该对话在文件中的序号（0 = 最旧），唯一标识。 */
+  id: number;
+  messages: ChatMessage[];
+  summary: string;
+}
+
 /** 普通 AI 对话：不附加翻译提示词，结果通过 chat-chunk 事件返回。 */
 export function chat(messages: ChatMessage[]): Promise<void> {
   return invoke<void>("chat", { messages });
+}
+
+/** 读取全部对话历史（扁平消息流，向后兼容）。 */
+export function loadChatHistory(): Promise<ChatMessage[]> {
+  return invoke<ChatMessage[]>("load_chat_history");
+}
+
+/** 以对话为单位读取历史（按 session_start 标记切分）。 */
+export function loadConversations(): Promise<Conversation[]> {
+  return invoke<Conversation[]>("load_conversations");
+}
+
+/** 写入对话分隔标记，开启一段新对话（不删除已有历史）。 */
+export function startNewConversation(): Promise<void> {
+  return invoke<void>("start_new_conversation");
+}
+
+/** 追加一轮对话到历史文件（追加写，不重写）。 */
+export function appendChatHistory(round: ChatMessage[]): Promise<void> {
+  return invoke<void>("append_chat_history", { round });
+}
+
+/** 清空全部对话历史（删除历史文件）。 */
+export function clearChatHistory(): Promise<void> {
+  return invoke<void>("clear_chat_history");
 }
 
 /** 订阅 AI 对话 chunk 事件。 */
@@ -91,6 +124,11 @@ export interface ShortcutConfig {
   selection_ai_dialog: string;
 }
 
+export interface AppearanceConfig {
+  /** 面板整体透明度，0–1。后端会钳制到合法范围。 */
+  panel_opacity: number;
+}
+
 export interface SelectedTranslatePayload {
   text: string;
 }
@@ -132,6 +170,16 @@ export function setShortcutConfig(config: ShortcutConfig): Promise<void> {
 /** 录制快捷键时临时忽略全局快捷键触发。 */
 export function setShortcutRecording(active: boolean): Promise<void> {
   return invoke<void>("set_shortcut_recording", { active });
+}
+
+/** 读取外观配置（面板透明度等）。 */
+export function getAppearanceConfig(): Promise<AppearanceConfig> {
+  return invoke<AppearanceConfig>("get_appearance_config");
+}
+
+/** 保存外观配置。 */
+export function setAppearanceConfig(config: AppearanceConfig): Promise<void> {
+  return invoke<void>("set_appearance_config", { config });
 }
 
 /** 订阅托盘"设置"菜单事件。 */

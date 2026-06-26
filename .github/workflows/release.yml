@@ -1,0 +1,61 @@
+name: release
+
+# 触发条件：推送 v* 开头的标签时构建并发布 macOS 更新包到 GitHub Releases。
+# 工作流会生成 latest.json 与签名后的 .tar.gz 更新包，
+# 应用通过 https://github.com/ZASENJC/ttree/releases/latest/download/latest.json 拉取更新。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# 同一标签重复推送时取消旧任务。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # 使用 tauri-action 构建、签名（自动产出 .sig）、并创建 Release。
+      # updaterUrl 指向最新 Release 的 latest.json，应用据此自更新。
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 签名私钥与其口令均为仓库 Secret，切勿提交明文。
+          # 私钥应设置强口令：泄漏的私钥若无第二因子可直接签发被自动接受的更新（RCE 风险）。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "TTREE ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          updaterJsonPreferNsis: false
+          args: --target aarch64-apple-darwin --target x86_64-apple-darwin

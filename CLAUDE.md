@@ -72,6 +72,31 @@ npm run tauri build
 
 Build outputs are under `src-tauri/target/release/bundle/`, including `bundle/macos/ttree.app` and `bundle/dmg/*.dmg`.
 
+## Release Process (应用内更新)
+
+The app self-updates via the Tauri Updater plugin. Releases are built and signed by CI, then published to GitHub Releases; installed apps fetch `latest.json` from the repo and update in place.
+
+**When the user asks to publish a new version, follow these steps in order:**
+
+1. **Bump the version in both places** (they must match) and commit:
+   - `package.json` → `"version"`
+   - `src-tauri/tauri.conf.json` → `"version"`
+2. **Verify locally** before tagging:
+   ```bash
+   npm run check && npm test
+   cd src-tauri && cargo check && cd ..
+   ```
+3. **Tag and push the tag** (triggers the release workflow on `v*` tags):
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+4. CI (`.github/workflows/release.yml`) builds `aarch64-apple-darwin` + `x86_64-apple-darwin`, signs with `TAURI_SIGNING_PRIVATE_KEY` (repo secret), and creates the GitHub Release with `latest.json`.
+5. Watch the run: `gh run watch -R ZASENJC/ttree` (or check https://github.com/ZASENJC/ttree/actions). Confirm the Release exists and lists `latest.json` + the signed `.tar.gz`/`.sig` assets.
+6. Installed apps auto-check for updates on startup and every 6h, hitting the network only once ≥7 days since the last check; users install from 设置 → 通用. New installs get the latest Release immediately.
+
+**Prerequisites (already done, do not repeat):** signing keys live at `~/.config/ttree-updater/` on this machine; the public key is in `tauri.conf.json` and the private key is in the `TAURI_SIGNING_PRIVATE_KEY` repo secret. The private key **must carry a strong passphrase**: without a second factor, anyone who exfiltrates the key can sign an updater package that installed apps auto-accept (RCE). The passphrase lives in macOS Keychain (account `updater-signing-password`, service `com.samwstu.ttree`) for local builds and in the `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secret for CI. To build a signed update locally instead of via CI: `source ./scripts/signing-env.sh && npm run tauri build` — the script reads the passphrase from Keychain automatically. If the key was ever stored unencrypted, rotate it: generate a new minisign keypair with a passphrase, update `tauri.conf.json` pubkey, and ship one release on the old key that bumps users to the new key.
+
 ## Architecture
 
 ### Tauri / Rust backend

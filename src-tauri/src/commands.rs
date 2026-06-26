@@ -2,7 +2,8 @@
 
 use tauri::{AppHandle, Runtime};
 
-use crate::config::{self, ChatAiConfig, OpenAiConfig, ShortcutConfig};
+use crate::config::{self, AppearanceConfig, ChatAiConfig, OpenAiConfig, ShortcutConfig};
+use crate::history;
 use crate::ocr;
 use crate::screenshot;
 use crate::shortcut;
@@ -76,6 +77,7 @@ pub async fn chat<R: Runtime>(
     if messages.is_empty() {
         return Ok(());
     }
+    translate::validate_messages(&messages)?;
     let cfg = config::load_chat_ai(&app);
     translate::openai::chat_stream(&app, &cfg, &messages).await
 }
@@ -84,6 +86,21 @@ pub async fn chat<R: Runtime>(
 #[tauri::command]
 pub fn get_pinned() -> bool {
     window::is_pinned()
+}
+
+/// 读取外观配置。
+#[tauri::command]
+pub fn get_appearance_config<R: Runtime>(app: AppHandle<R>) -> AppearanceConfig {
+    config::load_appearance(&app)
+}
+
+/// 保存外观配置。
+#[tauri::command]
+pub fn set_appearance_config<R: Runtime>(
+    app: AppHandle<R>,
+    config: AppearanceConfig,
+) -> Result<(), String> {
+    crate::config::save_appearance(&app, &config)
 }
 
 /// 设置固定窗口状态。固定时置顶且失焦不隐藏。
@@ -141,4 +158,40 @@ pub async fn screenshot_ocr() -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("OCR 任务失败: {e}"))?
+}
+
+/// 读取全部 AI 对话历史（JSONL 流式解析，损坏行容错）。
+#[tauri::command]
+pub fn load_chat_history<R: Runtime>(app: AppHandle<R>) -> Result<Vec<ChatMessage>, String> {
+    history::read_all(&app)
+}
+
+/// 以对话为单位读取历史（按 session_start 标记切分）。
+#[tauri::command]
+pub fn load_conversations<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<history::Conversation>, String> {
+    history::read_conversations(&app)
+}
+
+/// 写入对话分隔标记，开启一段新对话（不影响已有历史）。
+#[tauri::command]
+pub fn start_new_conversation<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    history::start_new_conversation(&app)
+}
+
+/// 追加一轮对话到历史文件（追加写、永不重写）。
+#[tauri::command]
+pub fn append_chat_history<R: Runtime>(
+    app: AppHandle<R>,
+    round: Vec<ChatMessage>,
+) -> Result<(), String> {
+    translate::validate_messages(&round)?;
+    history::append_round(&app, &round)
+}
+
+/// 清空全部对话历史（删除历史文件）。
+#[tauri::command]
+pub fn clear_chat_history<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    history::clear(&app)
 }

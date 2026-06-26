@@ -40,24 +40,32 @@
   .lang-row {
     display: inline-flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-1);
   }
   .lang {
     appearance: none;
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    color: var(--text);
-    font-size: var(--text-sm);
-    padding: 4px 10px;
+    min-height: 28px;
+    border: none;
     border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    padding: 4px 6px;
     cursor: pointer;
-    transition: border-color var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease);
   }
   .lang:hover {
-    border-color: var(--border-strong);
+    background: var(--accent-soft);
+  }
+  .lang:focus-visible {
+    outline: none;
+    background: var(--accent-soft);
   }
   .arrow {
     color: var(--text-faint);
     font-size: var(--text-sm);
+    font-weight: 700;
   }
 </style>

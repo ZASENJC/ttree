@@ -13,7 +13,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "翻译", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 ttree", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 TTREE", true, None::<&str>)?;
 
     let menu = Menu::with_items(app, &[&open, &settings, &sep, &quit])?;
 

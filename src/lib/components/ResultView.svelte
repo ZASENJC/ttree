@@ -64,7 +64,7 @@
           }}
           aria-haspopup="listbox"
           aria-expanded={engineMenuOpen}
-          aria-label={`翻译源：${WEB_ENGINE_LABELS[webEngine]}，点击切换`}
+          aria-label={`翻译引擎：${WEB_ENGINE_LABELS[webEngine]}，点击切换`}
         >
           {WEB_ENGINE_LABELS[webEngine]}
           <svg class="caret-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -106,7 +106,7 @@
     {:else if webLoading}
       <p class="placeholder">翻译中…</p>
     {:else}
-      <p class="placeholder">译文将显示在这里</p>
+      <p class="placeholder">译文显示在这里</p>
     {/if}
   </section>
 
@@ -127,7 +127,7 @@
     {:else if aiLoading}
       <p class="placeholder">AI 翻译中…</p>
     {:else}
-      <p class="placeholder">AI 译文将显示在这里</p>
+      <p class="placeholder">AI 译文显示在这里</p>
     {/if}
   </section>
 </div>
@@ -136,22 +136,25 @@
   .result-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: var(--space-4);
     min-height: 100%;
-    padding: var(--space-3) 0;
   }
   .global-error {
     grid-column: 1 / -1;
   }
   .column {
+    position: relative;
     min-width: 0;
-    padding-right: var(--space-3);
+    min-height: 100%;
+    padding: var(--space-3) var(--space-4) var(--space-2);
+    overflow: hidden;
   }
-  .ai-column {
-    padding-left: var(--space-4);
-    border-left: 1px solid var(--border);
+  /* 两列之间只留一条细分隔线，不用卡片框 */
+  .column + .column {
+    box-shadow: inset 1px 0 0 var(--border);
   }
   .column-head {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -160,7 +163,7 @@
     color: var(--text-faint);
     font-size: var(--text-xs);
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.07em;
     text-transform: uppercase;
   }
   .engine-select {
@@ -170,40 +173,50 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
+    min-height: 24px;
     border: none;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-faint);
     font-family: inherit;
     font-size: var(--text-xs);
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.07em;
     text-transform: uppercase;
-    padding: 2px 4px 2px 0;
+    padding: 3px 6px;
+    margin-left: -6px;
     cursor: pointer;
-    border-radius: var(--radius-sm);
-    transition: color var(--duration-fast) var(--ease);
+    transition:
+      color var(--duration-fast) var(--ease),
+      background var(--duration-fast) var(--ease);
   }
-  .engine-trigger:hover {
+  .engine-trigger:hover,
+  .engine-trigger[aria-expanded="true"] {
     color: var(--accent);
+    background: var(--accent-soft);
   }
   .caret-icon {
     width: 14px;
     height: 14px;
     fill: currentColor;
+    transition: transform var(--duration-fast) var(--ease);
+  }
+  .engine-trigger[aria-expanded="true"] .caret-icon {
+    transform: rotate(180deg);
   }
   .engine-menu {
     position: absolute;
-    top: calc(100% + 4px);
+    top: calc(100% + 6px);
     left: 0;
     z-index: 10;
+    min-width: 132px;
     margin: 0;
     padding: 4px;
     list-style: none;
-    min-width: 120px;
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    box-shadow: 0 8px 24px oklch(0% 0 0 / 0.18);
+    border-radius: var(--radius);
+    background: var(--surface-overlay);
+    box-shadow: var(--shadow-pop);
+    animation: md-pop-in var(--duration) var(--ease);
   }
   .engine-option {
     width: 100%;
@@ -211,45 +224,49 @@
     align-items: center;
     justify-content: space-between;
     border: none;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text);
     font-family: inherit;
     font-size: var(--text-sm);
     text-align: left;
-    padding: 6px 10px;
-    border-radius: var(--radius-sm);
+    padding: 7px 10px;
     cursor: pointer;
     transition:
       color var(--duration-fast) var(--ease),
       background var(--duration-fast) var(--ease);
   }
   .engine-option:hover {
-    background: var(--surface-sunken);
+    background: var(--surface-high);
   }
   .engine-option.active {
     color: var(--accent);
     font-weight: 600;
+    background: var(--accent-soft);
   }
   .output {
+    position: relative;
+    z-index: 1;
     margin: 0;
     font-size: var(--text-lg);
-    line-height: 1.6;
+    line-height: 1.62;
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
   }
   .placeholder {
+    position: relative;
+    z-index: 1;
     margin: 0;
     font-size: var(--text-base);
     color: var(--text-faint);
   }
   .error {
+    position: relative;
+    z-index: 1;
     margin: 0;
     font-size: var(--text-sm);
     color: var(--danger);
-    padding: var(--space-2) var(--space-3);
-    background: var(--danger-soft);
-    border-radius: var(--radius-sm);
   }
   .caret {
     display: inline-block;
@@ -258,6 +275,7 @@
     margin-left: 1px;
     vertical-align: text-bottom;
     background: var(--accent);
+    border-radius: var(--radius-xs);
     animation: blink 1s steps(2, start) infinite;
   }
   @keyframes blink {
@@ -266,11 +284,17 @@
     }
   }
   .copy {
+    position: relative;
+    z-index: 1;
     border: none;
-    background: var(--surface-sunken);
-    color: var(--text-muted);
+    background: transparent;
+    color: var(--text-faint);
     font-size: var(--text-xs);
-    padding: 3px 8px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    padding: 3px 6px;
+    margin-right: -6px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition:
@@ -286,11 +310,8 @@
     .result-grid {
       grid-template-columns: 1fr;
     }
-    .ai-column {
-      padding-left: 0;
-      padding-top: var(--space-3);
-      border-left: none;
-      border-top: 1px solid var(--border);
+    .column + .column {
+      box-shadow: inset 0 1px 0 var(--border);
     }
   }
 </style>
