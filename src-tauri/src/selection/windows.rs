@@ -27,6 +27,7 @@ const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct KEYBDINPUT {
     wVk: u16,
     wScan: u16,
@@ -36,12 +37,14 @@ struct KEYBDINPUT {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 union INPUT_0 {
     ki: KEYBDINPUT,
     _padding: [u8; 24],
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct INPUT {
     r#type: u32,
     Anonymous: INPUT_0,

@@ -62,8 +62,8 @@ objc2-vision = { version = "0.3", features = [
     "VNTypes",
 ] }
 
-# Windows 原生 API（OCR via Windows.Media.Ocr）
-# 截图和选中文本捕获使用纯 Win32 FFI，不依赖 windows crate 的 Win32 模块。
+# Windows 原生 OCR (Windows.Media.Ocr WinRT API)
+# 截图和选中文本捕获使用纯 Win32 FFI，不依赖 windows crate。
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = "3"
 windows = { version = "0.58", features = [
