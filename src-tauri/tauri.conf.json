@@ -48,6 +48,11 @@
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
     "createUpdaterArtifacts": true
   },
   "plugins": {

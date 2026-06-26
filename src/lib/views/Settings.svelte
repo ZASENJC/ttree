@@ -25,6 +25,7 @@
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
   import { appearance } from "../stores/appearance.svelte";
   import { updater } from "../stores/update.svelte";
+  import { isMacOS } from "../platform";
 
   interface Props {
     onClose: () => void;
@@ -477,7 +478,11 @@
             </div>
           </div>
 
-          <p class="hint">调整面板透明度可让底层桌面透出。截图 OCR 需要"屏幕录制"权限；划词翻译优先使用"辅助功能"权限，未授权时会临时用复制代替。</p>
+          {#if isMacOS}
+            <p class="hint">调整面板透明度可让底层桌面透出。截图 OCR 需要"屏幕录制"权限；划词翻译优先使用"辅助功能"权限，未授权时会临时用复制代替。</p>
+          {:else}
+            <p class="hint">调整面板透明度可让底层桌面透出。截图 OCR 和划词翻译在 Windows 上无需额外权限。</p>
+          {/if}
           {#if generalError}
             <p class="error" role="alert">{generalError}</p>
           {/if}

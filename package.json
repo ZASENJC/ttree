@@ -1,7 +1,7 @@
 {
   "name": "ttree",
   "version": "0.1.0",
-  "description": "轻量 macOS AI 翻译器",
+  "description": "轻量 AI 翻译器",
   "type": "module",
   "scripts": {
     "dev": "vite",

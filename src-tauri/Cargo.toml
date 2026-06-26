@@ -1,7 +1,7 @@
 [package]
 name = "ttree"
 version = "0.1.0"
-description = "轻量 macOS AI 翻译器"
+description = "轻量 AI 翻译器"
 authors = ["you"]
 edition = "2021"
 
@@ -60,4 +60,22 @@ objc2-vision = { version = "0.3", features = [
     "VNObservation",
     "VNRequestHandler",
     "VNTypes",
+] }
+
+# Windows 原生 API（OCR、UI Automation、剪贴板、截图）
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = "3"
+windows = { version = "0.58", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage",
+    "Storage_Streams",
+    "Win32_System_Com",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }

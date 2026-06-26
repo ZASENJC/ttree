@@ -4,6 +4,7 @@
   import { getPinned, setPinned, type ChatMessage } from "../api/tauri";
   import EngineTabs, { type MainMode } from "../components/EngineTabs.svelte";
   import { chatStore } from "../stores/chat.svelte";
+  import { isMacOS } from "../platform";
 
   interface Props {
     mode: MainMode;
@@ -148,7 +149,8 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && !e.metaKey) {
+    const modifierPressed = isMacOS ? e.metaKey : e.ctrlKey;
+    if (e.key === "Enter" && !e.shiftKey && !modifierPressed) {
       e.preventDefault();
       c.send();
     }

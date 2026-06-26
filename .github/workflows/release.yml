@@ -1,7 +1,7 @@
 name: release
 
-# 触发条件：推送 v* 开头的标签时构建并发布 macOS 更新包到 GitHub Releases。
-# 工作流会生成 latest.json 与签名后的 .tar.gz 更新包，
+# 触发条件：推送 v* 开头的标签时构建并发布 macOS 和 Windows 更新包到 GitHub Releases。
+# 工作流会生成 latest.json 与签名后的更新包，
 # 应用通过 https://github.com/ZASENJC/ttree/releases/latest/download/latest.json 拉取更新。
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release:
+  release-macos:
     permissions:
       contents: write
     runs-on: macos-latest
@@ -69,3 +69,43 @@ jobs:
           prerelease: false
           updaterJsonPreferNsis: false
           args: --target universal-apple-darwin
+
+  release-windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "TTREE ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          updaterJsonPreferNsis: true

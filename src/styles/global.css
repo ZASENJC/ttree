@@ -1,7 +1,7 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
-/* 透明背景 —— 让 macOS 原生 Vibrancy 透出作为底色 */
+/* 透明背景 —— 让 macOS Vibrancy / Windows Mica 透出作为底色 */
 html,
 body {
   margin: 0;
@@ -10,7 +10,7 @@ body {
   overflow: hidden;
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
-    "Helvetica Neue", sans-serif;
+    "Segoe UI", "Microsoft YaHei", "Helvetica Neue", sans-serif;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;

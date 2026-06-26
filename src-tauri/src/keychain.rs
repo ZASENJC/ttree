@@ -1,8 +1,11 @@
-//! macOS Keychain 封装 —— 把敏感凭据（API key）存进系统钥匙串，
+//! 凭据安全存储封装 —— 把敏感凭据（API key）存进系统钥匙串，
 //! 避免明文落盘到 settings.json。
 //!
+//! - macOS: 使用 `security-framework` 访问 Keychain (generic password)
+//! - Windows/Linux: 使用跨平台 `keyring` crate (Windows Credential Manager / Secret Service)
+//!
 //! 用「通用密码」(generic password) 项存储，service 固定为 bundle id，
-//! account 区分不同 key。非 macOS 平台返回错误（本项目仅面向 macOS）。
+//! account 区分不同 key。
 
 #[cfg(target_os = "macos")]
 use security_framework::passwords;
@@ -16,7 +19,10 @@ pub const ACCOUNT_OPENAI_KEY: &str = "openai.api_key";
 pub const ACCOUNT_CHAT_AI_KEY: &str = "chat_ai.api_key";
 
 /// errSecItemNotFound：Keychain 中找不到该条目（首次使用属正常情况）。
+#[cfg(target_os = "macos")]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+// ── macOS 实现：security-framework ──────────────────────────────────
 
 /// 读取一个凭据。项不存在时返回 `Ok(None)`（首次使用），其余错误原样上抛。
 #[cfg(target_os = "macos")]
@@ -54,16 +60,35 @@ pub fn delete_secret(account: &str) -> Result<(), String> {
     }
 }
 
-// ── 非 macOS 占位：本项目目前仅面向 macOS，这里仅作编译护栏 ──
+// ── 非 macOS 实现：keyring crate (Windows Credential Manager / Linux Secret Service) ──
+
 #[cfg(not(target_os = "macos"))]
-pub fn get_secret(_account: &str) -> Result<Option<String>, String> {
-    Err("此平台不支持 Keychain".to_string())
+pub fn get_secret(account: &str) -> Result<Option<String>, String> {
+    use keyring::Entry;
+    let entry = Entry::new(SERVICE, account).map_err(|e| format!("创建凭据条目失败: {e}"))?;
+    match entry.get_password() {
+        Ok(v) => Ok(Some(v)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("读取凭据失败: {e}")),
+    }
 }
+
 #[cfg(not(target_os = "macos"))]
-pub fn set_secret(_account: &str, _value: &str) -> Result<(), String> {
-    Err("此平台不支持 Keychain".to_string())
+pub fn set_secret(account: &str, value: &str) -> Result<(), String> {
+    use keyring::Entry;
+    let entry = Entry::new(SERVICE, account).map_err(|e| format!("创建凭据条目失败: {e}"))?;
+    entry
+        .set_password(value)
+        .map_err(|e| format!("写入凭据失败: {e}"))
 }
+
 #[cfg(not(target_os = "macos"))]
-pub fn delete_secret(_account: &str) -> Result<(), String> {
-    Err("此平台不支持 Keychain".to_string())
+pub fn delete_secret(account: &str) -> Result<(), String> {
+    use keyring::Entry;
+    let entry = Entry::new(SERVICE, account).map_err(|e| format!("创建凭据条目失败: {e}"))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("删除凭据失败: {e}")),
+    }
 }

@@ -1,4 +1,4 @@
-//! TTREE —— 轻量 macOS AI 翻译器后端入口。
+//! TTREE —— 轻量 AI 翻译器后端入口。
 
 mod commands;
 mod config;
@@ -16,6 +16,9 @@ use tauri::{Manager, WindowEvent};
 
 #[cfg(target_os = "macos")]
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+
+#[cfg(target_os = "windows")]
+use window_vibrancy::{apply_acrylic, apply_mica};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -52,8 +55,8 @@ pub fn run() {
             commands::clear_chat_history
         ])
         .setup(|app| {
-            // 应用毛玻璃磨砂底色 —— Material 3 扁平风格：保留 Popover 通透材质作为窗口底，
-            // 圆角与 CSS 的 --radius-window(14px) 对齐，控件一律走实色表面。
+            // ── 窗口模糊效果 ──
+            // macOS: Vibrancy (Popover 材质)
             #[cfg(target_os = "macos")]
             if let Some(win) = app.get_webview_window(window::MAIN_WINDOW) {
                 let _ = apply_vibrancy(
@@ -62,6 +65,14 @@ pub fn run() {
                     Some(NSVisualEffectState::Active),
                     Some(14.0),
                 );
+            }
+
+            // Windows: Mica (Win11) 优先，fallback Acrylic (Win10)
+            #[cfg(target_os = "windows")]
+            if let Some(win) = app.get_webview_window(window::MAIN_WINDOW) {
+                if apply_mica(&win, Some(true)).is_err() {
+                    let _ = apply_acrylic(&win, Some((0, 0, 0, 100)));
+                }
             }
 
             // 恢复上次用户调整后的窗口尺寸；缺失则沿用配置默认值（最小宽度）。

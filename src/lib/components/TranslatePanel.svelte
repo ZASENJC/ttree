@@ -6,6 +6,7 @@
   import EngineTabs, { type MainMode } from "./EngineTabs.svelte";
   import LangSelector from "./LangSelector.svelte";
   import ResultView from "./ResultView.svelte";
+  import { isMacOS } from "../platform";
 
   const MIN_SOURCE_HEIGHT = 88;
   const MIN_RESULT_HEIGHT = 120;
@@ -52,8 +53,9 @@
   });
 
   function onKeydown(e: KeyboardEvent) {
-    // Enter 翻译；Cmd/Shift+Enter 换行
-    if (e.key === "Enter" && !e.metaKey && !e.shiftKey) {
+    // Enter 翻译；Cmd(macOS)/Ctrl(Windows)+Enter 换行
+    const modifierPressed = isMacOS ? e.metaKey : e.ctrlKey;
+    if (e.key === "Enter" && !modifierPressed && !e.shiftKey) {
       e.preventDefault();
       t.run();
     }

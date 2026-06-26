@@ -156,7 +156,8 @@ function getModifierParts(event: ShortcutKeyboardEvent): string[] {
   }
 
   if (event.altKey) {
-    parts.push("Option");
+    // Windows 上显示 Alt，macOS 上显示 Option
+    parts.push(navigator.userAgent.includes("Win") ? "Alt" : "Option");
   }
 
   if (event.shiftKey) {
