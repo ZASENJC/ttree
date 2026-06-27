@@ -25,7 +25,7 @@
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
   import { appearance } from "../stores/appearance.svelte";
   import { updater } from "../stores/update.svelte";
-  import { isMacOS } from "../platform";
+  import { isMacOS, isWindows } from "../platform";
 
   interface Props {
     onClose: () => void;
@@ -52,8 +52,8 @@
     chat_prompt: "",
   });
   let shortcutCfg = $state<ShortcutConfig>({
-    toggle: "CmdOrCtrl+Shift+Space",
-    ocr: "CmdOrCtrl+Shift+S",
+    toggle: isWindows ? "Alt+Space" : "CmdOrCtrl+Shift+Space",
+    ocr: isWindows ? "" : "CmdOrCtrl+Shift+S",
     ai_dialog: "",
     selection_translate: "",
     selection_ai_dialog: "",
@@ -406,7 +406,7 @@
             <p class="error" role="alert">{shortcutError}</p>
           {/if}
           <button class="save" onclick={saveShortcuts}>{shortcutSaved ? "已生效" : "保存快捷键"}</button>
-          <p class="hint">每个快捷键都能单独设置或清空（留空即关闭）。必须包含 Cmd / Ctrl / Option 修饰键。「呼出翻译」和「划词翻译」、「呼出 AI 对话」和「划词 AI 对话」可以共用同一个键：有选中文本时走划词，没有则走呼出。例如 <kbd>CmdOrCtrl+Shift+Space</kbd>、<kbd>Option+Space</kbd>。</p>
+          <p class="hint">每个快捷键都能单独设置或清空（留空即关闭）。必须包含 Cmd / Ctrl / Alt 修饰键。「呼出翻译」和「划词翻译」、「呼出 AI 对话」和「划词 AI 对话」可以共用同一个键：有选中文本时走划词，没有则走呼出。例如 <kbd>{isWindows ? "Alt+Space" : "CmdOrCtrl+Shift+Space"}</kbd>、<kbd>{isWindows ? "Ctrl+Shift+Space" : "Option+Space"}</kbd>。</p>
         </div>
 
       {:else if activeSection === "general"}

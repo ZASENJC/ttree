@@ -122,12 +122,25 @@ pub struct ShortcutConfig {
 
 impl Default for ShortcutConfig {
     fn default() -> Self {
-        Self {
-            toggle: "CmdOrCtrl+Shift+Space".to_string(),
-            ocr: "CmdOrCtrl+Shift+S".to_string(),
-            ai_dialog: String::new(),
-            selection_translate: String::new(),
-            selection_ai_dialog: String::new(),
+        #[cfg(target_os = "windows")]
+        {
+            Self {
+                toggle: "Alt+Space".to_string(),
+                ocr: String::new(),
+                ai_dialog: String::new(),
+                selection_translate: String::new(),
+                selection_ai_dialog: String::new(),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Self {
+                toggle: "CmdOrCtrl+Shift+Space".to_string(),
+                ocr: "CmdOrCtrl+Shift+S".to_string(),
+                ai_dialog: String::new(),
+                selection_translate: String::new(),
+                selection_ai_dialog: String::new(),
+            }
         }
     }
 }

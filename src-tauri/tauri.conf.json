@@ -26,7 +26,7 @@
         "visible": false,
         "skipTaskbar": true,
         "center": true,
-        "shadow": true,
+        "shadow": false,
         "titleBarStyle": "Overlay"
       }
     ],

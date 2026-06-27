@@ -56,7 +56,7 @@ pub fn run() {
         ])
         .setup(|app| {
             // ── 窗口模糊效果 ──
-            // macOS: Vibrancy (Popover 材质)
+            // macOS: Vibrancy (Popover 材质) + 原生窗口阴影
             #[cfg(target_os = "macos")]
             if let Some(win) = app.get_webview_window(window::MAIN_WINDOW) {
                 let _ = apply_vibrancy(
@@ -65,9 +65,11 @@ pub fn run() {
                     Some(NSVisualEffectState::Active),
                     Some(14.0),
                 );
+                let _ = win.set_shadow(true);
             }
 
             // Windows: Mica (Win11) 优先，fallback Acrylic (Win10)
+            // 不启用窗口阴影，避免圆角处露出黑色阴影。
             #[cfg(target_os = "windows")]
             if let Some(win) = app.get_webview_window(window::MAIN_WINDOW) {
                 if apply_mica(&win, Some(true)).is_err() {
