@@ -1,7 +1,7 @@
 //! 屏幕区域截图。
 //!
 //! - macOS: 调用系统 `screencapture -i` 让用户框选。
-//! - Windows: 全屏截图到临时 BMP 文件，后续由前端处理区域选择。
+//! - Windows: 通过 GDI 全屏截图，保存为 PNG 文件供 OCR 使用。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,13 +50,11 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
 
 // ── Windows 实现 ────────────────────────────────────────────────────
 
-/// Windows 交互式截图入口：截全屏，返回路径（后续由前端处理区域选择）。
+/// Windows 交互式截图入口：截全屏，保存为 PNG，返回路径。
 ///
-/// 使用纯 Win32 FFI 避免 `windows` crate 版本间 API 签名差异。
+/// 使用纯 Win32 FFI 进行 GDI 截图，通过 `image` crate 编码为 PNG。
 #[cfg(target_os = "windows")]
 pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
-    use std::io::Write;
-
     // 纯 C FFI 类型
     type HANDLE = *mut core::ffi::c_void;
     type BOOL = i32;
@@ -133,9 +131,7 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
         let old_bmp = SelectObject(hdc_mem, hbitmap);
         BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY);
 
-        // 保存为 BMP 文件
-        let path = temp_path(".bmp");
-
+        // 读取像素数据（BGRA 格式，自下而上）
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -164,44 +160,34 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
             DIB_RGB_COLORS,
         );
 
-        // BMP 文件格式
-        let file_size = 14 + 40 + bits.len();
-        let mut file =
-            std::fs::File::create(&path).map_err(|e| format!("创建截图文件失败: {e}"))?;
-
-        // BMP 文件头
-        file.write_all(b"BM").map_err(|e| e.to_string())?;
-        file.write_all(&(file_size as u32).to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&[0u8; 4]).map_err(|e| e.to_string())?;
-        file.write_all(&54u32.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-
-        // DIB 头
-        file.write_all(&40u32.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&width.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&height.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&1u16.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&32u16.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&0u32.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&(bits.len() as u32).to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(&[0u8; 16]).map_err(|e| e.to_string())?;
-
-        // BGRA 像素数据
-        file.write_all(&bits).map_err(|e| e.to_string())?;
-
-        // 清理
+        // 清理 GDI 对象
         SelectObject(hdc_mem, old_bmp);
         DeleteObject(hbitmap);
         DeleteDC(hdc_mem);
         ReleaseDC(NULL_HANDLE, hdc_screen);
+
+        // BGRA → RGBA，垂直翻转（GDI 自下而上，image crate 自上而下）
+        let w = width as u32;
+        let h = height as u32;
+        let mut rgba: Vec<u8> = vec![0; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            let src_row = (h as usize - 1 - y) * w as usize * 4;
+            let dst_row = y * w as usize * 4;
+            for x in 0..w as usize {
+                let si = src_row + x * 4;
+                let di = dst_row + x * 4;
+                rgba[di] = bits[si + 2];     // R ← B
+                rgba[di + 1] = bits[si + 1]; // G ← G
+                rgba[di + 2] = bits[si];     // B ← R
+                rgba[di + 3] = 255;          // A
+            }
+        }
+
+        // 保存为 PNG
+        let path = temp_path(".png");
+        let img = image::RgbaImage::from_raw(w, h, rgba)
+            .ok_or("创建图片缓冲区失败")?;
+        img.save(&path).map_err(|e| format!("保存截图失败: {e}"))?;
 
         Ok(Some(path))
     }

@@ -6,7 +6,7 @@ pub mod vision;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-/// 对图片文件执行 OCR，返回识别文本。
+/// 对图片文件执行本地 OCR，返回识别文本。
 #[cfg(target_os = "macos")]
 pub fn recognize_file(path: &str) -> Result<String, String> {
     vision::recognize_file(path)

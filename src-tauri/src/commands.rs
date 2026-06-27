@@ -144,7 +144,7 @@ pub async fn translate<R: Runtime>(
 
 /// 截图 OCR 命令：交互式框选 → 系统 OCR → 返回识别文本。
 ///
-/// 用户取消截图时返回空串。在阻塞线程执行（screencapture 与 Vision 均为阻塞调用）。
+/// 用户取消截图时返回空串。在阻塞线程执行。
 #[tauri::command]
 pub async fn screenshot_ocr() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -152,7 +152,6 @@ pub async fn screenshot_ocr() -> Result<String, String> {
             return Ok(String::new());
         };
         let result = ocr::recognize_file(&path.to_string_lossy());
-        // 清理临时文件
         let _ = std::fs::remove_file(&path);
         result
     })
