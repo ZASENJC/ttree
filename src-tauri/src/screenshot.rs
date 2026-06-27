@@ -2,6 +2,7 @@
 //!
 //! - macOS: 调用系统 `screencapture -i` 让用户框选。
 //! - Windows: 通过 GDI 全屏截图，保存为 PNG 文件供 OCR 使用。
+//!   交互式框选通过 overlay 窗口实现（`capture_for_selection` 命令）。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 生成唯一的临时文件路径。
-fn temp_path(suffix: &str) -> PathBuf {
+pub fn temp_path(suffix: &str) -> PathBuf {
     let seq = SHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
         "ttree_shot_{}_{}{suffix}",
@@ -48,13 +49,32 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
     Ok(Some(tmp))
 }
 
+/// macOS 全屏截图（非交互式），落到临时 PNG 文件。
+#[cfg(target_os = "macos")]
+pub fn capture_fullscreen() -> Result<PathBuf, String> {
+    use std::process::Command;
+
+    let tmp = temp_path(".png");
+
+    let status = Command::new("/usr/sbin/screencapture")
+        .args(["-x", "-r"])
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("调用 screencapture 失败: {e}"))?;
+
+    if !status.success() {
+        return Err("截图进程异常退出".to_string());
+    }
+    Ok(tmp)
+}
+
 // ── Windows 实现 ────────────────────────────────────────────────────
 
-/// Windows 交互式截图入口：截全屏，保存为 PNG，返回路径。
+/// Windows GDI 全屏截图核心实现。
 ///
-/// 使用纯 Win32 FFI 进行 GDI 截图，通过 `image` crate 编码为 PNG。
+/// 截取主显示器全屏内容，保存为 PNG，返回临时文件路径。
 #[cfg(target_os = "windows")]
-pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
+pub fn capture_fullscreen() -> Result<PathBuf, String> {
     // 纯 C FFI 类型
     type HANDLE = *mut core::ffi::c_void;
     type BOOL = i32;
@@ -189,6 +209,15 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
             .ok_or("创建图片缓冲区失败")?;
         img.save(&path).map_err(|e| format!("保存截图失败: {e}"))?;
 
-        Ok(Some(path))
+        Ok(path)
     }
+}
+
+/// Windows 交互式截图入口：截全屏，保存为 PNG，返回路径。
+///
+/// Windows 上交互式框选通过 overlay 窗口实现，此函数仅截取全屏。
+/// 前端调用 `capture_for_selection` 命令来完成交互式流程。
+#[cfg(target_os = "windows")]
+pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
+    capture_fullscreen().map(Some)
 }

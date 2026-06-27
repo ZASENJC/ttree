@@ -4,6 +4,10 @@ import {
   screenshotOcr,
   showMain,
   onChunk,
+  captureForSelection,
+  ocrFile,
+  onSelectionResult,
+  onSelectionCancelled,
 } from "../api/tauri";
 import { ADAPTIVE_TARGET, resolveAdaptiveTarget } from "./languages";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -171,12 +175,22 @@ function createTranslationStore() {
     return Boolean(text.trim()) && !state.loading && text.trim() !== lastRunText;
   }
 
-  /** 截图 OCR：框选 → 识别 → 填入输入框 → 自动翻译。 */
+  /** 截图 OCR：框选 → 识别 → 填入输入框 → 自动翻译。
+   *  macOS 使用原生 screencapture 交互框选。
+   *  Windows 使用 overlay 窗口让用户框选区域。 */
   async function captureAndTranslate() {
     if (state.loading) return;
     state.error = null;
     try {
-      const text = await screenshotOcr();
+      const isWindows = navigator.userAgent.includes("Windows");
+      let text: string;
+
+      if (isWindows) {
+        text = await captureAndTranslateOverlay();
+      } else {
+        text = await screenshotOcr();
+      }
+
       if (!text.trim()) return; // 用户取消或未识别到文字
       await showMain(); // OCR 有结果后再唤起窗口
       await translateText(text);
@@ -184,6 +198,39 @@ function createTranslationStore() {
       state.error = typeof e === "string" ? e : String(e);
       await showMain();
     }
+  }
+
+  /** Windows overlay 框选流程：截全屏 → overlay 框选 → OCR 裁剪区域。 */
+  async function captureAndTranslateOverlay(): Promise<string> {
+    await captureForSelection();
+
+    // 等待用户框选完成或取消
+    const text = await new Promise<string>((resolve) => {
+      let done = false;
+      let unlistenResult: (() => void) | null = null;
+      let unlistenCancel: (() => void) | null = null;
+
+      const cleanup = () => {
+        unlistenResult?.();
+        unlistenCancel?.();
+      };
+
+      onSelectionResult((croppedPath) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve(ocrFile(croppedPath));
+      }).then((un) => { unlistenResult = un; });
+
+      onSelectionCancelled(() => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve("");
+      }).then((un) => { unlistenCancel = un; });
+    });
+
+    return text;
   }
 
   function reset() {

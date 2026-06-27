@@ -87,6 +87,30 @@ export function screenshotOcr(): Promise<string> {
   return invoke<string>("screenshot_ocr");
 }
 
+/** 截取全屏并打开区域选择 overlay 窗口，返回截图路径。 */
+export function captureForSelection(): Promise<string> {
+  return invoke<string>("capture_for_selection");
+}
+
+/** 对指定文件执行 OCR 并返回识别文本（自动删除文件）。 */
+export function ocrFile(path: string): Promise<string> {
+  return invoke<string>("ocr_file", { path });
+}
+
+/** 订阅选区完成事件（返回裁剪后的图片路径）。 */
+export function onSelectionResult(
+  handler: (path: string) => void,
+): Promise<UnlistenFn> {
+  return listen<string>("selection-result", (e) => handler(e.payload));
+}
+
+/** 订阅选区取消事件。 */
+export function onSelectionCancelled(
+  handler: () => void,
+): Promise<UnlistenFn> {
+  return listen("selection-cancelled", () => handler());
+}
+
 /** 显示并聚焦主窗口。 */
 export function showMain(): Promise<void> {
   return invoke<void>("show_main");

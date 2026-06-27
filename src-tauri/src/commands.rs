@@ -1,6 +1,6 @@
 //! 暴露给前端的 Tauri command。
 
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::config::{self, AppearanceConfig, ChatAiConfig, OpenAiConfig, ShortcutConfig};
 use crate::history;
@@ -157,6 +157,116 @@ pub async fn screenshot_ocr() -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("OCR 任务失败: {e}"))?
+}
+
+/// 对指定文件路径执行 OCR，返回识别文本。
+///
+/// 供前端在 overlay 框选完成后对裁剪图片执行 OCR。
+#[tauri::command]
+pub fn ocr_file(path: String) -> Result<String, String> {
+    let result = ocr::recognize_file(&path);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+/// 将指定图片文件读取为 base64 编码的 data URL。
+///
+/// 供 overlay 选择窗口加载截图使用。
+#[tauri::command]
+pub fn load_screenshot_data_url(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取截图失败: {e}"))?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:image/png;base64,{encoded}"))
+}
+
+/// 截取全屏并打开区域选择 overlay 窗口。
+///
+/// 返回截图临时文件路径。前端收到后将其传入 overlay 窗口展示，
+/// 用户框选完成后调用 `crop_and_close` 获取裁剪结果。
+#[tauri::command]
+pub fn capture_for_selection<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let path = screenshot::capture_fullscreen()?;
+    let path_str = path.to_string_lossy().to_string();
+
+    // 创建 overlay 窗口（全屏、透明、无边框、置顶）
+    let label = "selection-overlay";
+    // 如果已存在则先关闭
+    if let Some(existing) = app.get_webview_window(label) {
+        let _ = existing.close();
+    }
+
+    let url = format!("selection.html?path={}", urlencoding::encode(&path_str));
+    let _win = WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
+        .title("截图选择")
+        .fullscreen(true)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| format!("创建选择窗口失败: {e}"))?;
+
+    Ok(path_str)
+}
+
+/// 裁剪选区并关闭 overlay 窗口。
+///
+/// 前端在用户确认选区后调用，传入像素坐标。
+/// 返回裁剪后的 PNG 路径，并通过事件通知主窗口。
+#[tauri::command]
+pub fn crop_and_close<R: Runtime>(
+    app: AppHandle<R>,
+    source_path: String,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    use tauri::Emitter;
+
+    if width == 0 || height == 0 {
+        return Err("选区不能为空".to_string());
+    }
+
+    let img = image::open(&source_path).map_err(|e| format!("加载截图失败: {e}"))?;
+    let cropped = image::DynamicImage::ImageRgba8(
+        image::imageops::crop_imm(&img.to_rgba8(), x, y, width, height).to_image(),
+    );
+
+    let out_path = screenshot::temp_path(".png");
+    cropped
+        .save(&out_path)
+        .map_err(|e| format!("保存裁剪图失败: {e}"))?;
+
+    // 清理源截图
+    let _ = std::fs::remove_file(&source_path);
+
+    // 关闭 overlay 窗口
+    if let Some(win) = app.get_webview_window("selection-overlay") {
+        let _ = win.close();
+    }
+
+    // 通知主窗口选区完成
+    let _ = app.emit("selection-result", out_path.to_string_lossy().to_string());
+
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// 关闭 overlay 窗口（用户取消选区时调用）。
+#[tauri::command]
+pub fn close_selection<R: Runtime>(app: AppHandle<R>, source_path: String) -> Result<(), String> {
+    use tauri::Emitter;
+
+    let _ = std::fs::remove_file(&source_path);
+    if let Some(win) = app.get_webview_window("selection-overlay") {
+        let _ = win.close();
+    }
+    // 通知主窗口用户取消了选区
+    let _ = app.emit("selection-cancelled", ());
+    Ok(())
 }
 
 /// 读取全部 AI 对话历史（JSONL 流式解析，损坏行容错）。

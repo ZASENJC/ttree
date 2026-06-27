@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>截图选择</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: transparent;
+      cursor: crosshair;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #bg {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: fill;
+      pointer-events: none;
+    }
+    #overlay {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    #hint {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #fff;
+      font: 14px/1.5 system-ui, -apple-system, sans-serif;
+      background: rgba(0,0,0,0.6);
+      padding: 6px 16px;
+      border-radius: 6px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <img id="bg" alt="">
+  <canvas id="overlay"></canvas>
+  <div id="hint">拖拽鼠标框选区域 · Enter 确认 · Esc 取消</div>
+
+  <script type="module">
+    import { invoke } from "@tauri-apps/api/core";
+
+    const bg = document.getElementById("bg");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const hint = document.getElementById("hint");
+
+    const params = new URLSearchParams(window.location.search);
+    const sourcePath = params.get("path") || "";
+
+    let selecting = false;
+    let startX = 0, startY = 0;
+    let endX = 0, endY = 0;
+    let imgNaturalW = 0, imgNaturalH = 0;
+
+    const dpr = window.devicePixelRatio || 1;
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width = window.innerWidth + "px";
+      canvas.style.height = window.innerHeight + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      if (!selecting && startX === endX && startY === endY) return;
+
+      const x = Math.min(startX, endX);
+      const y = Math.min(startY, endY);
+      const w = Math.abs(endX - startX);
+      const h = Math.abs(endY - startY);
+
+      if (w < 2 && h < 2) return;
+
+      // 半透明遮罩覆盖全屏
+      ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+      // 清除选区露出截图
+      ctx.clearRect(x, y, w, h);
+
+      // 选区边框
+      ctx.strokeStyle = "#4af";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.strokeRect(x, y, w, h);
+
+      // 尺寸标签
+      const scaleX = imgNaturalW / window.innerWidth;
+      const scaleY = imgNaturalH / window.innerHeight;
+      const realW = Math.round(w * scaleX);
+      const realH = Math.round(h * scaleY);
+      const label = `${realW} × ${realH}`;
+      ctx.font = "12px system-ui";
+      const tw = ctx.measureText(label).width + 10;
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(x, y - 22, tw, 18);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, x + 5, y - 8);
+    }
+
+    function getSelection() {
+      const x = Math.min(startX, endX);
+      const y = Math.min(startY, endY);
+      const w = Math.abs(endX - startX);
+      const h = Math.abs(endY - startY);
+      if (w < 4 || h < 4) return null;
+
+      const scaleX = imgNaturalW / window.innerWidth;
+      const scaleY = imgNaturalH / window.innerHeight;
+      return {
+        x: Math.round(x * scaleX),
+        y: Math.round(y * scaleY),
+        width: Math.round(w * scaleX),
+        height: Math.round(h * scaleY),
+      };
+    }
+
+    canvas.addEventListener("mousedown", (e) => {
+      selecting = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      endX = e.clientX;
+      endY = e.clientY;
+      hint.style.display = "none";
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (!selecting) return;
+      endX = e.clientX;
+      endY = e.clientY;
+      draw();
+    });
+
+    canvas.addEventListener("mouseup", () => {
+      selecting = false;
+      draw();
+    });
+
+    document.addEventListener("keydown", async (e) => {
+      if (e.key === "Escape") {
+        await cancel();
+      } else if (e.key === "Enter") {
+        await confirm();
+      }
+    });
+
+    async function confirm() {
+      const sel = getSelection();
+      if (!sel) return;
+      try {
+        await invoke("crop_and_close", {
+          sourcePath,
+          x: sel.x,
+          y: sel.y,
+          width: sel.width,
+          height: sel.height,
+        });
+      } catch (err) {
+        console.error("crop_and_close failed:", err);
+        await cancel();
+      }
+    }
+
+    async function cancel() {
+      try {
+        await invoke("close_selection", { sourcePath });
+      } catch (err) {
+        console.error("close_selection failed:", err);
+        window.close();
+      }
+    }
+
+    window.addEventListener("resize", resizeCanvas);
+
+    // 初始化：加载截图
+    async function init() {
+      try {
+        const dataUrl = await invoke("load_screenshot_data_url", { path: sourcePath });
+        bg.src = dataUrl;
+        await new Promise((resolve) => { bg.onload = resolve; });
+        imgNaturalW = bg.naturalWidth;
+        imgNaturalH = bg.naturalHeight;
+        resizeCanvas();
+      } catch (err) {
+        console.error("加载截图失败:", err);
+        hint.textContent = "加载截图失败: " + err;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

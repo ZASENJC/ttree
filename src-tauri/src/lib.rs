@@ -52,7 +52,12 @@ pub fn run() {
             commands::load_conversations,
             commands::start_new_conversation,
             commands::append_chat_history,
-            commands::clear_chat_history
+            commands::clear_chat_history,
+            commands::capture_for_selection,
+            commands::crop_and_close,
+            commands::close_selection,
+            commands::ocr_file,
+            commands::load_screenshot_data_url,
         ])
         .setup(|app| {
             // ── 窗口模糊效果 ──

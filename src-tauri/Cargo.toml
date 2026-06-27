@@ -30,6 +30,7 @@ tokio = { version = "1", features = ["full"] }
 urlencoding = "2"
 memchr = "2"
 url = "2"
+base64 = "0.22"
 # 图片编码/解码（截图保存为 PNG 供 OCR 使用）
 image = { version = "0.25", default-features = false, features = ["png"] }
 
