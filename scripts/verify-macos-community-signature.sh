@@ -50,14 +50,26 @@ if ! printf '%s\n' "$DETAILS" | grep -q '^Sealed Resources version='; then
   exit 1
 fi
 
-REQUIREMENT="$(codesign -d -r- "$APP_PATH" 2>&1)"
+if ! REQUIREMENT_OUTPUT="$(codesign -d -r- "$APP_PATH" 2>&1)"; then
+  printf '%s\n' "$REQUIREMENT_OUTPUT" >&2
+  exit 1
+fi
+REQUIREMENT="$(
+  printf '%s\n' "$REQUIREMENT_OUTPUT" |
+    sed -n 's/^designated => //p' |
+    head -n 1
+)"
+if [ -z "$REQUIREMENT" ]; then
+  echo "[codesign] designated requirement is missing" >&2
+  exit 1
+fi
 NORMALIZED_REQUIREMENT="$(
   printf '%s\n' "$REQUIREMENT" |
     tr '[:lower:]' '[:upper:]' |
     tr -s '[:space:]' ' ' |
     sed 's/^ //; s/ $//'
 )"
-EXPECTED_REQUIREMENT="DESIGNATED => IDENTIFIER \"$(printf '%s' "$EXPECTED_IDENTIFIER" | tr '[:lower:]' '[:upper:]')\" AND CERTIFICATE LEAF = H\"$EXPECTED_CERT_SHA1\""
+EXPECTED_REQUIREMENT="IDENTIFIER \"$(printf '%s' "$EXPECTED_IDENTIFIER" | tr '[:lower:]' '[:upper:]')\" AND CERTIFICATE LEAF = H\"$EXPECTED_CERT_SHA1\""
 
 if [ "$NORMALIZED_REQUIREMENT" != "$EXPECTED_REQUIREMENT" ]; then
   echo "[codesign] designated requirement is not the pinned TTREE identity" >&2
