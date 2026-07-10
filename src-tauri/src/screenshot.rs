@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 全局自增序号，配合进程 id 生成唯一临时文件名，避免并发 OCR 互相覆盖。
 static SHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn screencapture_args() -> [&'static str; 3] {
+    ["-i", "-x", "-r"]
+}
+
 /// 触发交互式区域截图，落到临时 PNG 文件。
 ///
 /// 返回截图文件路径；用户取消选择时返回 `Ok(None)`。
@@ -20,7 +24,7 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
 
     // -i 交互式框选，-x 静音，-r 不加窗口阴影
     let status = Command::new("/usr/sbin/screencapture")
-        .args(["-i", "-x", "-r"])
+        .args(screencapture_args())
         .arg(&tmp)
         .status()
         .map_err(|e| format!("调用 screencapture 失败: {e}"))?;
@@ -34,4 +38,14 @@ pub fn capture_interactive() -> Result<Option<PathBuf>, String> {
         return Ok(None);
     }
     Ok(Some(tmp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screencapture_args;
+
+    #[test]
+    fn uses_native_interactive_screencapture_flags() {
+        assert_eq!(screencapture_args(), ["-i", "-x", "-r"]);
+    }
 }
