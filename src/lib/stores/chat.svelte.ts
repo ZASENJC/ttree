@@ -12,12 +12,16 @@ import {
 } from "../api/tauri";
 import { recentChatContext } from "./chatContext";
 
+const SEND_BUSY_ERROR =
+  "上一条消息正在准备或 AI 回复仍在生成，已将内容放入输入框。";
+const SEND_PREPARING_ERROR = "消息正在准备发送，请稍候。";
+
 interface ChatState {
   messages: ChatMessage[];
   input: string;
   loading: boolean;
   error: string | null;
-  /** 全部历史对话（旧 → 新），供顶栏对话列表使用。 */
+  /** 全部历史对话（最久未活动 → 最近活动），供顶栏对话列表使用。 */
   conversations: Conversation[];
   /** 当前对话的 id；null 表示一段尚未落盘的新对话。 */
   currentId: number | null;
@@ -41,6 +45,16 @@ function createChatStore() {
   let userStartedSession = false;
   /** 进行中的加载任务：避免并发调用重复请求并互相覆盖。 */
   let loadPromise: Promise<void> | null = null;
+  /** 最近一次历史加载错误；成功重试时仅清除这条错误。 */
+  let loadError: string | null = null;
+  /** 新对话分隔标记的落盘任务；发送前必须等待它完成。 */
+  let sessionStartPromise: Promise<boolean> | null = null;
+  /** 新对话分隔标记失败后持续阻断发送，直到显式恢复到有效会话。 */
+  let sessionStartError: string | null = null;
+  /** 清空历史任务；发送/切换必须等待，避免与读取或追加并发。 */
+  let clearPromise: Promise<void> | null = null;
+  /** 发送正在等待历史加载或新会话标记；期间禁止改变会话边界。 */
+  let sendPreparing = false;
 
   /** 启动时加载全部历史对话，并默认显示最新的一段（恢复上次离开的位置）。 */
   function loadHistory(): Promise<void> {
@@ -63,11 +77,16 @@ function createChatStore() {
           state.currentId = null;
         }
       }
-    } catch (e) {
-      // 加载失败不阻塞对话，仅记录错误。
-      state.error = typeof e === "string" ? e : String(e);
-    } finally {
       state.loaded = true;
+      if (loadError && state.error === loadError) {
+        state.error = null;
+      }
+      loadError = null;
+    } catch (e) {
+      state.loaded = false;
+      loadError = typeof e === "string" ? e : String(e);
+      state.error = loadError;
+    } finally {
       loadPromise = null;
     }
   }
@@ -88,16 +107,17 @@ function createChatStore() {
       }
 
       if (chunk.done) {
-        state.loading = false;
         // 一轮结束：把这轮（用户消息 + 完整 AI 回复）持久化。
-        persistLastRound();
+        void persistLastRound().finally(() => {
+          state.loading = false;
+        });
       }
     });
   }
 
   /** 把最后一轮对话追加写入历史文件；AI 空回复不写入，避免污染历史。
    *  落盘后以后端为唯一事实来源重读对话列表，避免本地 id 猜测与后端序号错位。 */
-  function persistLastRound() {
+  async function persistLastRound() {
     const msgs = state.messages;
     if (msgs.length < 2) return;
     const user = msgs[msgs.length - 2];
@@ -105,40 +125,34 @@ function createChatStore() {
     if (user.role !== "user" || assistant.role !== "assistant") return;
     if (assistant.content.trim() === "") return;
 
-    const messages = msgs.slice();
-    const summary = summarize(messages);
+    const conversationId = state.currentId;
 
-    void apiAppendHistory([
-      { role: "user", content: user.content },
-      { role: "assistant", content: assistant.content },
-    ])
-      .then(async () => {
-        // 落盘成功：以后端为唯一事实来源重读，拿到权威 id 与列表，杜绝 id 错位。
-        const conversations = await apiLoadConversations();
-        state.conversations = conversations;
-        // 新对话首次落盘：当前对话 id = 列表末尾（最新一段）。
-        if (state.currentId === null) {
-          const latest = conversations[conversations.length - 1];
-          state.currentId = latest?.id ?? null;
-        }
-      })
-      .catch((e) => {
-        state.error = `保存对话历史失败: ${typeof e === "string" ? e : String(e)}`;
-      });
-  }
-
-  /** 摘要：首句用户提问截断，与后端 truncate_summary 行为对齐。 */
-  function summarize(messages: ChatMessage[]): string {
-    const MAX = 40;
-    const firstUser = messages.find((m) => m.role === "user");
-    const firstLine = (firstUser?.content ?? "").split("\n")[0]?.trim() ?? "";
-    if (firstLine.length <= MAX) return firstLine;
-    return `${firstLine.slice(0, MAX)}…`;
+    try {
+      await apiAppendHistory(
+        [
+          { role: "user", content: user.content },
+          { role: "assistant", content: assistant.content },
+        ],
+        conversationId,
+      );
+      const conversations = await apiLoadConversations();
+      state.conversations = conversations;
+      if (conversationId === null) {
+        const latest = conversations[conversations.length - 1];
+        state.currentId = latest?.id ?? null;
+      }
+    } catch (e) {
+      state.error = `保存对话历史失败: ${typeof e === "string" ? e : String(e)}`;
+    }
   }
 
   async function send() {
     const text = state.input.trim();
-    if (!text || state.loading) return;
+    if (!text) return;
+    if (state.loading || sendPreparing) {
+      preserveBusyInput(text);
+      return;
+    }
 
     state.input = "";
     await sendMessage(text);
@@ -148,27 +162,90 @@ function createChatStore() {
     const text = value.trim();
     if (!text) return;
 
-    if (state.loading) {
-      state.input = text;
-      state.error = "上一条 AI 回复仍在生成，已将划词内容放入输入框。";
+    if (state.loading || sendPreparing) {
+      preserveBusyInput(text);
       return;
     }
 
     await sendMessage(text);
   }
 
-  async function sendMessage(text: string) {
-    state.error = null;
-    state.messages = [
-      ...state.messages,
-      { role: "user", content: text },
-      { role: "assistant", content: "" },
-    ];
-    state.loading = true;
+  function preserveBusyInput(text: string) {
+    state.input = text;
+    state.error = SEND_BUSY_ERROR;
+  }
 
-    await ensureChunkListener();
+  function preserveSessionBlockedInput(text: string) {
+    state.input = text;
+    state.error =
+      sessionStartError ??
+      "新对话尚未成功创建，请重新开启新对话、选择已有对话或清空历史后再发送。";
+  }
+
+  function clearSessionStartBlock() {
+    sessionStartPromise = null;
+    sessionStartError = null;
+  }
+
+  async function sendMessage(text: string) {
+    if (state.loading || sendPreparing) {
+      preserveBusyInput(text);
+      return;
+    }
+
+    sendPreparing = true;
+    try {
+      if (clearPromise) {
+        await clearPromise;
+      }
+      await loadHistory();
+      if (!state.loaded) {
+        state.input = text;
+        return;
+      }
+      if (clearPromise) {
+        await clearPromise;
+      }
+      if (state.loading) {
+        preserveBusyInput(text);
+        return;
+      }
+
+      if (sessionStartError) {
+        preserveSessionBlockedInput(text);
+        return;
+      }
+      if (sessionStartPromise) {
+        const started = await sessionStartPromise;
+        if (!started || sessionStartError) {
+          preserveSessionBlockedInput(text);
+          return;
+        }
+      }
+      if (state.loading) {
+        preserveBusyInput(text);
+        return;
+      }
+
+      const keepBusyNotice =
+        state.error === SEND_BUSY_ERROR &&
+        state.input.trim() !== "" &&
+        state.input.trim() !== text;
+      if (!keepBusyNotice) {
+        state.error = null;
+      }
+      state.messages = [
+        ...state.messages,
+        { role: "user", content: text },
+        { role: "assistant", content: "" },
+      ];
+      state.loading = true;
+    } finally {
+      sendPreparing = false;
+    }
 
     try {
+      await ensureChunkListener();
       await apiChat(recentChatContext(state.messages.slice(0, -1)));
     } catch (e) {
       state.error = typeof e === "string" ? e : String(e);
@@ -181,25 +258,60 @@ function createChatStore() {
     }
   }
 
-  function clearHistory() {
+  function clearHistory(): Promise<void> {
+    if (clearPromise) return clearPromise;
+    if (sendPreparing) {
+      state.error = SEND_PREPARING_ERROR;
+      return Promise.resolve();
+    }
+    if (state.loading) {
+      state.error = "AI 回复仍在生成，请等待完成后再清空历史。";
+      return Promise.resolve();
+    }
+
+    const clearing = clearHistoryAfterLoad().finally(() => {
+      if (clearPromise === clearing) {
+        clearPromise = null;
+      }
+    });
+    clearPromise = clearing;
+    return clearing;
+  }
+
+  async function clearHistoryAfterLoad() {
+    await loadHistory();
     if (state.loading) {
       state.error = "AI 回复仍在生成，请等待完成后再清空历史。";
       return;
     }
 
-    state.messages = [];
-    state.conversations = [];
-    state.currentId = null;
-    state.error = null;
-    void apiClearHistory().catch((e) => {
+    try {
+      await apiClearHistory();
+      userStartedSession = true;
+      state.messages = [];
+      state.conversations = [];
+      state.currentId = null;
+      state.loaded = true;
+      loadError = null;
+      clearSessionStartBlock();
+      state.error = null;
+    } catch (e) {
       state.error = `清空对话历史失败: ${typeof e === "string" ? e : String(e)}`;
-    });
+    }
   }
 
   /** 开启一段新对话：写分隔标记 + 清空当前消息视图（历史保留在列表中）。 */
   function newConversation() {
+    if (sendPreparing) {
+      state.error = SEND_PREPARING_ERROR;
+      return;
+    }
     if (state.loading) {
       state.error = "AI 回复仍在生成，请等待完成后再开新对话。";
+      return;
+    }
+    if (clearPromise) {
+      state.error = "正在清空对话历史，请稍候。";
       return;
     }
     userStartedSession = true;
@@ -207,15 +319,43 @@ function createChatStore() {
     state.input = "";
     state.error = null;
     state.currentId = null;
-    void apiStartNewConversation().catch((e) => {
-      state.error = `开启新对话失败: ${typeof e === "string" ? e : String(e)}`;
-    });
+    sessionStartError = null;
+    const start = apiStartNewConversation()
+      .then(() => {
+        if (sessionStartPromise === start) {
+          sessionStartError = null;
+        }
+        return true;
+      })
+      .catch((e) => {
+        if (sessionStartPromise === start) {
+          sessionStartError = `开启新对话失败: ${
+            typeof e === "string" ? e : String(e)
+          }。请重新开启新对话、选择已有对话或清空历史后再发送。`;
+          state.error = sessionStartError;
+        }
+        return false;
+      })
+      .finally(() => {
+        if (sessionStartPromise === start) {
+          sessionStartPromise = null;
+        }
+      });
+    sessionStartPromise = start;
   }
 
   /** 打开指定历史对话，加载其全部消息到当前视图。 */
   function openConversation(id: number) {
+    if (sendPreparing) {
+      state.error = SEND_PREPARING_ERROR;
+      return;
+    }
     if (state.loading) {
       state.error = "AI 回复仍在生成，无法切换对话。";
+      return;
+    }
+    if (clearPromise) {
+      state.error = "正在清空对话历史，请稍候。";
       return;
     }
     const target = state.conversations.find((c) => c.id === id);
@@ -224,6 +364,7 @@ function createChatStore() {
     state.messages = [...target.messages];
     state.currentId = id;
     state.input = "";
+    clearSessionStartBlock();
     state.error = null;
   }
 

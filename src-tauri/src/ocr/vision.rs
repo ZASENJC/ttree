@@ -8,9 +8,7 @@
 use objc2::rc::Retained;
 use objc2::AnyThread;
 use objc2_foundation::{NSArray, NSData, NSString};
-use objc2_vision::{
-    VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel,
-};
+use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
 
 /// 对指定图片文件路径执行 OCR，返回识别文本（按行拼接）。
 pub fn recognize_file(path: &str) -> Result<String, String> {
@@ -43,9 +41,9 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
             &objc2_foundation::NSDictionary::new(),
         );
 
-        let requests = NSArray::from_retained_slice(&[Retained::into_super(
-            Retained::into_super(request.clone()),
-        )]);
+        let requests = NSArray::from_retained_slice(&[Retained::into_super(Retained::into_super(
+            request.clone(),
+        ))]);
         handler
             .performRequests_error(&requests)
             .map_err(|e| format!("OCR 执行失败: {e}"))?;

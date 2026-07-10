@@ -25,6 +25,13 @@
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
   import { appearance } from "../stores/appearance.svelte";
   import { updater } from "../stores/update.svelte";
+  import {
+    buildApiKeySavePayload,
+    createDebouncedSaver,
+    performUpdateAction,
+    saveAndReload,
+    toggleBooleanPreference,
+  } from "./settingsLogic";
 
   interface Props {
     onClose: () => void;
@@ -40,6 +47,8 @@
   let cfg = $state<OpenAiConfig>({
     base_url: "https://api.openai.com/v1",
     api_key: "",
+    has_api_key: false,
+    clear_api_key: false,
     model: "gpt-4o-mini",
     translate_prompt:
       "你是一个专业翻译引擎。将用户输入从 {source} 翻译成 {target}。只输出译文，不要解释、不要引号、不要附加任何说明。",
@@ -47,6 +56,8 @@
   let chatCfg = $state<ChatAiConfig>({
     base_url: "https://api.openai.com/v1",
     api_key: "",
+    has_api_key: false,
+    clear_api_key: false,
     model: "gpt-4o-mini",
     chat_prompt: "",
   });
@@ -68,9 +79,18 @@
   ];
 
   let autostart = $state(false);
+  let autostartSaving = $state(false);
   let saved = $state(false);
   let chatSaved = $state(false);
   let shortcutSaved = $state(false);
+  let saving = $state(false);
+  let chatSaving = $state(false);
+  let saveError = $state<string | null>(null);
+  let chatSaveError = $state<string | null>(null);
+  let translateLoadError = $state<string | null>(null);
+  let chatLoadError = $state<string | null>(null);
+  let clearTranslateApiKey = $state(false);
+  let clearChatApiKey = $state(false);
   let shortcutError = $state<string | null>(null);
   let generalError = $state<string | null>(null);
   let recordingShortcut = $state<ShortcutField | null>(null);
@@ -78,7 +98,14 @@
 
   // 面板透明度：0–1，实时预览，停止拖动后落盘。
   let panelOpacity = $state(1);
-  let opacitySaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const opacitySaver = createDebouncedSaver(400, async (value: number) => {
+    try {
+      await setAppearanceConfig({ panel_opacity: value });
+    } catch (error) {
+      generalError = `保存面板透明度失败: ${typeof error === "string" ? error : String(error)}`;
+      throw error;
+    }
+  });
 
   const shortcutLabels: Record<ShortcutField, string> = {
     toggle: "呼出翻译",
@@ -96,41 +123,83 @@
     { field: "selection_ai_dialog", hint: "把选中的文字发给 AI" },
   ];
 
-  onMount(async () => {
-    cfg = await getOpenAiConfig();
-    chatCfg = await getChatAiConfig();
-    shortcutCfg = await getShortcutConfig();
+  onMount(() => {
+    let active = true;
+    void initializeSettings(() => active);
+    return () => {
+      active = false;
+    };
+  });
+
+  async function initializeSettings(isActive: () => boolean) {
+    const [translateResult, chatResult, shortcutResult] = await Promise.allSettled([
+      getOpenAiConfig(),
+      getChatAiConfig(),
+      getShortcutConfig(),
+    ]);
+    if (!isActive()) return;
+
+    if (translateResult.status === "fulfilled") {
+      cfg = translateResult.value;
+      clearTranslateApiKey = false;
+    } else {
+      translateLoadError = `读取 AI 翻译配置失败: ${String(translateResult.reason)}`;
+    }
+    if (chatResult.status === "fulfilled") {
+      chatCfg = chatResult.value;
+      clearChatApiKey = false;
+    } else {
+      chatLoadError = `读取 AI 对话配置失败: ${String(chatResult.reason)}`;
+    }
+    if (shortcutResult.status === "fulfilled") {
+      shortcutCfg = shortcutResult.value;
+    } else {
+      shortcutError = `读取快捷键配置失败: ${String(shortcutResult.reason)}`;
+    }
+
     // 进入设置页默认固定窗口：填表常需切到别处复制 API Key，固定后失焦不隐藏。
     // 仅当进入前未固定时临时固定；离开时恢复，避免改变用户原本的固定偏好。
-    const pinned = await getPinned();
-    isPinned = pinned;
-    pinnedBeforeEnter = pinned;
-    if (!pinned) {
-      pinnedBySettings = true;
-      isPinned = await setPinned(true);
+    try {
+      const pinned = await getPinned();
+      if (!isActive()) return;
+      isPinned = pinned;
+      pinnedBeforeEnter = pinned;
+      if (!pinned) {
+        pinnedBySettings = true;
+        const nextPinned = await setPinned(true);
+        if (!isActive()) {
+          void setPinned(false).catch(() => {});
+          return;
+        }
+        isPinned = nextPinned;
+      }
+    } catch (error) {
+      if (isActive()) {
+        generalError = `固定设置窗口失败: ${typeof error === "string" ? error : String(error)}`;
+      }
     }
     try {
-      autostart = await isEnabled();
+      const enabled = await isEnabled();
+      if (isActive()) autostart = enabled;
     } catch {
-      autostart = false;
+      if (isActive()) autostart = false;
     }
     try {
       const a = await getAppearanceConfig();
+      if (!isActive()) return;
       panelOpacity = a.panel_opacity;
       appearance.set(panelOpacity);
     } catch {
-      panelOpacity = 1;
+      if (isActive()) panelOpacity = 1;
     }
-    void updater.loadVersion();
-  });
+    if (isActive()) void updater.loadVersion();
+  }
 
   onDestroy(() => {
     if (recordingShortcut) {
       void setShortcutRecording(false).catch(() => {});
     }
-    if (opacitySaveTimer) {
-      clearTimeout(opacitySaveTimer);
-    }
+    void opacitySaver.flush().catch(() => {});
     // 离开设置页：若窗口是本页临时固定的（进入前未固定、用户也没手动改），
     // 恢复到进入前的未固定状态，避免改变用户原本的固定偏好。
     if (pinnedBySettings && !pinnedBeforeEnter) {
@@ -139,17 +208,75 @@
   });
 
   async function save() {
-    await setOpenAiConfig($state.snapshot(cfg));
-    cfg = await getOpenAiConfig();
+    saveError = null;
+    saving = true;
+    const payload = buildApiKeySavePayload(
+      $state.snapshot(cfg),
+      clearTranslateApiKey,
+    );
+    const result = await saveAndReload(
+      payload,
+      setOpenAiConfig,
+      getOpenAiConfig,
+      "保存 AI 翻译配置失败",
+    );
+    saving = false;
+    if (!result.ok) {
+      saveError = result.error;
+      return;
+    }
+    cfg = result.value;
+    translateLoadError = null;
+    clearTranslateApiKey = false;
     saved = true;
     setTimeout(() => (saved = false), 1400);
   }
 
   async function saveChat() {
-    await setChatAiConfig($state.snapshot(chatCfg));
-    chatCfg = await getChatAiConfig();
+    chatSaveError = null;
+    chatSaving = true;
+    const payload = buildApiKeySavePayload(
+      $state.snapshot(chatCfg),
+      clearChatApiKey,
+    );
+    const result = await saveAndReload(
+      payload,
+      setChatAiConfig,
+      getChatAiConfig,
+      "保存 AI 对话配置失败",
+    );
+    chatSaving = false;
+    if (!result.ok) {
+      chatSaveError = result.error;
+      return;
+    }
+    chatCfg = result.value;
+    chatLoadError = null;
+    clearChatApiKey = false;
     chatSaved = true;
     setTimeout(() => (chatSaved = false), 1400);
+  }
+
+  function onTranslateApiKeyInput(event: Event) {
+    cfg.api_key = (event.currentTarget as HTMLInputElement).value;
+    if (cfg.api_key.trim()) clearTranslateApiKey = false;
+  }
+
+  function onChatApiKeyInput(event: Event) {
+    chatCfg.api_key = (event.currentTarget as HTMLInputElement).value;
+    if (chatCfg.api_key.trim()) clearChatApiKey = false;
+  }
+
+  function toggleTranslateApiKeyClear() {
+    cfg.api_key = "";
+    clearTranslateApiKey = !clearTranslateApiKey;
+    saveError = null;
+  }
+
+  function toggleChatApiKeyClear() {
+    chatCfg.api_key = "";
+    clearChatApiKey = !clearChatApiKey;
+    chatSaveError = null;
   }
 
   async function startShortcutRecording(field: ShortcutField) {
@@ -240,19 +367,22 @@
     pinnedBySettings = false;
   }
 
-  async function toggleAutostart() {
-    const next = !autostart;
+  async function toggleAutostart(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
     generalError = null;
-    try {
-      if (next) {
-        await enable();
-      } else {
-        await disable();
-      }
-      autostart = next;
-    } catch {
-      generalError = "切换开机自启失败，请稍后重试。";
-    }
+    autostartSaving = true;
+    const result = await toggleBooleanPreference(
+      autostart,
+      async (next) => {
+        if (next) await enable();
+        else await disable();
+      },
+      "切换开机自启失败",
+    );
+    autostart = result.value;
+    input.checked = result.value;
+    generalError = result.error;
+    autostartSaving = false;
   }
 
   // 拖动滑块时实时预览；停止拖动后（静默 400ms）再落盘，避免频繁写入。
@@ -260,20 +390,12 @@
     const value = Number((event.currentTarget as HTMLInputElement).value);
     panelOpacity = value;
     appearance.set(value);
-    if (opacitySaveTimer) {
-      clearTimeout(opacitySaveTimer);
-    }
-    opacitySaveTimer = setTimeout(() => {
-      void setAppearanceConfig({ panel_opacity: value }).catch(() => {});
-    }, 400);
+    opacitySaver.schedule(value);
   }
 
-  /** 点击「检查更新」：已有待安装版本则直接安装，否则发起检查并在命中时安装。 */
+  /** 第一次只检查；发现更新后由用户再次点击明确安装。 */
   async function onCheckUpdate() {
-    const found = await updater.checkForUpdates();
-    if (found) {
-      await updater.downloadAndInstall();
-    }
+    await performUpdateAction(updater);
   }
 
 </script>
@@ -320,10 +442,26 @@
             <span>接口地址</span>
             <input type="text" bind:value={cfg.base_url} placeholder="https://api.openai.com/v1" spellcheck="false" />
           </label>
-          <label class="field">
-            <span>API 密钥</span>
-            <input type="password" bind:value={cfg.api_key} placeholder="sk-…" spellcheck="false" />
-          </label>
+          <div class="field">
+            <label for="translate-api-key"><span>API 密钥</span></label>
+            <input
+              id="translate-api-key"
+              type="password"
+              value={cfg.api_key}
+              oninput={onTranslateApiKeyInput}
+              placeholder={cfg.has_api_key ? "已保存，留空保持不变" : "sk-…"}
+              autocomplete="new-password"
+              spellcheck="false"
+            />
+            {#if cfg.has_api_key}
+              <div class="api-key-status">
+                <span>{clearTranslateApiKey ? "保存后删除已保存密钥" : "已保存；留空会保持不变"}</span>
+                <button type="button" onclick={toggleTranslateApiKeyClear}>
+                  {clearTranslateApiKey ? "撤销清除" : "清除已保存密钥"}
+                </button>
+              </div>
+            {/if}
+          </div>
           <label class="field">
             <span>模型</span>
             <input type="text" bind:value={cfg.model} placeholder="gpt-4o-mini" spellcheck="false" />
@@ -333,7 +471,15 @@
             <textarea bind:value={cfg.translate_prompt} placeholder="用 &#123;source&#125; 和 &#123;target&#125; 表示源语言和目标语言" spellcheck="false"></textarea>
           </label>
           <p class="hint">这里只用于翻译页的 AI 译文，不影响 AI 对话。</p>
-          <button class="save" onclick={save}>{saved ? "已保存" : "保存"}</button>
+          {#if translateLoadError}
+            <p class="error" role="alert">{translateLoadError}</p>
+          {/if}
+          {#if saveError}
+            <p class="error" role="alert">{saveError}</p>
+          {/if}
+          <button class="save" onclick={save} disabled={saving}>
+            {saving ? "保存中…" : saved ? "已保存" : "保存"}
+          </button>
         </div>
 
       {:else if activeSection === "chat"}
@@ -343,10 +489,26 @@
             <span>接口地址</span>
             <input type="text" bind:value={chatCfg.base_url} placeholder="https://api.openai.com/v1" spellcheck="false" />
           </label>
-          <label class="field">
-            <span>API 密钥</span>
-            <input type="password" bind:value={chatCfg.api_key} placeholder="sk-…" spellcheck="false" />
-          </label>
+          <div class="field">
+            <label for="chat-api-key"><span>API 密钥</span></label>
+            <input
+              id="chat-api-key"
+              type="password"
+              value={chatCfg.api_key}
+              oninput={onChatApiKeyInput}
+              placeholder={chatCfg.has_api_key ? "已保存，留空保持不变" : "sk-…"}
+              autocomplete="new-password"
+              spellcheck="false"
+            />
+            {#if chatCfg.has_api_key}
+              <div class="api-key-status">
+                <span>{clearChatApiKey ? "保存后删除已保存密钥" : "已保存；留空会保持不变"}</span>
+                <button type="button" onclick={toggleChatApiKeyClear}>
+                  {clearChatApiKey ? "撤销清除" : "清除已保存密钥"}
+                </button>
+              </div>
+            {/if}
+          </div>
           <label class="field">
             <span>模型</span>
             <input type="text" bind:value={chatCfg.model} placeholder="gpt-4o-mini" spellcheck="false" />
@@ -356,7 +518,15 @@
             <textarea bind:value={chatCfg.chat_prompt} placeholder="可选，会作为系统提示加在对话开头。留空则不加" spellcheck="false"></textarea>
           </label>
           <p class="hint">只用于 AI 对话，不会套用翻译提示词。</p>
-          <button class="save" onclick={saveChat}>{chatSaved ? "已保存" : "保存"}</button>
+          {#if chatLoadError}
+            <p class="error" role="alert">{chatLoadError}</p>
+          {/if}
+          {#if chatSaveError}
+            <p class="error" role="alert">{chatSaveError}</p>
+          {/if}
+          <button class="save" onclick={saveChat} disabled={chatSaving}>
+            {chatSaving ? "保存中…" : chatSaved ? "已保存" : "保存"}
+          </button>
         </div>
 
       {:else if activeSection === "shortcuts"}
@@ -430,7 +600,12 @@
           </div>
 
           <label class="toggle">
-            <input type="checkbox" checked={autostart} onchange={toggleAutostart} />
+            <input
+              type="checkbox"
+              checked={autostart}
+              disabled={autostartSaving}
+              onchange={toggleAutostart}
+            />
             <span>开机自动启动</span>
           </label>
 
@@ -670,6 +845,31 @@
     resize: vertical;
     line-height: 1.5;
   }
+  .api-key-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .api-key-status span {
+    color: var(--text-faint);
+    font-size: var(--text-xs);
+    font-weight: 400;
+  }
+  .api-key-status button {
+    flex: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    padding: 3px 6px;
+    cursor: pointer;
+  }
+  .api-key-status button:hover {
+    background: var(--accent-soft);
+  }
   .field input:focus,
   .field textarea:focus {
     border-color: var(--accent);
@@ -769,6 +969,10 @@
   }
   .save:hover {
     background: var(--accent-hover);
+  }
+  .save:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
   }
   kbd {
     font-family: inherit;

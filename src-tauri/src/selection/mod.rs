@@ -34,6 +34,9 @@ mod tests {
 
     #[test]
     fn trims_non_empty_selected_text() {
-        assert_eq!(normalize_selected_text("  hello  "), Some("hello".to_string()));
+        assert_eq!(
+            normalize_selected_text("  hello  "),
+            Some("hello".to_string())
+        );
     }
 }

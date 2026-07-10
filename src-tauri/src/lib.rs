@@ -8,8 +8,8 @@ mod ocr;
 mod screenshot;
 mod selection;
 mod shortcut;
-mod tray;
 mod translate;
+mod tray;
 mod window;
 
 use tauri::{Manager, WindowEvent};

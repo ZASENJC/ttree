@@ -127,10 +127,12 @@ fn snapshot_pasteboard(pasteboard: &NSPasteboard) -> PasteboardSnapshot {
                 .to_vec()
                 .into_iter()
                 .filter_map(|type_name| {
-                    pasteboard.dataForType(&type_name).map(|data| PasteboardEntry {
-                        type_name: type_name.to_string(),
-                        data: data.to_vec(),
-                    })
+                    pasteboard
+                        .dataForType(&type_name)
+                        .map(|data| PasteboardEntry {
+                            type_name: type_name.to_string(),
+                            data: data.to_vec(),
+                        })
                 })
                 .collect()
         })
@@ -149,7 +151,10 @@ fn restore_pasteboard(pasteboard: &NSPasteboard, snapshot: &PasteboardSnapshot) 
     }
 }
 
-fn should_restore_pasteboard(current_change_count: NSInteger, copy_change_count: NSInteger) -> bool {
+fn should_restore_pasteboard(
+    current_change_count: NSInteger,
+    copy_change_count: NSInteger,
+) -> bool {
     current_change_count == copy_change_count
 }
 

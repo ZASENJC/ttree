@@ -6,17 +6,15 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::shared_client;
+use super::{
+    read_error_body, read_limited_response, shared_client, MAX_TRANSLATION_RESPONSE_BYTES,
+};
 
 const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 调用谷歌免费端接口，返回完整译文。
-pub async fn translate(
-    text: &str,
-    source: &str,
-    target: &str,
-) -> Result<String, String> {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     let url = format!(
         "{ENDPOINT}?client=gtx&sl={sl}&tl={tl}&dt=t&q={q}",
         sl = urlencoding::encode(source),
@@ -32,13 +30,14 @@ pub async fn translate(
         .map_err(|e| format!("谷歌翻译请求失败: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("谷歌翻译返回状态 {}", resp.status()));
+        let status = resp.status();
+        let body = read_error_body(resp).await;
+        return Err(format!("谷歌翻译返回状态 {status}: {body}"));
     }
 
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("谷歌翻译响应解析失败: {e}"))?;
+    let body = read_limited_response(resp, MAX_TRANSLATION_RESPONSE_BYTES, "谷歌翻译响应").await?;
+    let body: Value =
+        serde_json::from_slice(&body).map_err(|e| format!("谷歌翻译响应解析失败: {e}"))?;
 
     Ok(parse_response(&body))
 }
@@ -70,11 +69,7 @@ mod tests {
 
     #[test]
     fn concatenates_multiple_segments() {
-        let body = json!([
-            [["你好", "hello"], ["世界", "world"]],
-            null,
-            "en"
-        ]);
+        let body = json!([[["你好", "hello"], ["世界", "world"]], null, "en"]);
         assert_eq!(parse_response(&body), "你好世界");
     }
 

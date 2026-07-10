@@ -12,7 +12,7 @@ use crate::window;
 
 /// 读取 OpenAI 配置。
 #[tauri::command]
-pub fn get_openai_config<R: Runtime>(app: AppHandle<R>) -> OpenAiConfig {
+pub fn get_openai_config<R: Runtime>(app: AppHandle<R>) -> Result<OpenAiConfig, String> {
     config::load_openai(&app)
 }
 
@@ -27,7 +27,7 @@ pub fn set_openai_config<R: Runtime>(
 
 /// 读取 AI 对话配置。
 #[tauri::command]
-pub fn get_chat_ai_config<R: Runtime>(app: AppHandle<R>) -> ChatAiConfig {
+pub fn get_chat_ai_config<R: Runtime>(app: AppHandle<R>) -> Result<ChatAiConfig, String> {
     config::load_chat_ai(&app)
 }
 
@@ -58,8 +58,8 @@ pub fn set_shortcut_config<R: Runtime>(
 
 /// 录制快捷键时临时取消注册全局快捷键，使按键能传到前端；结束时恢复。
 #[tauri::command]
-pub fn set_shortcut_recording<R: Runtime>(app: AppHandle<R>, active: bool) {
-    shortcut::set_recording_active(&app, active);
+pub fn set_shortcut_recording<R: Runtime>(app: AppHandle<R>, active: bool) -> Result<(), String> {
+    shortcut::set_recording_active(&app, active)
 }
 
 /// 显示并聚焦主窗口（前端在 OCR 完成后调用）。
@@ -70,15 +70,12 @@ pub fn show_main<R: Runtime>(app: AppHandle<R>) {
 
 /// 普通 AI 对话命令：不使用翻译提示词。
 #[tauri::command]
-pub async fn chat<R: Runtime>(
-    app: AppHandle<R>,
-    messages: Vec<ChatMessage>,
-) -> Result<(), String> {
+pub async fn chat<R: Runtime>(app: AppHandle<R>, messages: Vec<ChatMessage>) -> Result<(), String> {
     if messages.is_empty() {
         return Ok(());
     }
     translate::validate_messages(&messages)?;
-    let cfg = config::load_chat_ai(&app);
+    let cfg = config::load_chat_ai_for_request(&app)?;
     translate::openai::chat_stream(&app, &cfg, &messages).await
 }
 
@@ -125,24 +122,29 @@ pub async fn translate<R: Runtime>(
     if text.is_empty() {
         return Ok(String::new());
     }
+    translate::validate_translation_text(text)?;
+    translate::validate_language_pair(&req.source, &req.target)?;
 
     match req.engine {
-        Engine::Google => {
-            translate::google::translate(text, &req.source, &req.target).await
-        }
-        Engine::Bing => {
-            translate::bing::translate(text, &req.source, &req.target).await
-        }
+        Engine::Google => translate::google::translate(text, &req.source, &req.target).await,
+        Engine::Bing => translate::bing::translate(text, &req.source, &req.target).await,
         Engine::Openai => {
-            let cfg = config::load_openai(&app);
-            translate::openai::translate_stream(&app, &cfg, text, &req.source, &req.target)
-                .await?;
+            let cfg = config::load_openai_for_request(&app)?;
+            translate::openai::translate_stream(
+                &app,
+                &cfg,
+                req.request_id,
+                text,
+                &req.source,
+                &req.target,
+            )
+            .await?;
             Ok(String::new())
         }
     }
 }
 
-/// 截图 OCR 命令：交互式框选 → 系统 OCR → 返回识别文本。
+/// 截图 OCR 命令：Apple 自带自由框选 → 系统 OCR → 返回识别文本。
 ///
 /// 用户取消截图时返回空串。在阻塞线程执行（screencapture 与 Vision 均为阻塞调用）。
 #[tauri::command]
@@ -152,8 +154,7 @@ pub async fn screenshot_ocr() -> Result<String, String> {
             return Ok(String::new());
         };
         let result = ocr::recognize_file(&path.to_string_lossy());
-        // 清理临时文件
-        let _ = std::fs::remove_file(&path);
+        // TempPath 离开作用域时自动清理临时截图。
         result
     })
     .await
@@ -184,10 +185,11 @@ pub fn start_new_conversation<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
 #[tauri::command]
 pub fn append_chat_history<R: Runtime>(
     app: AppHandle<R>,
+    conversation_id: Option<usize>,
     round: Vec<ChatMessage>,
 ) -> Result<(), String> {
     translate::validate_messages(&round)?;
-    history::append_round(&app, &round)
+    history::append_round(&app, conversation_id, &round)
 }
 
 /// 清空全部对话历史（删除历史文件）。

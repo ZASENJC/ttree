@@ -1,71 +1,362 @@
 name: release
 
-# 触发条件：推送 v* 开头的标签时构建并发布 macOS 更新包到 GitHub Releases。
-# 工作流会生成 latest.json 与签名后的 .tar.gz 更新包，
-# 应用通过 https://github.com/ZASENJC/ttree/releases/latest/download/latest.json 拉取更新。
+# Manual runs build and verify temporary artifacts only. A pushed v* tag may
+# enter the separate publish job after the same verification job succeeds.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
 
-# 同一标签重复推送时取消旧任务。
+permissions:
+  contents: read
+
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  release:
+  verify:
+    runs-on: macos-14
     permissions:
-      contents: write
-    runs-on: macos-latest
+      contents: read
+    outputs:
+      app_version: ${{ steps.metadata.outputs.app_version }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+    env:
+      EXPECTED_MACOS_COMMUNITY_SIGNING_IDENTITY: TTREE Open Source Code Signing
+      EXPECTED_MACOS_COMMUNITY_CERT_SHA1: B8D254561BB6CAD78AA71FA18D62A32D10F50C08
+      MACOS_COMMUNITY_SIGNING_IDENTITY: TTREE Open Source Code Signing
+      MACOS_COMMUNITY_CERT_SHA1: B8D254561BB6CAD78AA71FA18D62A32D10F50C08
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      # universal-apple-darwin = arm64 + x86_64 合体；runner 默认只装 arm64 目标，
-      # 需显式补装 x86_64，否则 `tauri build --target universal-apple-darwin` 报
-      # "Target x86_64-apple-darwin is not installed"。
-      - name: Add x86_64 target (for universal build)
-        run: rustup target add x86_64-apple-darwin
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-community-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      - name: Install frontend deps
-        run: npm ci
+      - name: Install frontend dependencies
+        run: npm run ci:install
 
-      # 使用 tauri-action 构建、签名（自动产出 .sig）、并创建 Release。
-      # updaterUrl 指向最新 Release 的 latest.json，应用据此自更新。
-      #
-      # 构建 universal-apple-darwin：单一二进制同时含 arm64 + x86_64，
-      # Intel 与 Apple Silicon 用户装同一份 .dmg/.app 即可原生运行，
-      # 且 `tauri build` 只接受一次 --target（双 target 会被拒绝）。
-      - name: Build and release
-        uses: tauri-apps/tauri-action@v0
+      - name: Run release contract tests
+        run: npm run test:release
+
+      - name: Check frontend
+        run: npm run check
+
+      - name: Test frontend
+        run: npm test
+
+      - name: Check Rust backend
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Test Rust backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Lint Rust backend
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Resolve and validate release metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(jq -r '.version' package.json)"
+          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
+
+          if [[ -z "$package_version" || "$package_version" == "null" ]]; then
+            echo "::error::package.json does not contain a valid version"
+            exit 1
+          fi
+          if [[ "$package_version" != "$tauri_version" ]]; then
+            echo "::error::package.json version $package_version does not match tauri.conf.json version $tauri_version"
+            exit 1
+          fi
+
+          expected_tag="v$package_version"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match package version $package_version"
+              exit 1
+            fi
+            release_tag="$GITHUB_REF_NAME"
+          else
+            release_tag="${expected_tag}-verify-${GITHUB_RUN_NUMBER}"
+          fi
+
+          echo "APP_VERSION=$package_version" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+          echo "app_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install updater signature verifier
+        run: brew list minisign >/dev/null 2>&1 || brew install minisign
+
+      - name: Build unsigned macOS app without signing material
+        run: ./scripts/package-macos-community.sh universal-apple-darwin "$GITHUB_RUN_NUMBER" --build-only
+
+      - name: Import pinned community signing certificate
+        id: community-signing
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 签名私钥与其口令均为仓库 Secret，切勿提交明文。
-          # 私钥应设置强口令：泄漏的私钥若无第二因子可直接签发被自动接受的更新（RCE 风险）。
+          MACOS_COMMUNITY_CERTIFICATE: ${{ secrets.MACOS_COMMUNITY_CERTIFICATE }}
+          MACOS_COMMUNITY_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_COMMUNITY_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./scripts/validate-release-secrets.sh certificate
+          umask 077
+          keychain_path="$RUNNER_TEMP/ttree-community.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          certificate_path="$RUNNER_TEMP/ttree-community.p12"
+          certificate_pem="$RUNNER_TEMP/ttree-community.pem"
+          cleanup_import_files() {
+            rm -f "$certificate_path" "$certificate_pem"
+          }
+          trap cleanup_import_files EXIT
+
+          echo "::add-mask::$keychain_password"
+          echo "keychain_path=$keychain_path" >> "$GITHUB_OUTPUT"
+          printf '%s' "$MACOS_COMMUNITY_CERTIFICATE" |
+            openssl base64 -d -A -out "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$MACOS_COMMUNITY_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          security find-certificate \
+            -c "$EXPECTED_MACOS_COMMUNITY_SIGNING_IDENTITY" \
+            -p \
+            "$keychain_path" > "$certificate_pem"
+
+          actual_sha1="$(openssl x509 -in "$certificate_pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr '[:lower:]' '[:upper:]')"
+          if [[ "$actual_sha1" != "$EXPECTED_MACOS_COMMUNITY_CERT_SHA1" ]]; then
+            echo "::error::Imported community certificate does not match the pinned fingerprint"
+            exit 1
+          fi
+
+          sudo security add-trusted-cert \
+            -d \
+            -r trustRoot \
+            -p codeSign \
+            -k /Library/Keychains/System.keychain \
+            "$certificate_pem"
+
+          existing_keychains=()
+          while IFS= read -r keychain; do
+            existing_keychains+=("$keychain")
+          done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//')
+          security list-keychains -d user -s "$keychain_path" "${existing_keychains[@]}"
+          security find-identity -v -p codesigning "$keychain_path" |
+            grep -F "$EXPECTED_MACOS_COMMUNITY_CERT_SHA1" >/dev/null
+
+          echo "MACOS_COMMUNITY_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+
+      - name: Sign and package community-signed macOS app
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ./scripts/validate-release-secrets.sh updater
+          ./scripts/package-macos-community.sh universal-apple-darwin "$GITHUB_RUN_NUMBER" --package-only
+
+      - name: Clean up signing keychain
+        if: always() && steps.community-signing.outputs.keychain_path != ''
+        shell: bash
+        run: security delete-keychain "${{ steps.community-signing.outputs.keychain_path }}" 2>/dev/null || true
+
+      - name: Verify final app signature
+        run: |
+          ./scripts/verify-macos-community-signature.sh \
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/TTREE.app
+
+      - name: Generate updater manifest
+        run: |
+          ./scripts/generate-latest-json.sh \
+            src-tauri/target/community-release \
+            "$RELEASE_TAG" \
+            "$GITHUB_REPOSITORY"
+
+      - name: Verify packaged release assets
+        run: |
+          ./scripts/verify-macos-release-assets.sh \
+            src-tauri/target/community-release \
+            "$RELEASE_TAG" \
+            "$GITHUB_REPOSITORY" \
+            "$APP_VERSION"
+
+      - name: Record verified asset checksums
+        working-directory: src-tauri/target/community-release
+        run: |
+          shasum -a 256 \
+            "TTREE_${APP_VERSION}_universal.dmg" \
+            TTREE_universal.app.tar.gz \
+            TTREE_universal.app.tar.gz.sig \
+            latest.json > SHA256SUMS
+          shasum -a 256 --check SHA256SUMS
+
+      - name: Upload temporary verification artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "TTREE ${{ github.ref_name }}"
-          releaseDraft: false
-          prerelease: false
-          updaterJsonPreferNsis: false
-          args: --target universal-apple-darwin
+          name: community-macos-${{ github.run_id }}
+          path: src-tauri/target/community-release/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      APP_VERSION: ${{ needs.verify.outputs.app_version }}
+      RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download verified build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: community-macos-${{ github.run_id }}
+          path: src-tauri/target/community-release
+
+      - name: Install updater signature verifier
+        run: brew list minisign >/dev/null 2>&1 || brew install minisign
+
+      - name: Recheck transferred artifacts
+        working-directory: src-tauri/target/community-release
+        run: shasum -a 256 --check SHA256SUMS
+
+      - name: Recheck updater signature and manifest
+        env:
+          VERIFY_MACOS_CONTAINERS: "0"
+        run: |
+          ./scripts/verify-macos-release-assets.sh \
+            src-tauri/target/community-release \
+            "$RELEASE_TAG" \
+            "$GITHUB_REPOSITORY" \
+            "$APP_VERSION"
+
+      - name: Create private draft Release
+        id: draft-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_dir="src-tauri/target/community-release"
+          if existing_release="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft \
+              --jq '.isDraft' 2>/dev/null
+          )"; then
+            if [[ "$existing_release" != "true" ]]; then
+              echo "::error::Release $RELEASE_TAG is already published"
+              exit 1
+            fi
+            existing_tag="$RELEASE_TAG"
+            gh release delete "$existing_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes
+          fi
+          gh release create "$RELEASE_TAG" \
+            "$release_dir/TTREE_${APP_VERSION}_universal.dmg" \
+            "$release_dir/TTREE_universal.app.tar.gz" \
+            "$release_dir/TTREE_universal.app.tar.gz.sig" \
+            "$release_dir/latest.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "TTREE $RELEASE_TAG" \
+            --notes-file scripts/community-release-notes.md
+
+      - name: Download and verify actual draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_MACOS_CONTAINERS: "0"
+        run: |
+          set -euo pipefail
+          release_dir="$GITHUB_WORKSPACE/src-tauri/target/community-release"
+          downloaded_dir="$RUNNER_TEMP/ttree-draft-assets"
+          mkdir -p "$downloaded_dir"
+
+          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if [[ "$(printf '%s\n' "$assets" | sed '/^$/d' | wc -l | tr -d ' ')" != "4" ]]; then
+            echo "::error::Draft Release must contain exactly four assets"
+            exit 1
+          fi
+          for expected in \
+            "TTREE_${APP_VERSION}_universal.dmg" \
+            "TTREE_universal.app.tar.gz" \
+            "TTREE_universal.app.tar.gz.sig" \
+            "latest.json"
+          do
+            if ! grep -Fqx "$expected" <<< "$assets"; then
+              echo "::error::Draft Release is missing $expected"
+              exit 1
+            fi
+          done
+
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$downloaded_dir"
+
+          (
+            cd "$downloaded_dir"
+            shasum -a 256 --check "$release_dir/SHA256SUMS"
+          )
+          ./scripts/verify-macos-release-assets.sh \
+            "$downloaded_dir" \
+            "$RELEASE_TAG" \
+            "$GITHUB_REPOSITORY" \
+            "$APP_VERSION"
+
+      - name: Publish verified Release
+        id: publish-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Clean up unpublished draft Release
+        if: always() && steps.draft-release.outcome == 'success' && steps.publish-release.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft \
+              --jq '.isDraft' 2>/dev/null || true
+          )" == "true" ]]; then
+            gh release delete "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes
+          fi

@@ -6,9 +6,8 @@
   import EngineTabs, { type MainMode } from "./EngineTabs.svelte";
   import LangSelector from "./LangSelector.svelte";
   import ResultView from "./ResultView.svelte";
+  import { clampSourceHeight as clampSourcePaneHeight } from "./panelSizing";
 
-  const MIN_SOURCE_HEIGHT = 88;
-  const MIN_RESULT_HEIGHT = 120;
   const AUTO_TRANSLATE_DELAY_MS = 1000;
 
   const t = translation;
@@ -17,6 +16,7 @@
   let sourceHeight = $state(210);
   let isDraggingSplit = $state(false);
   let isPinned = $state(false);
+  let stopSplitResize: (() => void) | null = null;
 
   interface Props {
     mode: MainMode;
@@ -46,9 +46,36 @@
     return () => window.clearTimeout(timer);
   });
 
-  // 初始化固定状态
+  // 初始化固定状态，并在窗口恢复/缩放时保持上下两块均可见。
   onMount(() => {
-    getPinned().then((pinned) => (isPinned = pinned));
+    let mounted = true;
+    void getPinned()
+      .then((pinned) => {
+        if (mounted) isPinned = pinned;
+      })
+      .catch(() => {});
+
+    const clampToPanel = () => {
+      sourceHeight = clampSourcePaneHeight(
+        sourceHeight,
+        panel?.clientHeight ?? window.innerHeight,
+      );
+    };
+    clampToPanel();
+
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(clampToPanel);
+    if (panel) observer?.observe(panel);
+    window.addEventListener("resize", clampToPanel);
+
+    return () => {
+      mounted = false;
+      observer?.disconnect();
+      window.removeEventListener("resize", clampToPanel);
+      stopSplitResize?.();
+    };
   });
 
   function onKeydown(e: KeyboardEvent) {
@@ -68,31 +95,27 @@
     isPinned = await setPinned(!isPinned);
   }
 
-  function maxSourceHeight(): number {
-    const height = panel?.clientHeight ?? 460;
-    // 预留 toolbar、语言栏、间距和译文最小高度。
-    return Math.max(MIN_SOURCE_HEIGHT, height - MIN_RESULT_HEIGHT - 128);
-  }
-
-  function clampSourceHeight(nextHeight: number): number {
-    return Math.min(Math.max(nextHeight, MIN_SOURCE_HEIGHT), maxSourceHeight());
-  }
-
   function startSplitResize(e: PointerEvent) {
     e.preventDefault();
+    stopSplitResize?.();
     const startY = e.clientY;
     const startHeight = sourceHeight;
     isDraggingSplit = true;
 
     const onMove = (moveEvent: PointerEvent) => {
-      sourceHeight = clampSourceHeight(startHeight + moveEvent.clientY - startY);
+      sourceHeight = clampSourcePaneHeight(
+        startHeight + moveEvent.clientY - startY,
+        panel?.clientHeight ?? window.innerHeight,
+      );
     };
     const onUp = () => {
       isDraggingSplit = false;
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      stopSplitResize = null;
     };
+    stopSplitResize = onUp;
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -138,7 +161,8 @@
   >
     <textarea
       bind:this={textarea}
-      bind:value={t.state.input}
+      value={t.state.input}
+      oninput={(event) => t.setInput(event.currentTarget.value)}
       onkeydown={onKeydown}
       class="input"
       placeholder="输入文字，回车翻译"
@@ -156,8 +180,8 @@
     <LangSelector
       source={t.state.source}
       target={t.state.target}
-      onSource={(c) => (t.state.source = c)}
-      onTarget={(c) => (t.state.target = c)}
+      onSource={(c) => void t.setSource(c)}
+      onTarget={(c) => void t.setTarget(c)}
     />
   </div>
 

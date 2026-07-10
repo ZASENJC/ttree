@@ -54,13 +54,25 @@ pub fn is_pinned() -> bool {
 }
 
 /// 设置固定窗口模式。固定时窗口置顶且失焦不自动隐藏。
-pub fn set_pinned<R: tauri::Runtime>(window: &WebviewWindow<R>, pinned: bool) -> tauri::Result<bool> {
-    IS_PINNED.store(pinned, Ordering::Relaxed);
-    window.set_always_on_top(pinned)?;
+pub fn set_pinned<R: tauri::Runtime>(
+    window: &WebviewWindow<R>,
+    pinned: bool,
+) -> tauri::Result<bool> {
+    let pinned = commit_pinned_state(&IS_PINNED, pinned, window.set_always_on_top(pinned))?;
     if pinned {
         let _ = window.show();
         let _ = window.set_focus();
     }
+    Ok(pinned)
+}
+
+fn commit_pinned_state<E>(
+    state: &AtomicBool,
+    pinned: bool,
+    operation: Result<(), E>,
+) -> Result<bool, E> {
+    operation?;
+    state.store(pinned, Ordering::Relaxed);
     Ok(pinned)
 }
 
@@ -78,5 +90,25 @@ pub fn toggle_window<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
             show_window(&window);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_state_changes_only_after_window_operation_succeeds() {
+        let state = AtomicBool::new(false);
+
+        let failed: Result<bool, &str> = commit_pinned_state(&state, true, Err("failed"));
+        assert_eq!(failed, Err("failed"));
+        assert!(!state.load(Ordering::Relaxed));
+
+        assert_eq!(
+            commit_pinned_state(&state, true, Ok::<(), &str>(())),
+            Ok(true)
+        );
+        assert!(state.load(Ordering::Relaxed));
     }
 }

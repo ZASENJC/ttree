@@ -1,6 +1,6 @@
 [package]
 name = "ttree"
-version = "0.1.0"
+version = "0.1.1"
 description = "轻量 macOS AI 翻译器"
 authors = ["you"]
 edition = "2021"
@@ -28,8 +28,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 urlencoding = "2"
-memchr = "2"
 url = "2"
+tempfile = "3"
 
 # macOS 原生 OCR（Apple Vision）
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -11,6 +11,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ static HISTORY_LOCK: Mutex<()> = Mutex::new(());
 /// 单段对话：包含一组消息，以及用于列表展示的摘要（首句用户提问）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
-    /// 该对话在文件中的序号（0 = 最旧），用作前端唯一标识。
+    /// 稳定会话 id；恢复旧对话后返回顺序会变化，但 id 保持不变。
     pub id: usize,
     pub messages: Vec<ChatMessage>,
     /// 摘要：该段对话第一条用户提问（截断），用作列表标题。
@@ -40,6 +41,12 @@ pub struct Conversation {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum HistoryLine {
+    /// 恢复已有对话，后续消息继续归入指定稳定 id。
+    SessionResume {
+        #[serde(rename = "type")]
+        kind: String,
+        id: usize,
+    },
     /// 新对话开始标记（`{"type":"session_start"}`）。
     SessionStart {
         #[serde(rename = "type")]
@@ -67,7 +74,9 @@ fn history_path<R: Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, St
 /// 写入对话分隔标记，表示之后的消息属于一段新对话。
 /// 仅在文件已有内容时才需要写标记（首段对话无需前导标记）。
 pub fn start_new_conversation<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let _guard = HISTORY_LOCK.lock().map_err(|e| format!("历史锁中毒: {e}"))?;
+    let _guard = HISTORY_LOCK
+        .lock()
+        .map_err(|e| format!("历史锁中毒: {e}"))?;
     let path = history_path(app)?;
     // 空文件无需分隔标记——它本身已是新对话起点
     let needs_marker = match fs::metadata(&path) {
@@ -94,15 +103,32 @@ pub fn start_new_conversation<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
 /// 空切片直接返回 Ok。
 pub fn append_round<R: Runtime>(
     app: &AppHandle<R>,
+    conversation_id: Option<usize>,
     msgs: &[ChatMessage],
 ) -> Result<(), String> {
     if msgs.is_empty() {
         return Ok(());
     }
-    let _guard = HISTORY_LOCK.lock().map_err(|e| format!("历史锁中毒: {e}"))?;
+    let _guard = HISTORY_LOCK
+        .lock()
+        .map_err(|e| format!("历史锁中毒: {e}"))?;
     let path = history_path(app)?;
     // 预先序列化所有行，合并成一次写入
     let mut buf = String::with_capacity(128 * msgs.len());
+    if let Some(id) = conversation_id {
+        let conversations = read_conversations_from_path(&path)?;
+        if !conversations
+            .iter()
+            .any(|conversation| conversation.id == id)
+        {
+            return Err(format!("对话不存在: {id}"));
+        }
+        let marker = serde_json::json!({ "type": "session_resume", "id": id });
+        buf.push_str(
+            &serde_json::to_string(&marker).map_err(|e| format!("序列化对话恢复标记失败: {e}"))?,
+        );
+        buf.push('\n');
+    }
     for m in msgs {
         let line = serde_json::to_string(m).map_err(|e| format!("序列化消息失败: {e}"))?;
         buf.push_str(&line);
@@ -126,27 +152,37 @@ pub fn read_all<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<ChatMessage>, Stri
 }
 
 /// 以对话为单位读取历史：按 `session_start` 标记切分，旧数据（无标记）
-/// 归为最旧的一段（id=0）。返回顺序为旧 → 新。
-pub fn read_conversations<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<Conversation>, String> {
-    let _guard = HISTORY_LOCK.lock().map_err(|e| format!("历史锁中毒: {e}"))?;
+/// 归为第一段（id=0）。返回顺序为最久未活动 → 最近活动。
+pub fn read_conversations<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Conversation>, String> {
+    let _guard = HISTORY_LOCK
+        .lock()
+        .map_err(|e| format!("历史锁中毒: {e}"))?;
     let path = history_path(app)?;
-    let file = match File::open(&path) {
+    read_conversations_from_path(&path)
+}
+
+fn read_conversations_from_path(path: &Path) -> Result<Vec<Conversation>, String> {
+    let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("打开历史文件失败: {e}")),
     };
     let reader = BufReader::new(file);
 
-    let mut conversations: Vec<Conversation> = Vec::new();
-    let mut current_id: usize = 0;
+    Ok(parse_conversation_lines(
+        reader.lines().map_while(Result::ok),
+    ))
+}
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue, // 读取出错：跳过该行
-        };
+fn parse_conversation_lines<I>(lines: I) -> Vec<Conversation>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut conversations: Vec<Conversation> = Vec::new();
+    let mut current_id: Option<usize> = None;
+    let mut next_id: usize = 0;
+
+    for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -157,20 +193,39 @@ pub fn read_conversations<R: Runtime>(
             Err(_) => continue,
         };
         match parsed {
+            HistoryLine::SessionResume { kind, id } if kind == "session_resume" => {
+                current_id = Some(id);
+                next_id = next_id.max(id.saturating_add(1));
+                if let Some(index) = conversations.iter().position(|c| c.id == id) {
+                    let conversation = conversations.remove(index);
+                    conversations.push(conversation);
+                }
+            }
             HistoryLine::SessionStart { kind } if kind == "session_start" => {
-                // 新对话开始：标记行本身不产生空对话，仅在后续消息到达时创建槽位。
-                current_id = conversations.len();
+                current_id = Some(next_id);
+                next_id = next_id.saturating_add(1);
             }
             HistoryLine::Message(msg) => {
-                // 确保存在当前对话槽位（首段无前导标记时由此创建）
-                if conversations.len() <= current_id {
+                let id = current_id.unwrap_or_else(|| {
+                    let id = next_id;
+                    next_id = next_id.saturating_add(1);
+                    current_id = Some(id);
+                    id
+                });
+                if !conversations
+                    .iter()
+                    .any(|conversation| conversation.id == id)
+                {
                     conversations.push(Conversation {
-                        id: current_id,
+                        id,
                         messages: Vec::new(),
                         summary: String::new(),
                     });
                 }
-                let conv = &mut conversations[current_id];
+                let conv = conversations
+                    .iter_mut()
+                    .find(|conversation| conversation.id == id)
+                    .expect("conversation was inserted above");
                 if conv.summary.is_empty() && msg.role == "user" {
                     conv.summary = truncate_summary(&msg.content);
                 }
@@ -181,7 +236,7 @@ pub fn read_conversations<R: Runtime>(
         }
     }
 
-    Ok(conversations)
+    conversations
 }
 
 /// 截取摘要：首行 + 限定长度，避免超长提问撑爆列表标题。
@@ -196,7 +251,9 @@ fn truncate_summary(content: &str) -> String {
 
 /// 清空全部历史：直接删除文件（下次 append 会重建）。
 pub fn clear<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let _guard = HISTORY_LOCK.lock().map_err(|e| format!("历史锁中毒: {e}"))?;
+    let _guard = HISTORY_LOCK
+        .lock()
+        .map_err(|e| format!("历史锁中毒: {e}"))?;
     let path = history_path(app)?;
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -245,10 +302,7 @@ mod tests {
     #[test]
     fn append_then_read_roundtrip() {
         // 临时文件：序列化 → 反序列化，验证行格式正确
-        let round = vec![
-            msg("user", "翻译"),
-            msg("assistant", "translate"),
-        ];
+        let round = vec![msg("user", "翻译"), msg("assistant", "translate")];
         let mut buf = String::new();
         for m in &round {
             buf.push_str(&serde_json::to_string(m).unwrap());
@@ -281,39 +335,7 @@ mod tests {
 
     /// 解析 JSONL 为对话列表的核心逻辑（不依赖 AppHandle，便于单测）。
     fn parse_conversations(data: &str) -> Vec<Conversation> {
-        let mut conversations: Vec<Conversation> = Vec::new();
-        let mut current_id: usize = 0;
-        for line in data.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let parsed = match serde_json::from_str::<HistoryLine>(trimmed) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            match parsed {
-                HistoryLine::SessionStart { kind } if kind == "session_start" => {
-                    current_id = conversations.len();
-                }
-                HistoryLine::Message(m) => {
-                    if conversations.len() <= current_id {
-                        conversations.push(Conversation {
-                            id: current_id,
-                            messages: Vec::new(),
-                            summary: String::new(),
-                        });
-                    }
-                    let conv = &mut conversations[current_id];
-                    if conv.summary.is_empty() && m.role == "user" {
-                        conv.summary = truncate_summary(&m.content);
-                    }
-                    conv.messages.push(m);
-                }
-                _ => continue,
-            }
-        }
-        conversations
+        parse_conversation_lines(data.lines().map(str::to_string))
     }
 
     #[test]
@@ -401,5 +423,36 @@ mod tests {
         let convs = parse_conversations(data);
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].summary, "真正的问题");
+    }
+
+    #[test]
+    fn resumed_conversation_receives_appended_round_and_becomes_most_recent() {
+        let data = concat!(
+            r#"{"role":"user","content":"A1"}"#,
+            "\n",
+            r#"{"role":"assistant","content":"A2"}"#,
+            "\n",
+            r#"{"type":"session_start"}"#,
+            "\n",
+            r#"{"role":"user","content":"B1"}"#,
+            "\n",
+            r#"{"role":"assistant","content":"B2"}"#,
+            "\n",
+            r#"{"type":"session_resume","id":0}"#,
+            "\n",
+            r#"{"role":"user","content":"A3"}"#,
+            "\n",
+            r#"{"role":"assistant","content":"A4"}"#,
+            "\n",
+        );
+
+        let convs = parse_conversations(data);
+
+        assert_eq!(convs.len(), 2);
+        assert_eq!(convs[0].id, 1);
+        assert_eq!(convs[0].messages.last().unwrap().content, "B2");
+        assert_eq!(convs[1].id, 0);
+        assert_eq!(convs[1].messages.len(), 4);
+        assert_eq!(convs[1].messages.last().unwrap().content, "A4");
     }
 }

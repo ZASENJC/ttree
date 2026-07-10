@@ -21,6 +21,7 @@ use crate::selection;
 use crate::window;
 
 static IS_RECORDING_SHORTCUT: AtomicBool = AtomicBool::new(false);
+const MAX_SHORTCUT_SPEC_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Default)]
 struct ParsedShortcuts {
@@ -55,7 +56,10 @@ impl ParsedShortcuts {
     /// 这样当两者共用同一快捷键时，按更丰富的划词行为执行。
     fn entries(&self) -> [(ShortcutAction, &Option<Shortcut>); 5] {
         [
-            (ShortcutAction::SelectionTranslate, &self.selection_translate),
+            (
+                ShortcutAction::SelectionTranslate,
+                &self.selection_translate,
+            ),
             (ShortcutAction::SelectionAiDialog, &self.selection_ai_dialog),
             (ShortcutAction::Toggle, &self.toggle),
             (ShortcutAction::Ocr, &self.ocr),
@@ -124,15 +128,29 @@ fn is_allowed_shared_pair(a: &str, b: &str) -> bool {
 /// 录制期间取消注册所有全局快捷键，否则与已注册键相同的按键会被 OS 级全局热键
 /// 拦截而无法作为普通 keydown 事件传到前端（表现为“按相同键没反应”）。
 /// 退出录制时按已保存配置重新注册。
-pub fn set_recording_active<R: tauri::Runtime>(app: &AppHandle<R>, is_active: bool) {
-    IS_RECORDING_SHORTCUT.store(is_active, Ordering::SeqCst);
-
-    if is_active {
-        let _ = app.global_shortcut().unregister_all();
+pub fn set_recording_active<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    is_active: bool,
+) -> Result<(), String> {
+    let operation = if is_active {
+        app.global_shortcut()
+            .unregister_all()
+            .map_err(|e| format!("暂停全局快捷键失败: {e}"))
     } else {
         let saved = config::load_shortcuts(app);
-        let _ = apply_shortcuts(app, &saved);
-    }
+        apply_shortcuts(app, &saved).map_err(|e| format!("恢复全局快捷键失败: {e}"))
+    };
+    transition_recording_state(&IS_RECORDING_SHORTCUT, is_active, operation)
+}
+
+fn transition_recording_state<E>(
+    state: &AtomicBool,
+    is_active: bool,
+    operation: Result<(), E>,
+) -> Result<(), E> {
+    operation?;
+    state.store(is_active, Ordering::SeqCst);
+    Ok(())
 }
 
 /// 构建 global-shortcut 插件，带统一处理器。
@@ -225,7 +243,7 @@ pub fn apply_shortcuts<R: tauri::Runtime>(
     let previous = parse_shortcut_config(&config::load_shortcuts(app)).ok();
     let gs = app.global_shortcut();
 
-    let _ = gs.unregister_all();
+    gs.unregister_all()?;
 
     for shortcut in shortcuts.shortcuts() {
         if let Err(error) = gs.register(shortcut) {
@@ -253,8 +271,7 @@ fn parse_shortcut_config(cfg: &ShortcutConfig) -> Result<ParsedShortcuts, anyhow
     let toggle = parse_optional_shortcut("呼出翻译快捷键", &cfg.toggle)?;
     let ocr = parse_optional_shortcut("截图 OCR 快捷键", &cfg.ocr)?;
     let ai_dialog = parse_optional_shortcut("呼出 AI 对话快捷键", &cfg.ai_dialog)?;
-    let selection_translate =
-        parse_optional_shortcut("划词翻译快捷键", &cfg.selection_translate)?;
+    let selection_translate = parse_optional_shortcut("划词翻译快捷键", &cfg.selection_translate)?;
     let selection_ai_dialog =
         parse_optional_shortcut("划词 AI 对话快捷键", &cfg.selection_ai_dialog)?;
 
@@ -288,6 +305,11 @@ fn parse_required_shortcut(label: &str, spec: &str) -> Result<Shortcut, anyhow::
 }
 
 fn parse_optional_shortcut(label: &str, spec: &str) -> Result<Option<Shortcut>, anyhow::Error> {
+    if spec.len() > MAX_SHORTCUT_SPEC_BYTES {
+        return Err(anyhow::anyhow!(
+            "{label}超出 {MAX_SHORTCUT_SPEC_BYTES} 字节上限"
+        ));
+    }
     if spec.trim().is_empty() {
         return Ok(None);
     }
@@ -362,11 +384,8 @@ mod tests {
 
     #[test]
     fn accepts_option_space_with_modifier() {
-        let result = parse_shortcut_config(&shortcut_config(
-            "Option+Space",
-            "CmdOrCtrl+Shift+S",
-            "",
-        ));
+        let result =
+            parse_shortcut_config(&shortcut_config("Option+Space", "CmdOrCtrl+Shift+S", ""));
 
         assert!(result.is_ok());
     }
@@ -440,11 +459,7 @@ mod tests {
 
     #[test]
     fn rejects_shift_only_shortcut() {
-        let result = parse_shortcut_config(&shortcut_config(
-            "Shift+S",
-            "CmdOrCtrl+Shift+S",
-            "",
-        ));
+        let result = parse_shortcut_config(&shortcut_config("Shift+S", "CmdOrCtrl+Shift+S", ""));
 
         assert!(result.is_err());
         assert!(result
@@ -455,14 +470,13 @@ mod tests {
 
     #[test]
     fn rejects_modifier_only_shortcut() {
-        let result = parse_shortcut_config(&shortcut_config(
-            "Shift",
-            "CmdOrCtrl+Shift+S",
-            "",
-        ));
+        let result = parse_shortcut_config(&shortcut_config("Shift", "CmdOrCtrl+Shift+S", ""));
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("呼出翻译快捷键无效"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("呼出翻译快捷键无效"));
     }
 
     #[test]
@@ -607,10 +621,7 @@ mod tests {
         let result = parse_shortcut_config(&cfg);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("不能相同"));
+        assert!(result.unwrap_err().to_string().contains("不能相同"));
     }
 
     #[test]
@@ -644,6 +655,28 @@ mod tests {
             shortcuts.action_for(&"CmdOrCtrl+Shift+D".parse().unwrap()),
             Some(ShortcutAction::SelectionAiDialog)
         );
-        assert_eq!(shortcuts.action_for(&"CmdOrCtrl+Shift+X".parse().unwrap()), None);
+        assert_eq!(
+            shortcuts.action_for(&"CmdOrCtrl+Shift+X".parse().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn recording_state_changes_only_after_registration_operation_succeeds() {
+        let state = AtomicBool::new(false);
+
+        let failed: Result<(), &str> = transition_recording_state(&state, true, Err("failed"));
+        assert_eq!(failed, Err("failed"));
+        assert!(!state.load(Ordering::SeqCst));
+
+        transition_recording_state(&state, true, Ok::<(), &str>(())).unwrap();
+        assert!(state.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn rejects_oversized_shortcut_specs_before_parsing() {
+        let error = parse_optional_shortcut("测试快捷键", &"x".repeat(129)).unwrap_err();
+
+        assert!(error.to_string().contains("128 字节"));
     }
 }

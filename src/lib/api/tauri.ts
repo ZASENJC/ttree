@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type Engine = "openai" | "google" | "bing";
 
 export interface TranslateRequest {
+  request_id: number;
   text: string;
   engine: Engine;
   source: string;
@@ -12,6 +13,7 @@ export interface TranslateRequest {
 }
 
 export interface TranslateChunk {
+  request_id: number | null;
   delta: string;
   done: boolean;
 }
@@ -23,7 +25,7 @@ export interface ChatMessage {
 
 /** 单段对话：一组消息 + 摘要（首句用户提问，用作列表标题）。 */
 export interface Conversation {
-  /** 该对话在文件中的序号（0 = 最旧），唯一标识。 */
+  /** 稳定会话 id；列表排序变化时保持不变。 */
   id: number;
   messages: ChatMessage[];
   summary: string;
@@ -39,7 +41,7 @@ export function loadChatHistory(): Promise<ChatMessage[]> {
   return invoke<ChatMessage[]>("load_chat_history");
 }
 
-/** 以对话为单位读取历史（按 session_start 标记切分）。 */
+/** 以对话为单位读取历史（最久未活动 → 最近活动）。 */
 export function loadConversations(): Promise<Conversation[]> {
   return invoke<Conversation[]>("load_conversations");
 }
@@ -49,9 +51,12 @@ export function startNewConversation(): Promise<void> {
   return invoke<void>("start_new_conversation");
 }
 
-/** 追加一轮对话到历史文件（追加写，不重写）。 */
-export function appendChatHistory(round: ChatMessage[]): Promise<void> {
-  return invoke<void>("append_chat_history", { round });
+/** 追加一轮对话；conversationId 非空时恢复并续写指定历史对话。 */
+export function appendChatHistory(
+  round: ChatMessage[],
+  conversationId: number | null,
+): Promise<void> {
+  return invoke<void>("append_chat_history", { round, conversationId });
 }
 
 /** 清空全部对话历史（删除历史文件）。 */
@@ -105,6 +110,8 @@ export function setPinned(pinned: boolean): Promise<boolean> {
 export interface OpenAiConfig {
   base_url: string;
   api_key: string;
+  has_api_key: boolean;
+  clear_api_key: boolean;
   model: string;
   translate_prompt: string;
 }
@@ -112,6 +119,8 @@ export interface OpenAiConfig {
 export interface ChatAiConfig {
   base_url: string;
   api_key: string;
+  has_api_key: boolean;
+  clear_api_key: boolean;
   model: string;
   chat_prompt: string;
 }

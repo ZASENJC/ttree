@@ -7,13 +7,15 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::shared_client;
+use super::{
+    read_error_body, read_limited_response, shared_client, MAX_BING_PAGE_BYTES,
+    MAX_TRANSLATION_RESPONSE_BYTES,
+};
 
 const TRANSLATOR_URL: &str = "https://www.bing.com/translator";
 const TRANSLATE_URL: &str = "https://www.bing.com/ttranslatev3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// 翻译页里抓取的一次性令牌。
@@ -62,30 +64,35 @@ pub async fn translate(text: &str, source: &str, target: &str) -> Result<String,
         .map_err(|e| format!("必应翻译请求失败: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("必应翻译返回状态 {}", resp.status()));
+        let status = resp.status();
+        let body = read_error_body(resp).await;
+        return Err(format!("必应翻译返回状态 {status}: {body}"));
     }
 
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("必应翻译响应解析失败: {e}"))?;
+    let body = read_limited_response(resp, MAX_TRANSLATION_RESPONSE_BYTES, "必应翻译响应").await?;
+    let body: Value =
+        serde_json::from_slice(&body).map_err(|e| format!("必应翻译响应解析失败: {e}"))?;
 
     parse_response(&body).ok_or_else(|| "必应翻译未返回译文".to_string())
 }
 
 /// 抓取翻译页并解析出一次性令牌。
 async fn fetch_token(client: &reqwest::Client) -> Result<BingToken, String> {
-    let html = client
+    let response = client
         .get(TRANSLATOR_URL)
         .header("User-Agent", USER_AGENT)
         .send()
         .await
-        .map_err(|e| format!("必应翻译页请求失败: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("必应翻译页读取失败: {e}"))?;
+        .map_err(|e| format!("必应翻译页请求失败: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = read_error_body(response).await;
+        return Err(format!("必应翻译页返回状态 {status}: {body}"));
+    }
+    let html = read_limited_response(response, MAX_BING_PAGE_BYTES, "必应翻译页").await?;
+    let html = std::str::from_utf8(&html).map_err(|e| format!("必应翻译页不是 UTF-8: {e}"))?;
 
-    parse_token(&html).ok_or_else(|| "必应翻译令牌解析失败（端点可能已变更）".to_string())
+    parse_token(html).ok_or_else(|| "必应翻译令牌解析失败（端点可能已变更）".to_string())
 }
 
 /// 从翻译页 HTML 解析 IG / IID / key / token。
