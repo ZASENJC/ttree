@@ -50,6 +50,7 @@ Sealed Resources version=2 rules=13 files=1
 DETAILS
     ;;
   "-d -r- "*)
+    echo "Executable=$3/Contents/MacOS/ttree"
     echo 'designated => identifier "com.samwstu.ttree" and certificate leaf = H"B8D254561BB6CAD78AA71FA18D62A32D10F50C08"'
     ;;
   *) exit 2 ;;

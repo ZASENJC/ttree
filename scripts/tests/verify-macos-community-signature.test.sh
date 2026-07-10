@@ -27,6 +27,7 @@ ${MOCK_SEALED_RESOURCES}
 DETAILS
     ;;
   "-d -r- "*)
+    echo "Executable=$3/Contents/MacOS/ttree"
     echo "designated => ${MOCK_REQUIREMENT}"
     ;;
   *)
