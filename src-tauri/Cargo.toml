@@ -1,6 +1,6 @@
 [package]
 name = "ttree"
-version = "0.1.1"
+version = "0.1.2"
 description = "轻量 macOS AI 翻译器"
 authors = ["you"]
 edition = "2021"
