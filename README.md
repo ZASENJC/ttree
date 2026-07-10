@@ -34,6 +34,17 @@
 
 所有快捷键均可在设置中自定义，留空即禁用；必须包含 `Cmd/Ctrl/Option` 中的至少一个修饰键。
 
+## 📥 安装
+
+TTREE 的 GitHub Release 使用项目固定的社区代码签名证书，但没有经过 Apple 公证。首次安装时 macOS 会显示无法验证开发者，这是社区签名包的预期行为。
+
+1. 从 GitHub Release 下载 DMG，将 TTREE 拖入“应用程序”。
+2. 首次打开若被阻止，进入 **系统设置 → 隐私与安全性**，找到 TTREE 提示并选择 **仍要打开**。
+3. 按 `⌘⇧S` 使用截图 OCR，在系统提示中允许 **屏幕与系统音频录制**。
+4. 授权后完全退出并重新打开 TTREE。
+
+后续版本使用同一张证书和固定代码身份签名，正常情况下升级不会再次索要录屏权限。请只从本仓库的 Release 下载 TTREE，不要安装使用相同 Bundle ID 的未知构建。
+
 ## 📋 系统权限
 
 首次使用相关功能时，macOS 会弹出授权请求，请在 **系统设置 → 隐私与安全性** 中开启：
@@ -43,7 +54,7 @@
 | **屏幕录制** | 截图 OCR |
 | **辅助功能（Accessibility）** | 划词翻译 / 划词 AI（捕获选中文本）|
 
-> 开发模式下授权对象可能是终端或 dev 二进制。
+> 开发模式下授权对象可能是终端或 dev 二进制，因此开发版可用不代表发布包权限正常。
 
 ## 🚀 开发
 
@@ -69,6 +80,8 @@ npm run tauri build    # 产出 .app 与 .dmg
 ```
 
 产物位于 `src-tauri/target/release/bundle/`（含 `bundle/macos/TTREE.app` 与 `bundle/dmg/*.dmg`）。
+
+普通 `tauri build` 只用于本地开发，不能直接作为 GitHub 发布包。社区发布由 GitHub Actions 调用 `scripts/package-macos-community.sh`，完成固定证书签名、DMG/updater 重打包和容器内签名验证。手动触发 `release` workflow 只生成临时验证产物；只有推送与版本号一致的 `v*` tag 才会发布 Release。
 
 ## 🏗️ 架构
 
@@ -113,8 +126,9 @@ npm run check     # svelte-check 类型检查
 ## ⚠️ 说明与限制
 
 - 谷歌 / 必应走的是**非官方免费端点**，可能随时被限流或失效；OpenAI 兼容接口需自备 API Key。
-- API Key 当前以明文存于本地 Tauri store（用户目录），后续可接入 macOS Keychain。
+- API Key 存储在 macOS Keychain，不写入明文 Tauri store。
 - 仅支持 **macOS 11.0+**（依赖 Vision、Accessibility、screencapture 等系统框架）。
+- GitHub Release 是社区签名、非 Apple 公证包；首次安装需要在“隐私与安全性”中手动选择“仍要打开”。
 
 ## 📄 许可证
 

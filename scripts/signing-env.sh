@@ -19,6 +19,9 @@ if [ ! -f "$PRIV_KEY_PATH" ]; then
   return 1 2>/dev/null || exit 1
 fi
 
+# Tauri 2.11 expects the complete minisign key file as single-line base64
+# when signing updater artifacts from the environment.
+export TAURI_SIGNING_PRIVATE_KEY="$(openssl base64 -A -in "$PRIV_KEY_PATH")"
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$PRIV_KEY_PATH"
 
 # 私钥口令优先级：已显式设置的 TAURI_SIGNING_PRIVATE_KEY_PASSWORD > Keychain > 空。
