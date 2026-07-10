@@ -31,15 +31,19 @@ fi
 
 DETAILS="$(codesign -d --verbose=4 "$APP_PATH" 2>&1)"
 IDENTIFIER="$(printf '%s\n' "$DETAILS" | sed -n 's/^Identifier=//p' | head -n 1)"
-SIGNATURE="$(printf '%s\n' "$DETAILS" | sed -n 's/^Signature=//p' | head -n 1)"
 
 if [ "$IDENTIFIER" != "$EXPECTED_IDENTIFIER" ]; then
   echo "[codesign] unexpected identifier: ${IDENTIFIER:-missing}" >&2
   exit 1
 fi
 
-if [ -z "$SIGNATURE" ] || [ "$SIGNATURE" = "adhoc" ]; then
+if printf '%s\n' "$DETAILS" | grep -q '^Signature=adhoc$'; then
   echo "[codesign] app is unsigned or ad-hoc signed" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$DETAILS" | grep -q '^Signature size='; then
+  echo "[codesign] app does not contain a certificate-backed CMS signature" >&2
   exit 1
 fi
 
