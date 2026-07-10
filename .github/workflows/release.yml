@@ -217,5 +217,4 @@ jobs:
         if: always() && steps.community-signing.outputs.keychain_path != ''
         shell: bash
         run: |
-          sudo security remove-trusted-cert -d "${{ steps.community-signing.outputs.certificate_pem }}" 2>/dev/null || true
           security delete-keychain "${{ steps.community-signing.outputs.keychain_path }}" 2>/dev/null || true
