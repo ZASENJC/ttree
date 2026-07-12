@@ -52,6 +52,11 @@ pub fn run() {
             commands::clear_chat_history
         ])
         .setup(|app| {
+            // 菜单栏应用：隐藏 Dock 与应用切换器入口，只保留状态栏托盘图标。
+            #[cfg(target_os = "macos")]
+            app.handle()
+                .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+
             // 应用毛玻璃磨砂底色 —— Material 3 扁平风格：保留 Popover 通透材质作为窗口底，
             // 圆角与 CSS 的 --radius-window(14px) 对齐，控件一律走实色表面。
             #[cfg(target_os = "macos")]
