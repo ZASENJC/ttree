@@ -22,17 +22,9 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
     unsafe {
         let data = NSData::with_bytes(bytes);
 
-        // 创建文字识别请求，accurate 级别 + 中英多语言
+        // 创建并配置多语言文字识别请求。
         let request: Retained<VNRecognizeTextRequest> = VNRecognizeTextRequest::new();
-        request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
-        request.setUsesLanguageCorrection(true);
-        let langs = NSArray::from_retained_slice(&[
-            NSString::from_str("zh-Hans"),
-            NSString::from_str("zh-Hant"),
-            NSString::from_str("en-US"),
-            NSString::from_str("ja-JP"),
-        ]);
-        request.setRecognitionLanguages(&langs);
+        configure_request(&request);
 
         // 基于图像数据构建 handler 并同步执行
         let handler = VNImageRequestHandler::initWithData_options(
@@ -52,6 +44,23 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
+fn configure_request(request: &VNRecognizeTextRequest) {
+    request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+    request.setUsesLanguageCorrection(true);
+
+    if objc2::available!(macos = 13.0) {
+        request.setAutomaticallyDetectsLanguage(true);
+    }
+
+    let langs = NSArray::from_retained_slice(&[
+        NSString::from_str("zh-Hans"),
+        NSString::from_str("zh-Hant"),
+        NSString::from_str("en-US"),
+        NSString::from_str("ja-JP"),
+    ]);
+    request.setRecognitionLanguages(&langs);
+}
+
 /// 从请求结果收集识别文本。
 unsafe fn collect_text(request: &VNRecognizeTextRequest) -> String {
     let Some(observations) = request.results() else {
@@ -65,4 +74,19 @@ unsafe fn collect_text(request: &VNRecognizeTextRequest) -> String {
         }
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enables_automatic_language_detection_by_default_when_available() {
+        let request = VNRecognizeTextRequest::new();
+        configure_request(&request);
+
+        if objc2::available!(macos = 13.0) {
+            assert!(request.automaticallyDetectsLanguage());
+        }
+    }
 }
