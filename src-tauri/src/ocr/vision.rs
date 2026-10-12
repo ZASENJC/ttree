@@ -6,11 +6,15 @@
 #![cfg(target_os = "macos")]
 
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::{AnyThread, ClassType};
+use objc2::{AnyObject, AnyThread, ClassType};
 use objc2_core_graphics::CGImage;
+use objc2_core_image::{kCIContextUseSoftwareRenderer, CIContext};
 use objc2_core_ml::MLCPUComputeDevice;
-use objc2_foundation::{NSArray, NSObjectProtocol, NSString};
-use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObjectProtocol, NSString};
+use objc2_vision::{
+    VNImageOptionCIContext, VNImageRequestHandler, VNRecognizeTextRequest,
+    VNRequestTextRecognitionLevel,
+};
 
 /// 对指定图片文件路径执行 OCR，返回识别文本（按行拼接）。
 pub fn recognize_file(path: &str) -> Result<String, String> {
@@ -46,11 +50,25 @@ pub(super) fn recognize_once(image: &CGImage, compatibility: bool) -> Result<Str
         let request: Retained<VNRecognizeTextRequest> = VNRecognizeTextRequest::new();
         configure_request(&request, compatibility)?;
 
+        let options = if compatibility || objc2::available!(macos = 27.0) {
+            let software = NSNumber::numberWithBool(true);
+            let values: [&AnyObject; 1] = [&software];
+            let context_options =
+                NSDictionary::from_slices(&[kCIContextUseSoftwareRenderer], &values);
+            let context = CIContext::contextWithOptions(Some(&context_options));
+            let values: [&AnyObject; 1] = [&context];
+            // CPU 模型选择不控制图像缩放器。显式软件 CIContext 避开
+            // 新系统后台/虚拟环境中不可用的硬件图像处理路径。
+            NSDictionary::from_slices(&[VNImageOptionCIContext], &values)
+        } else {
+            NSDictionary::new()
+        };
+
         // 直接提供已规范化的 CGImage，避免 Vision 再走压缩数据解码路径。
         let handler = VNImageRequestHandler::initWithCGImage_options(
             VNImageRequestHandler::alloc(),
             image,
-            &objc2_foundation::NSDictionary::new(),
+            &options,
         );
 
         let requests = NSArray::from_retained_slice(&[Retained::into_super(Retained::into_super(

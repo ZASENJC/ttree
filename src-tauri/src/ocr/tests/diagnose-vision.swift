@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import Vision
 import CoreML
+import CoreImage
 
 let file = URL(fileURLWithPath: CommandLine.arguments[1])
 let data = try Data(contentsOf: file)
@@ -51,15 +52,20 @@ let profiles: [(String, (VNRecognizeTextRequest) throws -> Void)] = [
     }),
 ]
 for (name, configure) in profiles {
+    for software in [false, true] {
     do {
         let request = VNRecognizeTextRequest()
         try configure(request)
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        let options: [VNImageOption: Any] = software
+            ? [.ciContext: CIContext(options: [.useSoftwareRenderer: true])]
+            : [:]
+        let handler = VNImageRequestHandler(cgImage: image, options: options)
         try handler.perform([request])
         let text = request.results?.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n") ?? ""
-        print("\(name): OK \(text)")
+        print("\(name) software=\(software): OK \(text)")
     } catch {
         let error = error as NSError
-        print("\(name): ERROR domain=\(error.domain) code=\(error.code) details=\(error.userInfo)")
+        print("\(name) software=\(software): ERROR domain=\(error.domain) code=\(error.code) details=\(error.userInfo)")
+    }
     }
 }
