@@ -190,13 +190,11 @@
     <ResultView
       webOutput={t.state.webOutput}
       aiOutput={t.state.aiOutput}
-      webEngine={t.state.webEngine}
       webLoading={t.state.webLoading}
       aiLoading={t.state.aiLoading}
       webError={t.state.webError}
       aiError={t.state.aiError}
       error={t.state.error}
-      onSelectWebEngine={(engine) => t.setWebEngine(engine)}
     />
   </section>
 </main>

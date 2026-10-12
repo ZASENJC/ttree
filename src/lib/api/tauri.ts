@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type Engine = "openai" | "google" | "bing";
+export type Engine = "openai" | "auto" | "google" | "bing";
 
 export interface TranslateRequest {
   request_id: number;
@@ -73,7 +73,7 @@ export function onChatChunk(
 
 /**
  * 触发翻译。
- * - google：返回完整译文字符串
+ * - auto：免费服务自动分流和故障切换，返回完整译文字符串
  * - openai：返回空串，结果通过 onChunk 流式到达
  */
 export function translate(req: TranslateRequest): Promise<string> {

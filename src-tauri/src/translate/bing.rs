@@ -44,8 +44,8 @@ pub async fn translate(text: &str, source: &str, target: &str) -> Result<String,
 
     let url = format!(
         "{TRANSLATE_URL}?isVertical=1&IG={ig}&IID={iid}",
-        ig = token.ig,
-        iid = token.iid,
+        ig = urlencoding::encode(&token.ig),
+        iid = urlencoding::encode(&token.iid),
     );
 
     let resp = client
@@ -73,7 +73,9 @@ pub async fn translate(text: &str, source: &str, target: &str) -> Result<String,
     let body: Value =
         serde_json::from_slice(&body).map_err(|e| format!("必应翻译响应解析失败: {e}"))?;
 
-    parse_response(&body).ok_or_else(|| "必应翻译未返回译文".to_string())
+    parse_response(&body)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| "必应翻译未返回译文".to_string())
 }
 
 /// 抓取翻译页并解析出一次性令牌。
@@ -98,13 +100,22 @@ async fn fetch_token(client: &reqwest::Client) -> Result<BingToken, String> {
 /// 从翻译页 HTML 解析 IG / IID / key / token。
 fn parse_token(html: &str) -> Option<BingToken> {
     let ig = extract_between(html, "IG:\"", "\"")?;
-    let iid = extract_between(html, "data-iid=\"", "\"")?;
+    // 页内其他控件也有 data-iid，优先寻找翻译器自己的 IID。
+    let iid = format!(
+        "translator.{}",
+        extract_between(html, "data-iid=\"translator.", "\"")?
+    );
 
     // params_AbusePreventionHelper = [key,"token",time];
-    let helper = extract_between(html, "params_AbusePreventionHelper = [", "]")?;
-    let mut parts = helper.split(',');
-    let key = parts.next()?.trim().to_string();
-    let token = parts.next()?.trim().trim_matches('"').to_string();
+    let assignment = html
+        .split_once("params_AbusePreventionHelper")?
+        .1
+        .trim_start();
+    let assignment = assignment.strip_prefix('=')?.trim_start();
+    let helper = assignment.strip_prefix('[')?.split_once(']')?.0;
+    let parts: Vec<Value> = serde_json::from_str(&format!("[{helper}]")).ok()?;
+    let key = parts.first()?.as_u64()?.to_string();
+    let token = parts.get(1)?.as_str()?.to_string();
 
     if key.is_empty() || token.is_empty() {
         return None;
@@ -172,6 +183,16 @@ mod tests {
     #[test]
     fn returns_none_when_token_missing() {
         assert!(parse_token("<html>nothing here</html>").is_none());
+    }
+
+    #[test]
+    fn parses_compact_token_assignment_and_ignores_unrelated_iids() {
+        let html = r#"IG:"FF00"; <div data-iid="unrelated.1"></div>
+            <div data-iid="translator.5028"></div>
+            params_AbusePreventionHelper=[167060,"abc,def",3600000];"#;
+        let token = parse_token(html).unwrap();
+        assert_eq!(token.iid, "translator.5028");
+        assert_eq!(token.token, "abc,def");
     }
 
     #[test]

@@ -1,35 +1,24 @@
 <script lang="ts">
-  import {
-    WEB_ENGINE_LABELS,
-    WEB_ENGINES,
-    type WebEngine,
-  } from "../stores/translation.svelte";
-
   interface Props {
     webOutput: string;
     aiOutput: string;
-    webEngine: WebEngine;
     webLoading: boolean;
     aiLoading: boolean;
     webError: string | null;
     aiError: string | null;
     error: string | null;
-    onSelectWebEngine: (engine: WebEngine) => void;
   }
   let {
     webOutput,
     aiOutput,
-    webEngine,
     webLoading,
     aiLoading,
     webError,
     aiError,
     error,
-    onSelectWebEngine,
   }: Props = $props();
 
   let copied = $state<"web" | "ai" | null>(null);
-  let engineMenuOpen = $state(false);
 
   async function copy(kind: "web" | "ai", text: string) {
     if (!text) return;
@@ -37,61 +26,16 @@
     copied = kind;
     setTimeout(() => (copied = null), 1400);
   }
-
-  function selectEngine(engine: WebEngine) {
-    engineMenuOpen = false;
-    if (engine !== webEngine) {
-      onSelectWebEngine(engine);
-    }
-  }
 </script>
-
-<svelte:window onclick={() => (engineMenuOpen = false)} />
 
 <div class="result-grid">
   {#if error}
     <p class="error global-error">{error}</p>
   {/if}
 
-  <section class="column" aria-label="网页翻译结果">
+  <section class="column" aria-label="翻译结果">
     <header class="column-head">
-      <div class="engine-select">
-        <button
-          class="engine-trigger"
-          onclick={(e) => {
-            e.stopPropagation();
-            engineMenuOpen = !engineMenuOpen;
-          }}
-          aria-haspopup="listbox"
-          aria-expanded={engineMenuOpen}
-          aria-label={`翻译引擎：${WEB_ENGINE_LABELS[webEngine]}，点击切换`}
-        >
-          {WEB_ENGINE_LABELS[webEngine]}
-          <svg class="caret-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 10l5 5 5-5z" />
-          </svg>
-        </button>
-        {#if engineMenuOpen}
-          <ul class="engine-menu" role="listbox">
-            {#each WEB_ENGINES as engine (engine)}
-              <li>
-                <button
-                  role="option"
-                  aria-selected={engine === webEngine}
-                  class="engine-option"
-                  class:active={engine === webEngine}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    selectEngine(engine);
-                  }}
-                >
-                  {WEB_ENGINE_LABELS[engine]}
-                </button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
+      <span>翻译</span>
       {#if webOutput}
         <button class="copy" onclick={() => copy("web", webOutput)} aria-label="复制翻译结果">
           {copied === "web" ? "已复制" : "复制"}
@@ -165,84 +109,6 @@
     font-weight: 700;
     letter-spacing: 0.07em;
     text-transform: uppercase;
-  }
-  .engine-select {
-    position: relative;
-  }
-  .engine-trigger {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    min-height: 24px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-faint);
-    font-family: inherit;
-    font-size: var(--text-xs);
-    font-weight: 700;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    padding: 3px 6px;
-    margin-left: -6px;
-    cursor: pointer;
-    transition:
-      color var(--duration-fast) var(--ease),
-      background var(--duration-fast) var(--ease);
-  }
-  .engine-trigger:hover,
-  .engine-trigger[aria-expanded="true"] {
-    color: var(--accent);
-    background: var(--accent-soft);
-  }
-  .caret-icon {
-    width: 14px;
-    height: 14px;
-    fill: currentColor;
-    transition: transform var(--duration-fast) var(--ease);
-  }
-  .engine-trigger[aria-expanded="true"] .caret-icon {
-    transform: rotate(180deg);
-  }
-  .engine-menu {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    z-index: 10;
-    min-width: 132px;
-    margin: 0;
-    padding: 4px;
-    list-style: none;
-    border-radius: var(--radius);
-    background: var(--surface-overlay);
-    box-shadow: var(--shadow-pop);
-    animation: md-pop-in var(--duration) var(--ease);
-  }
-  .engine-option {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text);
-    font-family: inherit;
-    font-size: var(--text-sm);
-    text-align: left;
-    padding: 7px 10px;
-    cursor: pointer;
-    transition:
-      color var(--duration-fast) var(--ease),
-      background var(--duration-fast) var(--ease);
-  }
-  .engine-option:hover {
-    background: var(--surface-high);
-  }
-  .engine-option.active {
-    color: var(--accent);
-    font-weight: 600;
-    background: var(--accent-soft);
   }
   .output {
     position: relative;

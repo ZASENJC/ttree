@@ -39,34 +39,47 @@ function fakeDependencies() {
 }
 
 describe("translation store coordination", () => {
-  test("keeps the selected web engine result when an older request finishes later", async () => {
+  test("requests automatic free translation alongside AI", async () => {
     const deps = fakeDependencies();
-    const google = deferred<string>();
-    const bing = deferred<string>();
-    const ai = deferred<string>();
-
-    deps.translate.mockImplementation((req: { engine: string }) => {
-      if (req.engine === "google") return google.promise;
-      if (req.engine === "bing") return bing.promise;
-      return ai.promise;
-    });
-
+    deps.translate.mockImplementation((req: { engine: string }) =>
+      Promise.resolve(req.engine === "auto" ? "automatic result" : ""),
+    );
     const store = createTranslationStore(deps);
-    store.setInput("hello");
-    const initialRun = store.run();
+    await store.translateText("hello");
+    expect(deps.translate).toHaveBeenCalledWith(
+      expect.objectContaining({ engine: "auto", text: "hello" }),
+    );
+    expect(deps.translate).toHaveBeenCalledWith(
+      expect.objectContaining({ engine: "openai", text: "hello" }),
+    );
+    expect(store.state.webOutput).toBe("automatic result");
+  });
 
-    await vi.waitFor(() => expect(deps.translate).toHaveBeenCalledTimes(2));
-    const switchRun = store.setWebEngine("bing");
-    await vi.waitFor(() => expect(deps.translate).toHaveBeenCalledTimes(3));
+  test("ignores repeated OCR triggers while capture is pending", async () => {
+    const deps = fakeDependencies();
+    const capture = deferred<string>();
+    deps.screenshotOcr.mockReturnValue(capture.promise);
+    const store = createTranslationStore(deps);
+    const first = store.captureAndTranslate();
+    await store.captureAndTranslate();
+    expect(deps.screenshotOcr).toHaveBeenCalledOnce();
+    capture.resolve("");
+    await first;
+    await store.captureAndTranslate();
+    expect(deps.screenshotOcr).toHaveBeenCalledTimes(2);
+    expect(deps.showMain).not.toHaveBeenCalled();
+  });
 
-    bing.resolve("Bing result");
-    await switchRun;
-    google.resolve("Google result");
-    ai.resolve("");
-    await initialRun;
-
-    expect(store.state.webEngine).toBe("bing");
-    expect(store.state.webOutput).toBe("Bing result");
+  test("OCR failure is visible and a later capture can retry", async () => {
+    const deps = fakeDependencies();
+    deps.screenshotOcr.mockRejectedValueOnce("OCR failed").mockResolvedValue("");
+    const store = createTranslationStore(deps);
+    await store.captureAndTranslate();
+    expect(store.state.error).toBe("OCR failed");
+    expect(deps.showMain).toHaveBeenCalledOnce();
+    await store.captureAndTranslate();
+    expect(deps.screenshotOcr).toHaveBeenCalledTimes(2);
+    expect(store.state.error).toBeNull();
   });
 
   test("queues the latest selected text while a translation is running", async () => {
@@ -88,11 +101,11 @@ describe("translation store coordination", () => {
     expect(store.state.input).toBe("second");
     expect(store.state.error).toContain("排队");
 
-    pending.get("first:google")?.resolve("first web");
+    pending.get("first:auto")?.resolve("first web");
     pending.get("first:openai")?.resolve("");
     await vi.waitFor(() => expect(deps.translate).toHaveBeenCalledTimes(4));
 
-    pending.get("second:google")?.resolve("second web");
+    pending.get("second:auto")?.resolve("second web");
     pending.get("second:openai")?.resolve("");
     await firstRun;
 
@@ -119,18 +132,18 @@ describe("translation store coordination", () => {
     await store.translateText("second");
     store.setInput("third");
 
-    pending.get("first:google")?.resolve("first web");
+    pending.get("first:auto")?.resolve("first web");
     pending.get("first:openai")?.resolve("");
     await vi.waitFor(() => expect(deps.translate).toHaveBeenCalledTimes(4));
 
     expect(deps.translate).toHaveBeenCalledWith(
-      expect.objectContaining({ text: "third", engine: "google" }),
+      expect.objectContaining({ text: "third", engine: "auto" }),
     );
     expect(deps.translate).not.toHaveBeenCalledWith(
-      expect.objectContaining({ text: "second", engine: "google" }),
+      expect.objectContaining({ text: "second", engine: "auto" }),
     );
 
-    pending.get("third:google")?.resolve("third web");
+    pending.get("third:auto")?.resolve("third web");
     pending.get("third:openai")?.resolve("");
     await firstRun;
   });
@@ -141,7 +154,7 @@ describe("translation store coordination", () => {
     const firstAi = deferred<string>();
 
     deps.translate.mockImplementation((req: { text: string; engine: string }) => {
-      if (req.text === "first" && req.engine === "google") return firstWeb.promise;
+      if (req.text === "first" && req.engine === "auto") return firstWeb.promise;
       if (req.text === "first" && req.engine === "openai") return firstAi.promise;
       return Promise.resolve(req.engine === "openai" ? "" : "OCR web");
     });
@@ -305,9 +318,9 @@ describe("translation store coordination", () => {
     const switched = store.setTarget("ja");
     await vi.waitFor(() => expect(deps.translate).toHaveBeenCalledTimes(4));
 
-    tasks.get("zh-CN:google")?.resolve("stale web");
+    tasks.get("zh-CN:auto")?.resolve("stale web");
     tasks.get("zh-CN:openai")?.resolve("");
-    tasks.get("ja:google")?.resolve("fresh web");
+    tasks.get("ja:auto")?.resolve("fresh web");
     tasks.get("ja:openai")?.resolve("");
     await Promise.all([first, switched]);
 

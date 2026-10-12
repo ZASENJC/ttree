@@ -39,7 +39,11 @@ pub async fn translate(text: &str, source: &str, target: &str) -> Result<String,
     let body: Value =
         serde_json::from_slice(&body).map_err(|e| format!("谷歌翻译响应解析失败: {e}"))?;
 
-    Ok(parse_response(&body))
+    let text = parse_response(&body);
+    if text.trim().is_empty() {
+        return Err("谷歌翻译未返回有效译文".to_string());
+    }
+    Ok(text)
 }
 
 /// 解析谷歌响应：结构为 `[[[译文, 原文, ...], ...], ...]`。

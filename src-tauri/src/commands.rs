@@ -111,7 +111,7 @@ pub fn set_pinned<R: Runtime>(app: AppHandle<R>, pinned: bool) -> Result<bool, S
 
 /// 翻译命令。
 ///
-/// - Google：一次性返回完整译文（String）
+/// - Auto：免费服务自动分流和故障切换，一次性返回完整译文
 /// - OpenAI：流式，通过 `translate-chunk` 事件推送，命令本身返回空串
 #[tauri::command]
 pub async fn translate<R: Runtime>(
@@ -126,6 +126,7 @@ pub async fn translate<R: Runtime>(
     translate::validate_language_pair(&req.source, &req.target)?;
 
     match req.engine {
+        Engine::Auto => translate::auto::translate(text, &req.source, &req.target).await,
         Engine::Google => translate::google::translate(text, &req.source, &req.target).await,
         Engine::Bing => translate::bing::translate(text, &req.source, &req.target).await,
         Engine::Openai => {
@@ -148,8 +149,20 @@ pub async fn translate<R: Runtime>(
 ///
 /// 用户取消截图时返回空串。在阻塞线程执行（screencapture 与 Vision 均为阻塞调用）。
 #[tauri::command]
-pub async fn screenshot_ocr() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn screenshot_ocr<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    static OCR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let Ok(_guard) = OCR_LOCK.try_lock() else {
+        // 忽略重复快捷键，避免多个系统框选进程和 Vision 任务抢占资源。
+        return Ok(String::new());
+    };
+    let main = window::main_window(&app);
+    let was_visible = main.as_ref().is_some_and(|w| w.is_visible().unwrap_or(false));
+    if let Some(main) = main.as_ref() {
+        window::hide_window(main);
+    }
+    // 等待窗口退出屏幕合成，固定窗口也不会遮挡用户要截取的文字。
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let result = tauri::async_runtime::spawn_blocking(|| {
         let Some(path) = screenshot::capture_interactive()? else {
             return Ok(String::new());
         };
@@ -158,7 +171,11 @@ pub async fn screenshot_ocr() -> Result<String, String> {
         result
     })
     .await
-    .map_err(|e| format!("OCR 任务失败: {e}"))?
+    .map_err(|e| format!("OCR 任务失败: {e}"))?;
+    if was_visible && result.as_ref().map_or(true, |text| text.is_empty()) {
+        window::show_main(&app);
+    }
+    result
 }
 
 /// 读取全部 AI 对话历史（JSONL 流式解析，损坏行容错）。

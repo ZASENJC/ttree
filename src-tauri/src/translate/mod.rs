@@ -1,5 +1,6 @@
 //! 翻译引擎：统一分发 + 各引擎实现。
 
+pub mod auto;
 pub mod bing;
 pub mod google;
 pub mod openai;
@@ -176,6 +177,7 @@ pub(crate) async fn read_error_body(response: Response) -> String {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
+    Auto,
     Openai,
     Google,
     Bing,

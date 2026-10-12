@@ -14,18 +14,30 @@ fn screencapture_args() -> [&'static str; 3] {
 pub fn capture_interactive() -> Result<Option<TempPath>, String> {
     let target = new_capture_target()?;
 
-    let status = Command::new("/usr/sbin/screencapture")
+    let output = Command::new("/usr/sbin/screencapture")
         .args(screencapture_args())
         .arg(target.path())
-        .status()
+        .output()
         .map_err(|e| format!("调用 screencapture 失败: {e}"))?;
 
-    if !status.success() {
-        return Err("截图进程异常退出".to_string());
+    let has_capture = validate_capture_output(target.path())?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        // 部分系统版本在 Esc 时返回非零状态，并可能删除输出文件。
+        if !has_capture
+            && (detail.trim().is_empty() || detail.to_ascii_lowercase().contains("cancel"))
+        {
+            return Ok(None);
+        }
+        let detail: String = detail.trim().chars().take(300).collect();
+        return Err(format!(
+            "系统截图失败（{}）: {detail}。请检查系统设置 → 隐私与安全性 → 屏幕与系统音频录制中的 TTREE 权限，授权后重启应用。",
+            output.status
+        ));
     }
 
     // NamedTempFile 预先创建了空文件；Esc 取消时它仍为空。
-    if !validate_capture_output(target.path())? {
+    if !has_capture {
         return Ok(None);
     }
     Ok(Some(target.into_temp_path()))
@@ -41,8 +53,11 @@ fn new_capture_target() -> Result<NamedTempFile, String> {
 
 /// 返回 false 表示用户取消（文件为空）；非普通文件一律拒绝。
 fn validate_capture_output(path: &Path) -> Result<bool, String> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|e| format!("读取截图临时文件失败: {e}"))?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("读取截图临时文件失败: {error}")),
+    };
     if !metadata.file_type().is_file() {
         return Err("截图输出不是普通文件".to_string());
     }
@@ -82,6 +97,14 @@ mod tests {
         let target = new_capture_target().unwrap();
 
         assert!(!validate_capture_output(target.path()).unwrap());
+    }
+
+    #[test]
+    fn deleted_capture_file_is_treated_as_cancellation() {
+        let target = new_capture_target().unwrap();
+        let path = target.path().to_path_buf();
+        drop(target);
+        assert!(!validate_capture_output(&path).unwrap());
     }
 
     #[test]

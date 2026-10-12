@@ -10,23 +10,12 @@ import {
 import { ADAPTIVE_TARGET, resolveAdaptiveTarget } from "./languages";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-/** 网页翻译引擎（可点按切换）。 */
-export type WebEngine = "google" | "bing";
-
-export const WEB_ENGINES: WebEngine[] = ["google", "bing"];
-
-export const WEB_ENGINE_LABELS: Record<WebEngine, string> = {
-  google: "谷歌翻译",
-  bing: "必应翻译",
-};
-
 const QUEUE_NOTICE = "上一条翻译仍在生成，已排队最新内容。";
 
 interface TranslationState {
   input: string;
   webOutput: string;
   aiOutput: string;
-  webEngine: WebEngine;
   source: string;
   target: string;
   webLoading: boolean;
@@ -60,7 +49,6 @@ export function createTranslationStore(
     input: "",
     webOutput: "",
     aiOutput: "",
-    webEngine: "google",
     source: "auto",
     target: ADAPTIVE_TARGET,
     webLoading: false,
@@ -81,6 +69,7 @@ export function createTranslationStore(
   let runGeneration = 0;
   let webRequestId = 0;
   let aiRequestId = 0;
+  let capturing = false;
 
   function refreshLoading() {
     state.loading = state.webLoading || state.aiLoading;
@@ -146,7 +135,6 @@ export function createTranslationStore(
 
   async function runWeb(
     text: string,
-    engine: WebEngine,
     langPair: { source: string; target: string },
   ) {
     const requestId = ++webRequestId;
@@ -160,7 +148,7 @@ export function createTranslationStore(
         request_id: requestId,
         text,
         ...langPair,
-        engine,
+        engine: "auto",
       });
       if (requestId === webRequestId) {
         state.webOutput = result;
@@ -217,7 +205,7 @@ export function createTranslationStore(
     state.webOutput = "";
     state.aiOutput = "";
     const langPair = resolveLangPair(text);
-    const webTask = runWeb(text, state.webEngine, langPair);
+    const webTask = runWeb(text, langPair);
     const aiTask = runAi(text, langPair);
 
     await Promise.allSettled([webTask, aiTask]);
@@ -249,24 +237,6 @@ export function createTranslationStore(
     if (queuedText && !state.loading) {
       await drainQueuedText();
     }
-  }
-
-  /** 切换网页翻译引擎；若已有输入则只重跑网页侧翻译。 */
-  async function setWebEngine(engine: WebEngine) {
-    if (state.webEngine === engine) return;
-    state.webEngine = engine;
-
-    const inputText = state.input.trim();
-    if (!inputText) return;
-    if (state.loading && activeText && inputText !== activeText) {
-      queueText(inputText);
-      state.webOutput = "";
-      return;
-    }
-
-    const text = activeText || inputText;
-    await runWeb(text, engine, resolveLangPair(text));
-    await drainQueuedText();
   }
 
   async function translateText(value: string) {
@@ -338,9 +308,16 @@ export function createTranslationStore(
 
   /** 截图 OCR：Apple 自带自由框选 → 识别 → 填入输入框 → 自动翻译。 */
   async function captureAndTranslate() {
+    if (capturing) return;
+    capturing = true;
     state.error = null;
     try {
-      const text = await deps.screenshotOcr();
+      let text: string;
+      try {
+        text = await deps.screenshotOcr();
+      } finally {
+        capturing = false;
+      }
       if (!text.trim()) return;
       await deps.showMain(); // OCR 有结果后再唤起窗口
       await translateText(text);
@@ -380,7 +357,6 @@ export function createTranslationStore(
     setSource,
     setTarget,
     shouldAutoRun,
-    setWebEngine,
     captureAndTranslate,
     reset,
   };
