@@ -6,7 +6,8 @@
 #![cfg(target_os = "macos")]
 
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::{AnyObject, AnyThread, ClassType};
+use objc2::runtime::AnyObject;
+use objc2::{AnyThread, ClassType};
 use objc2_core_graphics::CGImage;
 use objc2_core_image::{kCIContextUseSoftwareRenderer, CIContext};
 use objc2_core_ml::MLCPUComputeDevice;

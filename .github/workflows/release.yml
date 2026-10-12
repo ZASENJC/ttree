@@ -17,9 +17,8 @@ concurrency:
 
 jobs:
   ocr-current-macos:
-    # xcode-27 currently runs macOS 27 on Apple Silicon. Keep packaging on the
-    # existing runner, but exercise the real OCR pipeline on the newer OS too.
-    runs-on: xcode-27
+    # Exercise real OCR on the stable newer Apple Silicon runtime.
+    runs-on: macos-26
     timeout-minutes: 15
     permissions:
       contents: read
@@ -38,9 +37,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: macos-27-ocr-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: macos-26-ocr-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            macos-27-ocr-
+            macos-26-ocr-
 
       - name: Record native OCR runtime
         run: |
@@ -68,10 +67,62 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
+          key: macos-26-ocr-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+  ocr-macos27-compatibility:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Probe native Vision capability on macOS 27
+        id: capability
+        run: |
+          sw_vers
+          uname -m
+          fixture_dir="$RUNNER_TEMP/ttree-ocr-capability"
+          mkdir -p "$fixture_dir"
+          swift src-tauri/src/ocr/tests/generate-fixtures.swift "$fixture_dir"
+          swift src-tauri/src/ocr/tests/diagnose-vision.swift "$fixture_dir/english.png" 2>&1 |
+            tee "$fixture_dir/vision.log"
+          if grep -Fq 'apple-default software=false: OK Hello OCR' "$fixture_dir/vision.log"; then
+            echo 'accurate_supported=true' >> "$GITHUB_OUTPUT"
+          elif grep -Fq 'AppleM2ScalerParavirtDriver' "$fixture_dir/vision.log" &&
+               grep -Fq 'fast-english-cpu software=false: OK Hello OCR' "$fixture_dir/vision.log"; then
+            echo 'accurate_supported=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::macOS 27 VM lacks the image scaler used by Apple accurate Vision OCR; the independent Apple baseline also fails.'
+            echo 'macOS 27: accurate OCR cannot be validated on this VM because the Apple baseline fails and AppleM2ScalerParavirtDriver is unavailable. Real-image regression gates still run on macOS 14 and 26; physical macOS 27 verification is required.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::error::Unexpected native Vision baseline failure'
+            exit 1
+          fi
+
+      - name: Install Rust stable
+        if: steps.capability.outputs.accurate_supported == 'true'
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Cache macOS 27 OCR dependencies
+        if: steps.capability.outputs.accurate_supported == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
           key: macos-27-ocr-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            macos-27-ocr-
+
+      - name: Exercise accurate OCR when the platform supports it
+        if: steps.capability.outputs.accurate_supported == 'true'
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml ocr:: -- --nocapture
 
   verify:
-    needs: ocr-current-macos
+    needs: [ocr-current-macos, ocr-macos27-compatibility]
     runs-on: macos-14
     permissions:
       contents: read
