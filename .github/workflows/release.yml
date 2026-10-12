@@ -51,6 +51,8 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: ${{ runner.os }}-community-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-community-cargo-
 
       - name: Install frontend dependencies
         run: npm run ci:install

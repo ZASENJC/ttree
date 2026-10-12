@@ -9,7 +9,7 @@
 ## ✨ 功能
 
 - **快捷键呼出翻译** — 默认 `⌘⇧Space` 呼出/收起窗口，输入文本回车翻译，`Esc` 收起，失焦自动隐藏
-- **截图 OCR 翻译** — `⌘⇧S` 框选屏幕区域，调用 macOS 原生 **Vision** 框架识别文字并自动翻译（按系统实际支持配置中/英/日等语言，失败时自动兼容重试）
+- **截图 OCR 翻译** — `⌘⇧S` 框选屏幕区域，调用 macOS 原生 **Vision** 框架识别文字并自动翻译（按系统实际支持配置中/英/日等语言，截图先规范化为 8-bit sRGB 位图，失败时自动兼容重试）
 - **划词翻译 / 划词 AI** — 选中任意应用内的文本，一键翻译或发送给 AI（基于 macOS Accessibility，未授权时回退到临时复制并恢复剪贴板）
 - **AI 对话模式** — 独立于翻译的多轮对话，支持自定义 system 提示词
 - **自动免费翻译** — Google / 微软必应无需 key，健康服务轮询分流；超时、限流、空响应或服务异常时自动切换，故障服务冷却 30–300 秒后恢复尝试，长文本自动分块
@@ -92,7 +92,8 @@ src-tauri/src/            Rust 后端
 ├── window.rs             窗口显示/隐藏/居中/聚焦/固定
 ├── tray.rs               系统托盘菜单
 ├── screenshot.rs         screencapture -i 区域截图
-├── ocr/vision.rs         Apple Vision OCR（VNRecognizeTextRequest）
+├── ocr/image.rs          ImageIO 解码 / 8-bit sRGB 规范化 / 小截图边距
+├── ocr/vision.rs         Apple Vision OCR（有效语言组合 / 旧模型回退）
 ├── selection/macos.rs    划词捕获（Accessibility + 剪贴板回退）
 └── translate/
     ├── mod.rs            引擎分发 + 共享 HTTP 客户端
@@ -114,7 +115,7 @@ src/                      Svelte 5 前端（runes）
 
 ```bash
 # Rust
-cd src-tauri && cargo test          # 翻译解析 / SSE 解析 / 快捷键 / 划词归一化单测
+cd src-tauri && cargo test          # 翻译解析 / SSE / 快捷键 / 划词 / 真实 PNG Vision OCR
 cd src-tauri && cargo clippy -- -D warnings
 
 # 前端
@@ -122,10 +123,12 @@ npm test          # Vitest（快捷键录制器）
 npm run check     # svelte-check 类型检查
 ```
 
+macOS OCR 回归测试会通过 Xcode Command Line Tools 的 Swift 在临时目录生成样例，并真正执行 ImageIO 和 Vision；覆盖单行、灰度、16-bit、透明图片以及中英混排。
+
 ## ⚠️ 说明与限制
 
 - 免费翻译自动在谷歌 / 微软必应之间分流和切换；两者都是**非官方免费端点**，同时不可用时会提示稍后重试。OpenAI 兼容接口需自备 API Key。
-- OCR 保留 Apple 原生自由框选；截图期间临时隐藏主窗口，重复触发会被忽略。识别失败或无文字时用新 Vision 请求在 CPU 上重试，取消框选不会显示为识别失败。
+- OCR 保留 Apple 原生自由框选；截图期间临时隐藏主窗口，重复触发会被忽略。中文识别只与英文组合；截图经 ImageIO 解码后绘制成 8-bit sRGB 位图，小截图加边距。识别失败或无文字时用旧版 Vision 模型在 CPU 上重试，取消框选不会显示为识别失败。
 - API Key 存储在 macOS Keychain，不写入明文 Tauri store。
 - 仅支持 **macOS 11.0+**（依赖 Vision、Accessibility、screencapture 等系统框架）。
 - GitHub Release 是社区签名、非 Apple 公证包；首次安装需要在“隐私与安全性”中手动选择“仍要打开”。

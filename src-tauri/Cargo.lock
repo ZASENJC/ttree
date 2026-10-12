@@ -4463,15 +4463,17 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "ttree"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.1",
  "futures-util",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
+ "objc2-image-io",
  "objc2-vision",
  "reqwest 0.12.28",
  "security-framework",

@@ -1,6 +1,6 @@
 {
   "name": "ttree",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "轻量 macOS AI 翻译器",
   "type": "module",
   "scripts": {

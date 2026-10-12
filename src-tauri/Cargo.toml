@@ -1,6 +1,6 @@
 [package]
 name = "ttree"
-version = "0.1.4"
+version = "0.1.5"
 description = "轻量 macOS AI 翻译器"
 authors = ["you"]
 edition = "2021"
@@ -37,14 +37,20 @@ core-foundation = "0.10"
 # macOS Keychain —— 存放 API key，避免明文落盘
 security-framework = "3"
 objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-image-io = { version = "0.3", features = ["CGImageSource"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSPasteboard",
     "NSPasteboardItem",
 ] }
 objc2-core-graphics = { version = "0.3", features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
     "CGEvent",
     "CGEventTypes",
     "CGRemoteOperation",
+    "CGImage",
 ] }
 objc2-foundation = { version = "0.3", features = [
     "NSString",
@@ -55,6 +61,7 @@ objc2-foundation = { version = "0.3", features = [
     "NSObject",
 ] }
 objc2-vision = { version = "0.3", features = [
+    "objc2-core-graphics",
     "VNRequest",
     "VNRecognizeTextRequest",
     "VNObservation",

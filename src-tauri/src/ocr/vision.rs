@@ -1,13 +1,14 @@
 //! macOS 原生 OCR —— 通过 Apple Vision 框架的 VNRecognizeTextRequest 识别图片文字。
 //!
-//! 仅 macOS。加载 PNG 为 NSData → VNImageRequestHandler → 同步 perform →
+//! 仅 macOS。PNG → ImageIO 解码 → 8-bit RGB CGImage → Vision 同步 perform →
 //! 读取 VNRecognizedTextObservation 的 topCandidates(1) 拼接。
 
 #![cfg(target_os = "macos")]
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::AnyThread;
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{NSArray, NSString};
 use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
 
 /// 对指定图片文件路径执行 OCR，返回识别文本（按行拼接）。
@@ -18,20 +19,18 @@ pub fn recognize_file(path: &str) -> Result<String, String> {
 
 /// 对内存中的图片字节执行 OCR。
 pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
-    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Err("截图不是有效的 PNG 图片，请重新框选。".to_string());
-    }
     // Tokio 阻塞线程没有 AppKit 事件循环的自动释放池；每次识别单独释放
     // Vision 创建的临时原生对象，防止多次截图后内存和计算资源累积。
     autoreleasepool(|_| {
-        let first_error = match recognize_once(bytes, false) {
+        let image = super::image::prepare_png(bytes)?;
+        let first_error = match recognize_once(&image, false) {
             Ok(text) if !text.trim().is_empty() => return Ok(text),
             Ok(_) => "未识别到文字".to_string(),
             Err(error) => error,
         };
         // 复用同一截图，但创建全新的 request/handler。CPU 回退避开临时
         // GPU/Metal 故障，关闭语言自动检测和纠错以覆盖模型判断失败。
-        match recognize_once(bytes, true) {
+        match recognize_once(&image, true) {
             Ok(text) if !text.trim().is_empty() => Ok(text),
             Ok(_) => Err("截图中未识别到文字，请框选清晰的文字区域后重试。".to_string()),
             Err(error) => Err(format!("OCR 识别及兼容重试失败: {first_error}; {error}")),
@@ -39,19 +38,17 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<String, String> {
     })
 }
 
-fn recognize_once(bytes: &[u8], compatibility: bool) -> Result<String, String> {
+pub(super) fn recognize_once(image: &CGImage, compatibility: bool) -> Result<String, String> {
     // SAFETY: Vision API 须在持有有效图像数据期间调用；以下对象均由我们创建并在本函数内存活。
     unsafe {
-        let data = NSData::with_bytes(bytes);
-
         // 创建并配置多语言文字识别请求。
         let request: Retained<VNRecognizeTextRequest> = VNRecognizeTextRequest::new();
         configure_request(&request, compatibility)?;
 
-        // 基于图像数据构建 handler 并同步执行
-        let handler = VNImageRequestHandler::initWithData_options(
+        // 直接提供已规范化的 CGImage，避免 Vision 再走压缩数据解码路径。
+        let handler = VNImageRequestHandler::initWithCGImage_options(
             VNImageRequestHandler::alloc(),
-            &data,
+            image,
             &objc2_foundation::NSDictionary::new(),
         );
 
@@ -60,7 +57,14 @@ fn recognize_once(bytes: &[u8], compatibility: bool) -> Result<String, String> {
         ))]);
         handler
             .performRequests_error(&requests)
-            .map_err(|e| format!("OCR 执行失败: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "OCR 执行失败: {e}（图像 {}×{}，{} bit）",
+                    CGImage::width(Some(image)),
+                    CGImage::height(Some(image)),
+                    CGImage::bits_per_component(Some(image)),
+                )
+            })?;
 
         Ok(collect_text(&request))
     }
@@ -71,11 +75,12 @@ fn configure_request(request: &VNRecognizeTextRequest, compatibility: bool) -> R
     request.setUsesLanguageCorrection(!compatibility);
 
     // 自动检测需要 revision 3，不能只开启属性而依赖系统默认 revision。
-    let revision = if objc2::available!(macos = 13.0) {
+    let revision = if !compatibility && objc2::available!(macos = 13.0) {
         3
     } else {
         2
     };
+    // 兼容重试使用 revision 2，避开新版识别模型与图像读取器的同一失败路径。
     // SAFETY: revision 2 在最低支持版本 macOS 11 可用；revision 3 经版本判断。
     unsafe {
         request.setRevision(revision);
@@ -115,9 +120,9 @@ fn configure_request(request: &VNRecognizeTextRequest, compatibility: bool) -> R
 }
 
 fn preferred_languages(supported: &[String]) -> Vec<&str> {
-    [
-        "zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE", "es-ES", "ru-RU",
-    ]
+    // Apple 的语言支持查询只说明各语言能单独识别。中文模型只能与
+    // 英文配对，不能混入日语、韩语或欧洲语言；自动检测负责选择脚本。
+    ["zh-Hans", "zh-Hant", "en-US"]
     .into_iter()
     .filter(|code| supported.iter().any(|supported| supported.as_str() == *code))
     .collect()
@@ -180,6 +185,7 @@ mod tests {
         let request = VNRecognizeTextRequest::new();
         configure_request(&request, true).unwrap();
         assert!(!request.usesLanguageCorrection());
+        assert_eq!(unsafe { request.revision() }, 2);
         if objc2::available!(macos = 13.0) {
             assert!(!request.automaticallyDetectsLanguage());
         }
@@ -190,6 +196,13 @@ mod tests {
         let languages = ["en-US".to_string(), "zh-Hans".to_string()];
         assert_eq!(preferred_languages(&languages), ["zh-Hans", "en-US"]);
         assert!(preferred_languages(&[]).is_empty());
+    }
+
+    #[test]
+    fn supported_languages_do_not_form_an_invalid_chinese_combination() {
+        let supported = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR", "fr-FR"]
+            .map(String::from);
+        assert_eq!(preferred_languages(&supported), ["zh-Hans", "zh-Hant", "en-US"]);
     }
 
     #[test]
