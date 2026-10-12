@@ -88,7 +88,7 @@ jobs:
           swift src-tauri/src/ocr/tests/generate-fixtures.swift "$fixture_dir"
           swift src-tauri/src/ocr/tests/diagnose-vision.swift "$fixture_dir/english.png" 2>&1 |
             tee "$fixture_dir/vision.log"
-          if grep -Fq 'apple-default software=false: OK Hello OCR' "$fixture_dir/vision.log"; then
+          if grep -Eq '(apple-default|default-explicit-cpu|rev3-english-cpu|rev3-chinese-english-cpu|rev2-chinese-english-cpu) software=(false|true): OK Hello OCR' "$fixture_dir/vision.log"; then
             echo 'accurate_supported=true' >> "$GITHUB_OUTPUT"
           elif grep -Fq 'AppleM2ScalerParavirtDriver' "$fixture_dir/vision.log" &&
                grep -Fq 'fast-english-cpu software=false: OK Hello OCR' "$fixture_dir/vision.log"; then
