@@ -4472,6 +4472,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-ml",
  "objc2-foundation",
  "objc2-image-io",
  "objc2-vision",

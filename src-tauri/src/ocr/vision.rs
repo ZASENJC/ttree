@@ -6,9 +6,10 @@
 #![cfg(target_os = "macos")]
 
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::AnyThread;
+use objc2::{AnyThread, ClassType};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSArray, NSString};
+use objc2_core_ml::MLCPUComputeDevice;
+use objc2_foundation::{NSArray, NSObjectProtocol, NSString};
 use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
 
 /// 对指定图片文件路径执行 OCR，返回识别文本（按行拼接）。
@@ -85,11 +86,6 @@ fn configure_request(request: &VNRecognizeTextRequest, compatibility: bool) -> R
     unsafe {
         request.setRevision(revision);
         request.setPreferBackgroundProcessing(true);
-        if compatibility {
-            // macOS 11 也必须支持回退，因此保留兼容的 CPU-only API。
-            #[allow(deprecated)]
-            request.setUsesCPUOnly(true);
-        }
     }
     if objc2::available!(macos = 13.0) {
         request.setAutomaticallyDetectsLanguage(!compatibility);
@@ -115,6 +111,41 @@ fn configure_request(request: &VNRecognizeTextRequest, compatibility: bool) -> R
         .collect();
     if !languages.is_empty() {
         request.setRecognitionLanguages(&NSArray::from_retained_slice(&languages));
+    }
+    // 新系统后台 OCR 不能依赖 ANE 自动选择。旧 usesCPUOnly 属性在新
+    // Vision 上不足以保证 CPU 执行，必须按模型支持的计算阶段显式选择。
+    if compatibility || objc2::available!(macos = 27.0) {
+        configure_cpu(request)?;
+    }
+    Ok(())
+}
+
+fn configure_cpu(request: &VNRecognizeTextRequest) -> Result<(), String> {
+    // SAFETY: 新计算设备 API 和 MLCPUComputeDevice 从 macOS 14 才可用。
+    unsafe {
+        if objc2::available!(macos = 14.0) {
+            let stages = request
+                .supportedComputeStageDevicesAndReturnError()
+                .map_err(|error| format!("读取 OCR 计算设备失败: {error}"))?;
+            let mut assigned = false;
+            for stage in stages.allKeys().iter() {
+                if let Some(devices) = stages.objectForKey(stage) {
+                    if let Some(cpu) = devices
+                        .iter()
+                        .find(|device| device.isKindOfClass(MLCPUComputeDevice::class()))
+                    {
+                        request.setComputeDevice_forComputeStage(Some(cpu), stage);
+                        assigned = true;
+                    }
+                }
+            }
+            if !assigned {
+                return Err("此 OCR 模型没有可用的 CPU 计算设备".to_string());
+            }
+        } else {
+            #[allow(deprecated)]
+            request.setUsesCPUOnly(true);
+        }
     }
     Ok(())
 }

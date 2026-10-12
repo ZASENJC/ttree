@@ -31,6 +31,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Cache current macOS OCR dependencies
+        id: ocr-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -50,6 +51,24 @@ jobs:
       - name: Exercise native OCR on current macOS
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml ocr:: -- --nocapture
+
+      - name: Diagnose native Vision if OCR fails
+        if: failure()
+        run: |
+          fixture_dir="$RUNNER_TEMP/ttree-ocr-diagnostics"
+          mkdir -p "$fixture_dir"
+          swift src-tauri/src/ocr/tests/generate-fixtures.swift "$fixture_dir"
+          swift src-tauri/src/ocr/tests/diagnose-vision.swift "$fixture_dir/english.png"
+
+      - name: Save compiled OCR dependencies
+        if: always() && steps.ocr-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: macos-27-ocr-${{ hashFiles('src-tauri/Cargo.lock') }}
 
   verify:
     needs: ocr-current-macos
