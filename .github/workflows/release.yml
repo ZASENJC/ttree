@@ -48,7 +48,8 @@ jobs:
           swift --version
 
       - name: Exercise native OCR on current macOS
-        run: cargo test --manifest-path src-tauri/Cargo.toml ocr:: -- --nocapture
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml ocr:: -- --nocapture
 
   verify:
     needs: ocr-current-macos
