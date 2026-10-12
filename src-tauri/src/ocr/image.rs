@@ -4,8 +4,8 @@
 
 use objc2_core_foundation::{CFData, CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapContextCreateImage, CGBitmapInfo,
-    CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+    kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapContextCreateImage,
+    CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_image_io::CGImageSource;
 
@@ -39,7 +39,7 @@ pub(super) fn prepare_png(bytes: &[u8]) -> Result<CFRetained<CGImage>, String> {
     // 8-bit sRGB、32-bit RGBX，并用白色背景消除透明通道的歧义。
     let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
         .ok_or_else(|| "创建 OCR 色彩空间失败".to_string())?;
-    let bitmap_info = CGImageAlphaInfo::NoneSkipLast.0 | CGBitmapInfo::ByteOrder32Big.bits();
+    let bitmap_info = CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0;
     // SAFETY: null 让 CoreGraphics 自行管理内存；尺寸已检查且每像素 4 字节。
     let context = unsafe {
         CGBitmapContextCreate(
