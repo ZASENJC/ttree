@@ -129,12 +129,12 @@ fn configure_cpu(request: &VNRecognizeTextRequest) -> Result<(), String> {
                 .map_err(|error| format!("读取 OCR 计算设备失败: {error}"))?;
             let mut assigned = false;
             for stage in stages.allKeys().iter() {
-                if let Some(devices) = stages.objectForKey(stage) {
+                if let Some(devices) = stages.objectForKey(&stage) {
                     if let Some(cpu) = devices
                         .iter()
                         .find(|device| device.isKindOfClass(MLCPUComputeDevice::class()))
                     {
-                        request.setComputeDevice_forComputeStage(Some(cpu), stage);
+                        request.setComputeDevice_forComputeStage(Some(&cpu), &stage);
                         assigned = true;
                     }
                 }

@@ -13,10 +13,13 @@ print("Vision supported revisions: \(VNRecognizeTextRequest.supportedRevisions)"
 
 func assignCPU(_ request: VNRecognizeTextRequest) throws {
     if #available(macOS 14.0, *) {
-        let stages = try request.supportedComputeStageDevices()
+        let stages = try request.supportedComputeStageDevices
         for (stage, devices) in stages {
             print("compute stage \(stage): \(devices)")
-            if let cpu = devices.first(where: { $0 is MLCPUComputeDevice }) {
+            if let cpu = devices.first(where: {
+                if case .cpu(_) = $0 { return true }
+                return false
+            }) {
                 request.setComputeDevice(cpu, for: stage)
             }
         }
