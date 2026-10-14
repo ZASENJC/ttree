@@ -74,7 +74,13 @@ impl GgufEmbeddedTokenizer {
         {
             eos_tokens.push(eos_id);
         }
-        for special in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>", "<end_of_turn>"] {
+        for special in [
+            "<|im_end|>",
+            "<|endoftext|>",
+            "</s>",
+            "<|eot_id|>",
+            "<end_of_turn>",
+        ] {
             if let Some(&id) = token_to_id.get(special) {
                 if !eos_tokens.contains(&id) {
                     eos_tokens.push(id);
@@ -173,10 +179,7 @@ impl GgufEmbeddedTokenizer {
                 return vec![b];
             }
         }
-        let decoded = piece
-            .replace('▁', " ")
-            .replace("Ġ", " ")
-            .replace("Ċ", "\n");
+        let decoded = piece.replace('▁', " ").replace("Ġ", " ").replace("Ċ", "\n");
         decoded.into_bytes()
     }
 }
@@ -205,8 +208,8 @@ fn load_session(model_path: &str) -> Result<CachedSession, String> {
     }
     let file = File::open(path).map_err(|e| format!("打开 GGUF 文件失败: {e}"))?;
     let mut reader = BufReader::new(file);
-    let content = gguf_file::Content::read(&mut reader)
-        .map_err(|e| format!("解析 GGUF 文件头失败: {e}"))?;
+    let content =
+        gguf_file::Content::read(&mut reader).map_err(|e| format!("解析 GGUF 文件头失败: {e}"))?;
 
     let arch_name = content
         .metadata
@@ -287,9 +290,7 @@ where
             }
         };
 
-        let needs_reload = guard
-            .as_ref()
-            .is_none_or(|s| s.model_path != model_path);
+        let needs_reload = guard.as_ref().is_none_or(|s| s.model_path != model_path);
         if needs_reload {
             match load_session(&model_path) {
                 Ok(session) => *guard = Some(session),

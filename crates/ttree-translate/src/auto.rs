@@ -63,9 +63,7 @@ struct RouterState {
 
 impl RouterState {
     fn is_available(&self, p: Provider, now: Instant) -> bool {
-        self.stats[p.index()]
-            .retry_after
-            .is_none_or(|t| now >= t)
+        self.stats[p.index()].retry_after.is_none_or(|t| now >= t)
     }
 
     /// 优先返回当前可用且历史延迟更低的服务。
@@ -143,7 +141,10 @@ async fn translate_chunk_hedged(text: &str, source: &str, target: &str) -> Resul
         .unwrap_or_else(|_| vec![Provider::Bing, Provider::Google]);
 
     let primary = candidates[0];
-    let secondary = candidates.get(1).copied().unwrap_or_else(|| primary.other());
+    let secondary = candidates
+        .get(1)
+        .copied()
+        .unwrap_or_else(|| primary.other());
 
     let primary_fut = call_provider(primary, text, source, target);
     tokio::pin!(primary_fut);
@@ -245,7 +246,11 @@ mod tests {
 
     #[test]
     fn splits_long_text_without_losing_characters() {
-        let input = format!("{}\n{}", "测试文本 ".repeat(400), "hello world. ".repeat(300));
+        let input = format!(
+            "{}\n{}",
+            "测试文本 ".repeat(400),
+            "hello world. ".repeat(300)
+        );
         let chunks = split_text(&input);
         assert!(chunks.len() > 1);
         assert_eq!(chunks.concat(), input);

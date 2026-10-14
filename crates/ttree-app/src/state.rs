@@ -23,21 +23,21 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use ttree_core::{
     recent_chat_context, resolve_language_pair, AiBackendKind, AiTranslationConfig,
-    AppearanceConfig, CancelSlot, ChatAiConfig, ChatMessage, Conversation, PaneLayoutConfig,
-    ShortcutConfig, ADAPTIVE_TARGET, PANEL_OPACITY_MAX, PANEL_OPACITY_MIN, SOURCE_LANGUAGES,
-    TARGET_LANGUAGES, TOP_BAR_HEIGHT, WINDOW_MAX_HEIGHT, WINDOW_MAX_WIDTH, WINDOW_MIN_HEIGHT,
-    WINDOW_MIN_WIDTH,
+    AppearanceConfig, CancelSlot, ChatAiConfig, ChatMessage, Conversation, HyMtQuant,
+    PaneLayoutConfig, ShortcutConfig, ADAPTIVE_TARGET, PANEL_OPACITY_MAX, PANEL_OPACITY_MIN,
+    SOURCE_LANGUAGES, TARGET_LANGUAGES, TOP_BAR_HEIGHT, WINDOW_MAX_HEIGHT, WINDOW_MAX_WIDTH,
+    WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 use ttree_ocr::OcrOutcome;
 use ttree_platform_macos::hotkey::{parse_shortcut_config, ParsedShortcuts, ShortcutAction};
 use ttree_storage::{HistoryStore, SettingsStore};
 
 use crate::ui_helpers::{
-    add_subview, append_text_view_string, clean_markdown_for_bubble, clear_subviews,
-    copy_to_pasteboard, get_field_string, get_text_view_string, make_button, make_checkbox,
-    make_divider, make_flat_button, make_flipped_view, make_label, make_multiline_input,
-    make_popup, make_scrollable_text_view, make_secure_field, make_slider, make_split_bar,
-    make_surface_box, make_symbol_button, make_text_field, make_wrapping_label,
+    add_subview, append_text_view_string, apply_text_view_line_spacing, clean_markdown_for_bubble,
+    clear_subviews, copy_to_pasteboard, get_field_string, get_text_view_string, make_button,
+    make_checkbox, make_divider, make_flat_button, make_flipped_view, make_label,
+    make_multiline_input, make_popup, make_scrollable_text_view, make_secure_field, make_slider,
+    make_split_bar, make_surface_box, make_symbol_button, make_text_field, make_wrapping_label,
     make_wrapping_message_label, pale_ink, set_button_symbol, set_field_string,
     set_flat_button_active, set_label_alignment_right, set_multiline_input_frame,
     set_multiline_input_hidden, set_split_bar_frame, set_text_view_string, set_text_view_styled,
@@ -121,11 +121,20 @@ pub enum ActionTag {
     ResetDefaultShortcuts = 50,
     OpacitySliderChanged = 51,
     AutostartToggled = 52,
+    OcrStripNewlinesToggled = 53,
 
     SettingsSecTranslate = 60,
     SettingsSecChat = 61,
     SettingsSecShortcuts = 62,
     SettingsSecGeneral = 63,
+
+    HyMtQuantChanged = 70,
+    HyMtCheckCompatibility = 71,
+    HyMtDownloadAndRun = 72,
+    HyMtStopServer = 73,
+    HyMtDeleteModel = 74,
+    ChatHyMtQuantChanged = 75,
+    ChatHyMtDownloadAndRun = 76,
 }
 
 impl ActionTag {
@@ -171,10 +180,18 @@ impl ActionTag {
             50 => Some(Self::ResetDefaultShortcuts),
             51 => Some(Self::OpacitySliderChanged),
             52 => Some(Self::AutostartToggled),
+            53 => Some(Self::OcrStripNewlinesToggled),
             60 => Some(Self::SettingsSecTranslate),
             61 => Some(Self::SettingsSecChat),
             62 => Some(Self::SettingsSecShortcuts),
             63 => Some(Self::SettingsSecGeneral),
+            70 => Some(Self::HyMtQuantChanged),
+            71 => Some(Self::HyMtCheckCompatibility),
+            72 => Some(Self::HyMtDownloadAndRun),
+            73 => Some(Self::HyMtStopServer),
+            74 => Some(Self::HyMtDeleteModel),
+            75 => Some(Self::ChatHyMtQuantChanged),
+            76 => Some(Self::ChatHyMtDownloadAndRun),
             _ => None,
         }
     }
@@ -216,6 +233,13 @@ pub enum UiEvent {
     ModelsDiscovered {
         for_chat: bool,
         result: Result<Vec<String>, String>,
+    },
+    HyMtProgress {
+        progress: ttree_ai::hy_mt_manager::HyMtDownloadProgress,
+    },
+    HyMtActionFinished {
+        quant: HyMtQuant,
+        result: Result<String, String>,
     },
 }
 
@@ -286,6 +310,18 @@ pub struct SettingsViewWidgets {
     pub t_lbl_backend: Retained<NSTextField>,
     pub ai_backend_popup: Retained<NSPopUpButton>,
     pub btn_ai_def_url: Retained<NSButton>,
+    // BuiltInHyMt 专属控件（全精度选择 + 一键检测 + 一键下载运行 + 停止 + 删除 + 状态卡片）
+    pub t_lbl_hymt_quant: Retained<NSTextField>,
+    pub ai_hymt_quant_popup: Retained<NSPopUpButton>,
+    pub t_lbl_hymt_action: Retained<NSTextField>,
+    pub btn_hymt_check: Retained<NSButton>,
+    pub btn_hymt_download_run: Retained<NSButton>,
+    pub btn_hymt_stop: Retained<NSButton>,
+    pub btn_hymt_delete: Retained<NSButton>,
+    pub t_lbl_hymt_status: Retained<NSTextField>,
+    pub hymt_info_surface: Retained<NSBox>,
+    pub hymt_info_label: Retained<NSTextField>,
+
     pub t_lbl_url: Retained<NSTextField>,
     pub ai_base_url_field: Retained<NSTextField>,
     pub t_lbl_key: Retained<NSTextField>,
@@ -312,6 +348,9 @@ pub struct SettingsViewWidgets {
     pub c_lbl_backend: Retained<NSTextField>,
     pub chat_backend_popup: Retained<NSPopUpButton>,
     pub btn_chat_def_url: Retained<NSButton>,
+    pub c_lbl_hymt_quant: Retained<NSTextField>,
+    pub chat_hymt_quant_popup: Retained<NSPopUpButton>,
+    pub btn_chat_hymt_run: Retained<NSButton>,
     pub c_lbl_url: Retained<NSTextField>,
     pub chat_base_url_field: Retained<NSTextField>,
     pub c_lbl_key: Retained<NSTextField>,
@@ -351,6 +390,7 @@ pub struct SettingsViewWidgets {
     pub opacity_slider: Retained<NSSlider>,
     pub opacity_val_label: Retained<NSTextField>,
     pub autostart_chk: Retained<NSButton>,
+    pub ocr_strip_newlines_chk: Retained<NSButton>,
     pub ver_label: Retained<NSTextField>,
     pub gen_hint: Retained<NSTextField>,
 
@@ -411,6 +451,10 @@ pub struct AppController {
     pub active_conversation_id: Option<usize>,
     pub current_messages: Vec<ChatMessage>,
     pub streaming_assistant_buffer: String,
+
+    pub hymt_cancel: CancelSlot,
+    pub hymt_downloading: bool,
+    pub last_hymt_report: Option<ttree_ai::hy_mt_manager::HyMtCompatibilityReport>,
 
     pub pending_clear_ai_key: bool,
     pub pending_clear_chat_key: bool,
@@ -562,8 +606,7 @@ impl AppController {
             dispatcher,
             action_sel,
         );
-        let chat_ui =
-            Self::build_chat_view(mtm, body_frame, &pane_layout, dispatcher, action_sel);
+        let chat_ui = Self::build_chat_view(mtm, body_frame, &pane_layout, dispatcher, action_sel);
         let settings_ui =
             Self::build_settings_view(mtm, body_frame, &settings, dispatcher, action_sel);
 
@@ -634,6 +677,9 @@ impl AppController {
             active_conversation_id,
             current_messages,
             streaming_assistant_buffer: String::new(),
+            hymt_cancel: CancelSlot::new(),
+            hymt_downloading: false,
+            last_hymt_report: None,
             pending_clear_ai_key: false,
             pending_clear_chat_key: false,
             pane_layout,
@@ -642,6 +688,7 @@ impl AppController {
             pending_resize_save: None,
         };
 
+        ctrl.refresh_hymt_ui_state();
         ctrl.update_window_min_max_constraints();
         ctrl.refresh_ai_header_badge();
         ctrl.refresh_conversations_popup();
@@ -674,8 +721,7 @@ impl AppController {
         let ai_h = layout.ai_height;
 
         // 1. 上方翻译输入框
-        let source_surface =
-            make_surface_box(mtm, top_rect(h, 0.0, 0.0, w, source_h), 0.0, 0.25);
+        let source_surface = make_surface_box(mtm, top_rect(h, 0.0, 0.0, w, source_h), 0.0, 0.25);
         let (input_scroll, input_tv) = make_scrollable_text_view(
             mtm,
             top_rect(h, 2.0, 2.0, w - 4.0, (source_h - 6.0).max(40.0)),
@@ -704,8 +750,7 @@ impl AppController {
         );
 
         // 2. 下方选择语言条
-        let lang_surface =
-            make_surface_box(mtm, top_rect(h, 0.0, source_h, w, lang_h), 0.0, 0.35);
+        let lang_surface = make_surface_box(mtm, top_rect(h, 0.0, source_h, w, lang_h), 0.0, 0.35);
         let src_labels: Vec<&str> = SOURCE_LANGUAGES.iter().map(|l| l.label).collect();
         let tgt_labels: Vec<&str> = TARGET_LANGUAGES.iter().map(|l| l.label).collect();
         let popup_top = source_h + ((lang_h - 24.0) * 0.5).max(2.0);
@@ -785,7 +830,13 @@ impl AppController {
 
         let (web_scroll, web_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 2.0, results_top + 22.0, w - 4.0, (web_h - 26.0).max(40.0)),
+            top_rect(
+                h,
+                2.0,
+                results_top + 22.0,
+                w - 4.0,
+                (web_h - 26.0).max(40.0),
+            ),
             false,
             14.5,
             None,
@@ -947,10 +998,8 @@ impl AppController {
 
         let composer_h = layout.chat_input_height;
         let transcript_h = (h - hist_h - composer_h).max(120.0);
-        let transcript_scroll = NSScrollView::initWithFrame(
-            mtm.alloc(),
-            top_rect(h, 0.0, hist_h, w, transcript_h),
-        );
+        let transcript_scroll =
+            NSScrollView::initWithFrame(mtm.alloc(), top_rect(h, 0.0, hist_h, w, transcript_h));
         transcript_scroll.setHasVerticalScroller(true);
         transcript_scroll.setHasHorizontalScroller(false);
         transcript_scroll.setDrawsBackground(false);
@@ -980,7 +1029,13 @@ impl AppController {
         );
         let (input_scroll, input_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 6.0, composer_top + 6.0, w - 88.0, (composer_h - 12.0).max(40.0)),
+            top_rect(
+                h,
+                6.0,
+                composer_top + 6.0,
+                w - 88.0,
+                (composer_h - 12.0).max(40.0),
+            ),
             true,
             14.0,
             Some(dispatcher),
@@ -995,7 +1050,13 @@ impl AppController {
         );
         let send_btn = make_button(
             mtm,
-            top_rect(h, w - 74.0, composer_top + (composer_h - 28.0) * 0.5, 62.0, 28.0),
+            top_rect(
+                h,
+                w - 74.0,
+                composer_top + (composer_h - 28.0) * 0.5,
+                62.0,
+                28.0,
+            ),
             "发送",
             ActionTag::SendChat as isize,
             dispatcher,
@@ -1127,13 +1188,23 @@ impl AppController {
             .position(|&b| b == chat_cfg.backend)
             .unwrap_or(0);
 
+        let quant_labels: Vec<&str> = HyMtQuant::ALL.iter().map(|q| q.label()).collect();
+        let ai_quant_idx = HyMtQuant::ALL
+            .iter()
+            .position(|&q| q == ai_cfg.hy_mt_quant)
+            .unwrap_or(6);
+        let chat_quant_idx = HyMtQuant::ALL
+            .iter()
+            .position(|&q| q == chat_cfg.hy_mt_quant)
+            .unwrap_or(6);
+
         let dummy = top_rect(sec_h, 0.0, 0.0, 100.0, 24.0);
 
         // ── Section 1: AI 翻译（根据所选接入方式动态展示对应字段，多行提示词大框） ──
         let t_head = make_label(
             mtm,
             dummy,
-            "AI 翻译（云端 / 本地服务 / GGUF）",
+            "AI 翻译（内置 HY-MT1.5 / 云端 / 本地模型）",
             12.5,
             true,
             true,
@@ -1167,6 +1238,60 @@ impl AppController {
             action_sel,
         );
 
+        let t_lbl_hymt_quant = make_label(mtm, dummy, "模型精度", 12.5, false, true);
+        let ai_hymt_quant_popup = make_popup(
+            mtm,
+            dummy,
+            &quant_labels,
+            ai_quant_idx,
+            true,
+            ActionTag::HyMtQuantChanged as isize,
+            dispatcher,
+            action_sel,
+        );
+        let t_lbl_hymt_action = make_label(mtm, dummy, "服务操作", 12.5, false, true);
+        let btn_hymt_check = make_button(
+            mtm,
+            dummy,
+            "检测环境",
+            ActionTag::HyMtCheckCompatibility as isize,
+            dispatcher,
+            action_sel,
+        );
+        let btn_hymt_download_run = make_button(
+            mtm,
+            dummy,
+            "下载并运行",
+            ActionTag::HyMtDownloadAndRun as isize,
+            dispatcher,
+            action_sel,
+        );
+        let btn_hymt_stop = make_button(
+            mtm,
+            dummy,
+            "停止",
+            ActionTag::HyMtStopServer as isize,
+            dispatcher,
+            action_sel,
+        );
+        let btn_hymt_delete = make_button(
+            mtm,
+            dummy,
+            "删除",
+            ActionTag::HyMtDeleteModel as isize,
+            dispatcher,
+            action_sel,
+        );
+        let t_lbl_hymt_status = make_label(mtm, dummy, "环境状态", 12.5, false, true);
+        let hymt_info_surface = make_surface_box(mtm, dummy, 6.0, 0.35);
+        let hymt_info_label = make_wrapping_label(
+            mtm,
+            dummy,
+            "点击「检测环境」检查内存与磁盘，或点击「下载并运行」从 Hugging Face 获取模型。",
+            11.0,
+            true,
+        );
+
         let t_lbl_url = make_label(mtm, dummy, "接口地址", 12.5, false, true);
         let ai_base_url_field = make_text_field(
             mtm,
@@ -1188,7 +1313,11 @@ impl AppController {
         let ai_key_status_label = make_label(
             mtm,
             dummy,
-            if ai_cfg.has_api_key { "已保存" } else { "未设置" },
+            if ai_cfg.has_api_key {
+                "已保存"
+            } else {
+                "未设置"
+            },
             11.5,
             false,
             true,
@@ -1289,6 +1418,16 @@ impl AppController {
         add_subview(&sec_translate, &t_lbl_backend);
         add_subview(&sec_translate, &ai_backend_popup);
         add_subview(&sec_translate, &btn_ai_def_url);
+        add_subview(&sec_translate, &t_lbl_hymt_quant);
+        add_subview(&sec_translate, &ai_hymt_quant_popup);
+        add_subview(&sec_translate, &t_lbl_hymt_action);
+        add_subview(&sec_translate, &btn_hymt_check);
+        add_subview(&sec_translate, &btn_hymt_download_run);
+        add_subview(&sec_translate, &btn_hymt_stop);
+        add_subview(&sec_translate, &btn_hymt_delete);
+        add_subview(&sec_translate, &t_lbl_hymt_status);
+        add_subview(&sec_translate, &hymt_info_surface);
+        add_subview(&sec_translate, &hymt_info_label);
         add_subview(&sec_translate, &t_lbl_url);
         add_subview(&sec_translate, &ai_base_url_field);
         add_subview(&sec_translate, &t_lbl_key);
@@ -1346,6 +1485,25 @@ impl AppController {
             dispatcher,
             action_sel,
         );
+        let c_lbl_hymt_quant = make_label(mtm, dummy, "模型精度", 12.5, false, true);
+        let chat_hymt_quant_popup = make_popup(
+            mtm,
+            dummy,
+            &quant_labels,
+            chat_quant_idx,
+            true,
+            ActionTag::ChatHyMtQuantChanged as isize,
+            dispatcher,
+            action_sel,
+        );
+        let btn_chat_hymt_run = make_button(
+            mtm,
+            dummy,
+            "下载并运行",
+            ActionTag::ChatHyMtDownloadAndRun as isize,
+            dispatcher,
+            action_sel,
+        );
 
         let c_lbl_url = make_label(mtm, dummy, "接口地址", 12.5, false, true);
         let chat_base_url_field = make_text_field(
@@ -1368,7 +1526,11 @@ impl AppController {
         let chat_key_status_label = make_label(
             mtm,
             dummy,
-            if chat_cfg.has_api_key { "已保存" } else { "未设置" },
+            if chat_cfg.has_api_key {
+                "已保存"
+            } else {
+                "未设置"
+            },
             11.5,
             false,
             true,
@@ -1453,6 +1615,9 @@ impl AppController {
         add_subview(&sec_chat, &c_lbl_backend);
         add_subview(&sec_chat, &chat_backend_popup);
         add_subview(&sec_chat, &btn_chat_def_url);
+        add_subview(&sec_chat, &c_lbl_hymt_quant);
+        add_subview(&sec_chat, &chat_hymt_quant_popup);
+        add_subview(&sec_chat, &btn_chat_hymt_run);
         add_subview(&sec_chat, &c_lbl_url);
         add_subview(&sec_chat, &chat_base_url_field);
         add_subview(&sec_chat, &c_lbl_key);
@@ -1482,8 +1647,7 @@ impl AppController {
             action_sel,
         );
         let sc_lbl_toggle = make_label(mtm, dummy, "呼出翻译", 12.5, false, true);
-        let sc_toggle_field =
-            make_text_field(mtm, dummy, &sc_cfg.toggle, "CmdOrCtrl+Shift+Space");
+        let sc_toggle_field = make_text_field(mtm, dummy, &sc_cfg.toggle, "CmdOrCtrl+Shift+Space");
         let sc_lbl_ocr = make_label(mtm, dummy, "截图 OCR", 12.5, false, true);
         let sc_ocr_field = make_text_field(mtm, dummy, &sc_cfg.ocr, "CmdOrCtrl+Shift+S");
         let sc_lbl_ai = make_label(mtm, dummy, "呼出 AI 对话", 12.5, false, true);
@@ -1564,6 +1728,15 @@ impl AppController {
             dispatcher,
             action_sel,
         );
+        let ocr_strip_newlines_chk = make_checkbox(
+            mtm,
+            dummy,
+            "OCR 识别文字自动去掉换行（智能合并为单段）",
+            app_cfg.ocr_strip_newlines,
+            ActionTag::OcrStripNewlinesToggled as isize,
+            dispatcher,
+            action_sel,
+        );
         let ver_label = make_label(
             mtm,
             dummy,
@@ -1574,7 +1747,7 @@ impl AppController {
         );
         let gen_hint = make_wrapping_label(
             mtm,
-            top_rect(sec_h, 0.0, 176.0, content_w, 88.0),
+            top_rect(sec_h, 0.0, 204.0, content_w, 88.0),
             "调整面板透明度可让底层桌面毛玻璃透出。\n截图 OCR 需要 macOS「屏幕录制」权限；划词翻译优先使用「辅助功能」权限，未授权时会临时使用剪贴板回退。\n所有配置与分栏尺寸均保存在本地 JSON，不再调用 macOS 钥匙串。",
             11.5,
             true,
@@ -1584,6 +1757,7 @@ impl AppController {
         add_subview(&sec_general, &opacity_val_label);
         add_subview(&sec_general, &opacity_slider);
         add_subview(&sec_general, &autostart_chk);
+        add_subview(&sec_general, &ocr_strip_newlines_chk);
         add_subview(&sec_general, &ver_label);
         add_subview(&sec_general, &gen_hint);
 
@@ -1619,6 +1793,16 @@ impl AppController {
             t_lbl_backend,
             ai_backend_popup,
             btn_ai_def_url,
+            t_lbl_hymt_quant,
+            ai_hymt_quant_popup,
+            t_lbl_hymt_action,
+            btn_hymt_check,
+            btn_hymt_download_run,
+            btn_hymt_stop,
+            btn_hymt_delete,
+            t_lbl_hymt_status,
+            hymt_info_surface,
+            hymt_info_label,
             t_lbl_url,
             ai_base_url_field,
             t_lbl_key,
@@ -1643,6 +1827,9 @@ impl AppController {
             c_lbl_backend,
             chat_backend_popup,
             btn_chat_def_url,
+            c_lbl_hymt_quant,
+            chat_hymt_quant_popup,
+            btn_chat_hymt_run,
             c_lbl_url,
             chat_base_url_field,
             c_lbl_key,
@@ -1678,6 +1865,7 @@ impl AppController {
             opacity_slider,
             opacity_val_label,
             autostart_chk,
+            ocr_strip_newlines_chk,
             ver_label,
             gen_hint,
             settings_status_label,
@@ -1818,7 +2006,9 @@ impl AppController {
 
         match tab {
             TabMode::Translate => {
-                let _ = self.window.makeFirstResponder(Some(&self.translate_ui.input_tv));
+                let _ = self
+                    .window
+                    .makeFirstResponder(Some(&self.translate_ui.input_tv));
             }
             TabMode::Chat => {
                 let _ = self.window.makeFirstResponder(Some(&self.chat_ui.input_tv));
@@ -1858,7 +2048,9 @@ impl AppController {
         self.window.makeKeyAndOrderFront(None);
         match self.active_tab {
             TabMode::Translate => {
-                let _ = self.window.makeFirstResponder(Some(&self.translate_ui.input_tv));
+                let _ = self
+                    .window
+                    .makeFirstResponder(Some(&self.translate_ui.input_tv));
             }
             TabMode::Chat => {
                 let _ = self.window.makeFirstResponder(Some(&self.chat_ui.input_tv));
@@ -1887,6 +2079,9 @@ impl AppController {
             "AI (未开启)".to_string()
         } else {
             match cfg.backend {
+                AiBackendKind::BuiltInHyMt => {
+                    format!("AI  ·  HY-MT1.5 ({})", cfg.hy_mt_quant.code())
+                }
                 AiBackendKind::OpenAiCompatible => format!("AI  ·  {short_model}"),
                 AiBackendKind::Ollama => format!("AI  ·  OLLAMA ({short_model})"),
                 AiBackendKind::LocalServer => format!("AI  ·  MLX/LOCAL ({short_model})"),
@@ -2110,6 +2305,7 @@ impl AppController {
                 self.show_and_focus_window();
             }
             ActionTag::TabSettings => {
+                self.refresh_hymt_ui_state();
                 self.switch_tab(TabMode::Settings);
                 self.show_and_focus_window();
             }
@@ -2117,9 +2313,11 @@ impl AppController {
                 self.switch_tab(self.last_main_mode);
             }
             ActionTag::SettingsSecTranslate => {
+                self.refresh_hymt_ui_state();
                 self.switch_settings_section(SettingsSection::Translate);
             }
             ActionTag::SettingsSecChat => {
+                self.refresh_hymt_ui_state();
                 self.switch_settings_section(SettingsSection::Chat);
             }
             ActionTag::SettingsSecShortcuts => {
@@ -2131,6 +2329,7 @@ impl AppController {
             ActionTag::TriggerOcr => self.trigger_ocr(),
             ActionTag::TogglePin => self.set_pinned(!self.is_pinned),
             ActionTag::TrayQuit => {
+                ttree_ai::hy_mt_manager::stop_server();
                 let app = NSApplication::sharedApplication(self.mtm);
                 app.terminate(None);
             }
@@ -2270,17 +2469,23 @@ impl AppController {
             }
             ActionTag::AiTransBackendChanged => {
                 let backend = self.selected_ai_trans_backend();
-                let cur_url = get_field_string(&self.settings_ui.ai_base_url_field);
-                if cur_url.trim().is_empty()
-                    || cur_url == "https://api.openai.com/v1"
-                    || cur_url == "http://127.0.0.1:11434"
-                    || cur_url == "http://127.0.0.1:1234/v1"
-                {
-                    set_field_string(
-                        &self.settings_ui.ai_base_url_field,
-                        backend.default_base_url(),
-                    );
+                if !matches!(
+                    backend,
+                    AiBackendKind::BuiltInHyMt | AiBackendKind::CandleGguf
+                ) {
+                    let cur_url = get_field_string(&self.settings_ui.ai_base_url_field);
+                    if cur_url.trim().is_empty()
+                        || cur_url == "https://api.openai.com/v1"
+                        || cur_url == "http://127.0.0.1:11434"
+                        || cur_url == "http://127.0.0.1:1234/v1"
+                    {
+                        set_field_string(
+                            &self.settings_ui.ai_base_url_field,
+                            backend.default_base_url(),
+                        );
+                    }
                 }
+                self.refresh_hymt_ui_state();
                 let (w, h) = self.last_known_size;
                 self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
             }
@@ -2303,7 +2508,13 @@ impl AppController {
             ActionTag::AiTransBrowseGguf => {
                 if let Some(path) = self.pick_file(&["gguf"]) {
                     set_field_string(&self.settings_ui.ai_gguf_field, &path);
-                    self.settings_ui.ai_backend_popup.selectItemAtIndex(3);
+                    let gguf_idx = AiBackendKind::ALL
+                        .iter()
+                        .position(|&b| b == AiBackendKind::CandleGguf)
+                        .unwrap_or(4);
+                    self.settings_ui
+                        .ai_backend_popup
+                        .selectItemAtIndex(gguf_idx as isize);
                     let (w, h) = self.last_known_size;
                     self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
                 }
@@ -2320,17 +2531,23 @@ impl AppController {
             }
             ActionTag::ChatBackendChanged => {
                 let backend = self.selected_chat_backend();
-                let cur_url = get_field_string(&self.settings_ui.chat_base_url_field);
-                if cur_url.trim().is_empty()
-                    || cur_url == "https://api.openai.com/v1"
-                    || cur_url == "http://127.0.0.1:11434"
-                    || cur_url == "http://127.0.0.1:1234/v1"
-                {
-                    set_field_string(
-                        &self.settings_ui.chat_base_url_field,
-                        backend.default_base_url(),
-                    );
+                if !matches!(
+                    backend,
+                    AiBackendKind::BuiltInHyMt | AiBackendKind::CandleGguf
+                ) {
+                    let cur_url = get_field_string(&self.settings_ui.chat_base_url_field);
+                    if cur_url.trim().is_empty()
+                        || cur_url == "https://api.openai.com/v1"
+                        || cur_url == "http://127.0.0.1:11434"
+                        || cur_url == "http://127.0.0.1:1234/v1"
+                    {
+                        set_field_string(
+                            &self.settings_ui.chat_base_url_field,
+                            backend.default_base_url(),
+                        );
+                    }
                 }
+                self.refresh_hymt_ui_state();
                 let (w, h) = self.last_known_size;
                 self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
             }
@@ -2353,7 +2570,13 @@ impl AppController {
             ActionTag::ChatBrowseGguf => {
                 if let Some(path) = self.pick_file(&["gguf"]) {
                     set_field_string(&self.settings_ui.chat_gguf_field, &path);
-                    self.settings_ui.chat_backend_popup.selectItemAtIndex(3);
+                    let gguf_idx = AiBackendKind::ALL
+                        .iter()
+                        .position(|&b| b == AiBackendKind::CandleGguf)
+                        .unwrap_or(4);
+                    self.settings_ui
+                        .chat_backend_popup
+                        .selectItemAtIndex(gguf_idx as isize);
                     let (w, h) = self.last_known_size;
                     self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
                 }
@@ -2361,6 +2584,10 @@ impl AppController {
             ActionTag::ChatCopyFromTrans => {
                 let idx = self.settings_ui.ai_backend_popup.indexOfSelectedItem();
                 self.settings_ui.chat_backend_popup.selectItemAtIndex(idx);
+                let q_idx = self.settings_ui.ai_hymt_quant_popup.indexOfSelectedItem();
+                self.settings_ui
+                    .chat_hymt_quant_popup
+                    .selectItemAtIndex(q_idx);
                 set_field_string(
                     &self.settings_ui.chat_base_url_field,
                     &get_field_string(&self.settings_ui.ai_base_url_field),
@@ -2395,13 +2622,12 @@ impl AppController {
                 self.set_status("已填入默认快捷键，请点击「保存快捷键」");
             }
             ActionTag::OpacitySliderChanged => {
-                let val = AppearanceConfig::clamp_opacity(
-                    self.settings_ui.opacity_slider.doubleValue(),
-                );
+                let val =
+                    AppearanceConfig::clamp_opacity(self.settings_ui.opacity_slider.doubleValue());
                 self.window.setAlphaValue(val);
-                let _ = self.settings.save_appearance(AppearanceConfig {
-                    panel_opacity: val,
-                });
+                let mut app_cfg = self.settings.appearance();
+                app_cfg.panel_opacity = val;
+                let _ = self.settings.save_appearance(app_cfg);
                 set_field_string(
                     &self.settings_ui.opacity_val_label,
                     &format!("{:.0}%", val * 100.0),
@@ -2411,7 +2637,65 @@ impl AppController {
                 let want = self.settings_ui.autostart_chk.state() == NSControlStateValueOn;
                 let _ = ttree_platform_macos::autostart::set_enabled(want);
             }
+            ActionTag::OcrStripNewlinesToggled => {
+                let want = self.settings_ui.ocr_strip_newlines_chk.state() == NSControlStateValueOn;
+                let mut app_cfg = self.settings.appearance();
+                app_cfg.ocr_strip_newlines = want;
+                let _ = self.settings.save_appearance(app_cfg);
+                self.set_status(if want {
+                    "✓ 已开启 OCR 自动去掉换行"
+                } else {
+                    "已关闭 OCR 自动去掉换行（保留原始多行格式）"
+                });
+            }
             ActionTag::SaveSettings => self.save_all_settings(),
+            ActionTag::HyMtQuantChanged | ActionTag::ChatHyMtQuantChanged => {
+                self.refresh_hymt_ui_state();
+            }
+            ActionTag::HyMtCheckCompatibility => {
+                let report = self.refresh_hymt_ui_state();
+                if report.supported {
+                    self.set_status(&format!(
+                        "✓ 环境支持 HY-MT1.5：{} ({:.0} GB 内存) · 推荐精度 {}",
+                        report.cpu_brand,
+                        report.total_ram_gb,
+                        report.recommended_quant.code()
+                    ));
+                } else {
+                    self.set_status(&format!(
+                        "⚠ 环境资源紧张（内存 {:.1} GB / 可用磁盘 {:.1} GB），建议选择 Q2_K 轻量精度",
+                        report.total_ram_gb, report.free_disk_gb
+                    ));
+                }
+            }
+            ActionTag::HyMtDownloadAndRun => {
+                let quant = self.selected_ai_hymt_quant();
+                self.trigger_hymt_download_and_run(quant, false);
+            }
+            ActionTag::ChatHyMtDownloadAndRun => {
+                let quant = self.selected_chat_hymt_quant();
+                self.trigger_hymt_download_and_run(quant, true);
+            }
+            ActionTag::HyMtStopServer => {
+                ttree_ai::hy_mt_manager::stop_server();
+                self.refresh_hymt_ui_state();
+                self.set_status("✓ 已停止内置 HY-MT1.5 后台推理服务");
+            }
+            ActionTag::HyMtDeleteModel => {
+                let quant = self.selected_ai_hymt_quant();
+                match ttree_ai::hy_mt_manager::delete_model_quant(quant) {
+                    Ok(()) => {
+                        self.refresh_hymt_ui_state();
+                        self.set_status(&format!(
+                            "✓ 已删除本地模型 HY-MT1.5-1.8B ({})",
+                            quant.code()
+                        ));
+                    }
+                    Err(e) => {
+                        self.set_status(&format!("❌ {e}"));
+                    }
+                }
+            }
         }
     }
 
@@ -2446,6 +2730,153 @@ impl AppController {
             .get(idx.max(0) as usize)
             .copied()
             .unwrap_or(AiBackendKind::OpenAiCompatible)
+    }
+
+    fn selected_ai_hymt_quant(&self) -> HyMtQuant {
+        let idx = self.settings_ui.ai_hymt_quant_popup.indexOfSelectedItem();
+        HyMtQuant::ALL
+            .get(idx.max(0) as usize)
+            .copied()
+            .unwrap_or(HyMtQuant::Q8_0)
+    }
+
+    fn selected_chat_hymt_quant(&self) -> HyMtQuant {
+        let idx = self.settings_ui.chat_hymt_quant_popup.indexOfSelectedItem();
+        HyMtQuant::ALL
+            .get(idx.max(0) as usize)
+            .copied()
+            .unwrap_or(HyMtQuant::Q8_0)
+    }
+
+    pub fn refresh_hymt_ui_state(&mut self) -> ttree_ai::hy_mt_manager::HyMtCompatibilityReport {
+        let report = ttree_ai::hy_mt_manager::check_compatibility();
+        let ai_q = self.selected_ai_hymt_quant();
+        let chat_q = self.selected_chat_hymt_quant();
+
+        let rebuild_quant_popup = |popup: &NSPopUpButton, current: HyMtQuant| {
+            popup.removeAllItems();
+            for q in HyMtQuant::ALL {
+                let tag = if report.running_quant == Some(q) {
+                    " · 运行中"
+                } else if report.downloaded_quants.contains(&q) {
+                    " · 已下载"
+                } else {
+                    ""
+                };
+                let title = format!("{}{}", q.label(), tag);
+                popup.addItemWithTitle(&NSString::from_str(&title));
+            }
+            if let Some(pos) = HyMtQuant::ALL.iter().position(|&q| q == current) {
+                popup.selectItemAtIndex(pos as isize);
+            }
+        };
+
+        rebuild_quant_popup(&self.settings_ui.ai_hymt_quant_popup, ai_q);
+        rebuild_quant_popup(&self.settings_ui.chat_hymt_quant_popup, chat_q);
+
+        if !self.hymt_downloading {
+            let summary = report.summary_text(ai_q);
+            set_field_string(&self.settings_ui.hymt_info_label, &summary);
+
+            let dl_btn_title = if report.running_quant == Some(ai_q) {
+                "● 运行中"
+            } else if report.downloaded_quants.contains(&ai_q) {
+                "启动服务"
+            } else {
+                "下载并运行"
+            };
+            self.settings_ui
+                .btn_hymt_download_run
+                .setTitle(&NSString::from_str(dl_btn_title));
+
+            let chat_btn_title = if report.running_quant == Some(chat_q) {
+                "● 运行中"
+            } else if report.downloaded_quants.contains(&chat_q) {
+                "启动服务"
+            } else {
+                "下载并运行"
+            };
+            self.settings_ui
+                .btn_chat_hymt_run
+                .setTitle(&NSString::from_str(chat_btn_title));
+        } else {
+            self.settings_ui
+                .btn_hymt_download_run
+                .setTitle(&NSString::from_str("取消下载"));
+            self.settings_ui
+                .btn_chat_hymt_run
+                .setTitle(&NSString::from_str("取消下载"));
+        }
+
+        self.settings_ui
+            .btn_hymt_stop
+            .setEnabled(report.running_quant.is_some());
+        self.settings_ui
+            .btn_hymt_delete
+            .setEnabled(report.downloaded_quants.contains(&ai_q) && !self.hymt_downloading);
+
+        self.last_hymt_report = Some(report.clone());
+        report
+    }
+
+    fn trigger_hymt_download_and_run(&mut self, quant: HyMtQuant, for_chat: bool) {
+        if self.hymt_downloading {
+            self.hymt_cancel.cancel_current();
+            self.hymt_downloading = false;
+            self.refresh_hymt_ui_state();
+            self.set_status("已取消下载（断点进度已保留，再次点击可继续）");
+            return;
+        }
+
+        // 若当前所选精度尚未在当前目录下载完成，先弹窗让用户选择/确认模型保存文件夹
+        if !ttree_ai::hy_mt_manager::is_model_downloaded(quant) {
+            let Some(chosen_dir) = self.pick_hymt_download_dir(quant) else {
+                self.set_status("已取消选择模型下载文件夹");
+                return;
+            };
+            if let Err(e) = ttree_ai::hy_mt_manager::set_custom_models_dir(chosen_dir) {
+                self.set_status(&format!("❌ {e}"));
+                return;
+            }
+            self.refresh_hymt_ui_state();
+        }
+
+        // 自动保存当前选择的内置模型与精度配置，无需用户额外点击“保存配置”
+        if for_chat {
+            let mut chat_cfg = self.settings.chat_ai_for_request();
+            chat_cfg.backend = AiBackendKind::BuiltInHyMt;
+            chat_cfg.hy_mt_quant = quant;
+            let _ = self.settings.save_chat_ai(&chat_cfg);
+        } else {
+            let mut ai_cfg = self.settings.ai_translation_for_request();
+            ai_cfg.enabled = true;
+            self.settings_ui
+                .ai_enabled_chk
+                .setState(NSControlStateValueOn);
+            ai_cfg.backend = AiBackendKind::BuiltInHyMt;
+            ai_cfg.hy_mt_quant = quant;
+            let _ = self.settings.save_ai_translation(&ai_cfg);
+            self.refresh_ai_header_badge();
+        }
+
+        let cancel_token = self.hymt_cancel.next();
+        self.hymt_downloading = true;
+        self.refresh_hymt_ui_state();
+        self.set_status(&format!(
+            "正在准备 HY-MT1.5-1.8B ({}) → {}…",
+            quant.code(),
+            ttree_ai::hy_mt_manager::models_dir().display()
+        ));
+
+        let tx = self.ui_tx.clone();
+        self.rt.spawn(async move {
+            let progress_tx = tx.clone();
+            let res = ttree_ai::hy_mt_manager::download_and_start(quant, &cancel_token, move |p| {
+                let _ = progress_tx.send(UiEvent::HyMtProgress { progress: p });
+            })
+            .await;
+            let _ = tx.send(UiEvent::HyMtActionFinished { quant, result: res });
+        });
     }
 
     fn discover_models(&mut self, for_chat: bool) {
@@ -2486,6 +2917,42 @@ impl AppController {
         });
     }
 
+    fn pick_hymt_download_dir(&mut self, quant: HyMtQuant) -> Option<std::path::PathBuf> {
+        self.is_modal_open = true;
+        let panel = NSOpenPanel::openPanel(self.mtm);
+        panel.setCanChooseFiles(false);
+        panel.setCanChooseDirectories(true);
+        panel.setCanCreateDirectories(true);
+        panel.setAllowsMultipleSelection(false);
+        panel.setTitle(Some(&NSString::from_str("选择模型下载保存文件夹")));
+        let size_gb = quant.expected_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
+        let msg = format!(
+            "请选择存放混元翻译模型 {} ({:.2} GB) 的文件夹：",
+            quant.file_name(),
+            size_gb
+        );
+        panel.setMessage(Some(&NSString::from_str(&msg)));
+        panel.setPrompt(Some(&NSString::from_str("选择此文件夹并下载")));
+
+        let current_dir = ttree_ai::hy_mt_manager::models_dir();
+        let _ = std::fs::create_dir_all(&current_dir);
+        if let Some(dir_str) = current_dir.to_str() {
+            let ns_path = NSString::from_str(dir_str);
+            let url = objc2_foundation::NSURL::fileURLWithPath(&ns_path);
+            panel.setDirectoryURL(Some(&url));
+        }
+
+        let response = panel.runModal();
+        self.is_modal_open = false;
+        if response != NSModalResponseOK {
+            return None;
+        }
+        let urls = panel.URLs();
+        let url = urls.firstObject()?;
+        let path = url.path()?.to_string();
+        Some(std::path::PathBuf::from(path))
+    }
+
     fn pick_file(&mut self, allowed_exts: &[&str]) -> Option<String> {
         self.is_modal_open = true;
         let panel = NSOpenPanel::openPanel(self.mtm);
@@ -2517,6 +2984,7 @@ impl AppController {
         let ai_input = AiTranslationConfig {
             enabled: self.settings_ui.ai_enabled_chk.state() == NSControlStateValueOn,
             backend: self.selected_ai_trans_backend(),
+            hy_mt_quant: self.selected_ai_hymt_quant(),
             base_url: get_field_string(&self.settings_ui.ai_base_url_field),
             has_api_key: false,
             api_key: get_field_string(&self.settings_ui.ai_key_field),
@@ -2534,6 +3002,7 @@ impl AppController {
 
         let chat_input = ChatAiConfig {
             backend: self.selected_chat_backend(),
+            hy_mt_quant: self.selected_chat_hymt_quant(),
             base_url: get_field_string(&self.settings_ui.chat_base_url_field),
             has_api_key: false,
             api_key: get_field_string(&self.settings_ui.chat_key_field),
@@ -2580,12 +3049,20 @@ impl AppController {
         set_field_string(&self.settings_ui.ai_key_field, "");
         set_field_string(
             &self.settings_ui.ai_key_status_label,
-            if saved_ai.has_api_key { "已保存" } else { "未设置" },
+            if saved_ai.has_api_key {
+                "已保存"
+            } else {
+                "未设置"
+            },
         );
         set_field_string(&self.settings_ui.chat_key_field, "");
         set_field_string(
             &self.settings_ui.chat_key_status_label,
-            if saved_chat.has_api_key { "已保存" } else { "未设置" },
+            if saved_chat.has_api_key {
+                "已保存"
+            } else {
+                "未设置"
+            },
         );
         self.refresh_ai_header_badge();
         self.set_status("✓ 已保存");
@@ -2837,7 +3314,12 @@ impl AppController {
                 }
             }
             UiEvent::OcrCompleted { outcome } => match outcome {
-                Ok(OcrOutcome::Text(text)) => {
+                Ok(OcrOutcome::Text(raw_text)) => {
+                    let text = if self.settings.appearance().ocr_strip_newlines {
+                        ttree_core::normalize_ocr_newlines(&raw_text)
+                    } else {
+                        raw_text
+                    };
                     self.switch_tab(TabMode::Translate);
                     self.show_and_focus_window();
                     set_text_view_string(&self.translate_ui.input_tv, &text);
@@ -2964,6 +3446,27 @@ impl AppController {
                     self.set_status(&format!("⚠️ {err}"));
                 }
             },
+            UiEvent::HyMtProgress { progress } => {
+                let text = progress.format_status();
+                set_field_string(&self.settings_ui.hymt_info_label, &text);
+                self.set_status(&text);
+            }
+            UiEvent::HyMtActionFinished { quant, result } => {
+                self.hymt_downloading = false;
+                self.refresh_hymt_ui_state();
+                self.refresh_ai_header_badge();
+                match result {
+                    Ok(url) => {
+                        self.set_status(&format!(
+                            "✓ HY-MT1.5-1.8B ({}) 已启动并就绪 ({url})",
+                            quant.code()
+                        ));
+                    }
+                    Err(err) => {
+                        self.set_status(&format!("⚠️ {err}"));
+                    }
+                }
+            }
         }
     }
 
@@ -2976,6 +3479,7 @@ impl AppController {
                         .input_placeholder
                         .setHidden(!current_src.is_empty());
                     if current_src != self.last_observed_source {
+                        apply_text_view_line_spacing(&self.translate_ui.input_tv, 5.5);
                         self.last_observed_source = current_src;
                         self.pending_debounce_since = Some(Instant::now());
                     }
@@ -2991,7 +3495,9 @@ impl AppController {
                 }
                 TabMode::Chat => {
                     let chat_in = get_text_view_string(&self.chat_ui.input_tv);
-                    self.chat_ui.input_placeholder.setHidden(!chat_in.is_empty());
+                    self.chat_ui
+                        .input_placeholder
+                        .setHidden(!chat_in.is_empty());
                 }
                 TabMode::Settings => {}
             }
@@ -3045,10 +3551,7 @@ impl AppController {
             return;
         };
         let bounds = content_view.bounds();
-        let w = bounds
-            .size
-            .width
-            .clamp(WINDOW_MIN_WIDTH, WINDOW_MAX_WIDTH);
+        let w = bounds.size.width.clamp(WINDOW_MIN_WIDTH, WINDOW_MAX_WIDTH);
         let h = bounds
             .size
             .height
@@ -3075,10 +3578,8 @@ impl AppController {
     }
 
     pub fn relayout_all(&self, w: f64, h: f64) {
-        self.effect_view.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(w, h),
-        ));
+        self.effect_view
+            .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)));
 
         // 顶栏重排（距顶部边缘 10px–13px，距左右边缘 16px–18px）
         self.segmented_bg
@@ -3185,12 +3686,20 @@ impl AppController {
             ),
         );
 
-        self.translate_ui
-            .web_header_label
-            .setFrame(top_rect(body_h, 16.0, results_top + 7.0, 240.0, 15.0));
-        self.translate_ui
-            .web_copy_btn
-            .setFrame(top_rect(body_h, w - 58.0, results_top + 4.0, 46.0, 20.0));
+        self.translate_ui.web_header_label.setFrame(top_rect(
+            body_h,
+            16.0,
+            results_top + 7.0,
+            240.0,
+            15.0,
+        ));
+        self.translate_ui.web_copy_btn.setFrame(top_rect(
+            body_h,
+            w - 58.0,
+            results_top + 4.0,
+            46.0,
+            20.0,
+        ));
         self.translate_ui.web_scroll.setFrame(top_rect(
             body_h,
             2.0,
@@ -3221,12 +3730,20 @@ impl AppController {
             self.translate_ui.ai_copy_btn.setHidden(false);
         }
 
-        self.translate_ui
-            .ai_header_label
-            .setFrame(top_rect(body_h, 16.0, ai_top + 7.0, 280.0, 15.0));
-        self.translate_ui
-            .ai_copy_btn
-            .setFrame(top_rect(body_h, w - 58.0, ai_top + 4.0, 46.0, 20.0));
+        self.translate_ui.ai_header_label.setFrame(top_rect(
+            body_h,
+            16.0,
+            ai_top + 7.0,
+            280.0,
+            15.0,
+        ));
+        self.translate_ui.ai_copy_btn.setFrame(top_rect(
+            body_h,
+            w - 58.0,
+            ai_top + 4.0,
+            46.0,
+            20.0,
+        ));
         self.translate_ui.ai_scroll.setFrame(top_rect(
             body_h,
             2.0,
@@ -3246,7 +3763,11 @@ impl AppController {
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
         self.chat_ui.root.setFrame(body_frame);
         let hist_h = 38.0;
-        let hist_offset = if self.show_chat_history_bar { hist_h } else { 0.0 };
+        let hist_offset = if self.show_chat_history_bar {
+            hist_h
+        } else {
+            0.0
+        };
         self.chat_ui
             .history_bar
             .setFrame(top_rect(body_h, 0.0, 0.0, w, hist_h));
@@ -3256,13 +3777,9 @@ impl AppController {
         self.chat_ui
             .history_label
             .setFrame(top_rect(hist_h, 14.0, 10.0, 56.0, 18.0));
-        self.chat_ui.conv_popup.setFrame(top_rect(
-            hist_h,
-            72.0,
-            6.0,
-            (w - 216.0).max(110.0),
-            25.0,
-        ));
+        self.chat_ui
+            .conv_popup
+            .setFrame(top_rect(hist_h, 72.0, 6.0, (w - 216.0).max(110.0), 25.0));
         self.chat_ui
             .new_conv_btn
             .setFrame(top_rect(hist_h, w - 136.0, 7.0, 64.0, 24.0));
@@ -3311,9 +3828,13 @@ impl AppController {
             w - 88.0,
             (composer_h - 12.0).max(40.0),
         ));
-        self.chat_ui
-            .input_placeholder
-            .setFrame(top_rect(body_h, 20.0, composer_top + 15.0, 240.0, 20.0));
+        self.chat_ui.input_placeholder.setFrame(top_rect(
+            body_h,
+            20.0,
+            composer_top + 15.0,
+            240.0,
+            20.0,
+        ));
         self.chat_ui.send_btn.setFrame(top_rect(
             body_h,
             w - 74.0,
@@ -3332,21 +3853,41 @@ impl AppController {
             .top_divider
             .setFrame(top_rect(body_h, 12.0, 0.0, w - 24.0, 1.0));
         let sidebar_w = 114.0;
-        self.settings_ui
-            .sidebar_divider
-            .setFrame(top_rect(body_h, sidebar_w, 1.0, 1.0, body_h - 1.0));
-        self.settings_ui
-            .nav_translate_btn
-            .setFrame(top_rect(body_h, 10.0, 14.0, sidebar_w - 20.0, 32.0));
-        self.settings_ui
-            .nav_chat_btn
-            .setFrame(top_rect(body_h, 10.0, 50.0, sidebar_w - 20.0, 32.0));
-        self.settings_ui
-            .nav_shortcuts_btn
-            .setFrame(top_rect(body_h, 10.0, 86.0, sidebar_w - 20.0, 32.0));
-        self.settings_ui
-            .nav_general_btn
-            .setFrame(top_rect(body_h, 10.0, 122.0, sidebar_w - 20.0, 32.0));
+        self.settings_ui.sidebar_divider.setFrame(top_rect(
+            body_h,
+            sidebar_w,
+            1.0,
+            1.0,
+            body_h - 1.0,
+        ));
+        self.settings_ui.nav_translate_btn.setFrame(top_rect(
+            body_h,
+            10.0,
+            14.0,
+            sidebar_w - 20.0,
+            32.0,
+        ));
+        self.settings_ui.nav_chat_btn.setFrame(top_rect(
+            body_h,
+            10.0,
+            50.0,
+            sidebar_w - 20.0,
+            32.0,
+        ));
+        self.settings_ui.nav_shortcuts_btn.setFrame(top_rect(
+            body_h,
+            10.0,
+            86.0,
+            sidebar_w - 20.0,
+            32.0,
+        ));
+        self.settings_ui.nav_general_btn.setFrame(top_rect(
+            body_h,
+            10.0,
+            122.0,
+            sidebar_w - 20.0,
+            32.0,
+        ));
 
         let content_x = sidebar_w + 18.0;
         let content_w = (w - content_x - 18.0).max(280.0);
@@ -3368,11 +3909,13 @@ impl AppController {
         let lbl_w = 72.0;
         let field_x = 78.0;
         let field_w = (content_w - field_x).max(160.0);
-        let row_step = 38.0;
+        let row_step = 36.0;
 
         // ── 1. AI 翻译分区（按所选接入方式动态排布，底部留出宽敞多行提示词编辑框） ──
         let ai_backend = self.selected_ai_trans_backend();
+        let ai_is_hymt = ai_backend == AiBackendKind::BuiltInHyMt;
         let ai_is_gguf = ai_backend == AiBackendKind::CandleGguf;
+        let ai_is_http = !ai_is_hymt && !ai_is_gguf;
         let ai_needs_key = matches!(
             ai_backend,
             AiBackendKind::OpenAiCompatible | AiBackendKind::LocalServer
@@ -3393,11 +3936,11 @@ impl AppController {
             22.0,
         ));
 
-        let mut y = 36.0;
+        let mut y = 34.0;
         self.settings_ui
             .t_lbl_backend
             .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
-        if ai_is_gguf {
+        if !ai_is_http {
             self.settings_ui.btn_ai_def_url.setHidden(true);
             self.settings_ui
                 .ai_backend_popup
@@ -3411,16 +3954,97 @@ impl AppController {
                 (field_w - 74.0).max(120.0),
                 26.0,
             ));
-            self.settings_ui
-                .btn_ai_def_url
-                .setFrame(top_rect(sec_h, content_w - 68.0, y, 68.0, 25.0));
+            self.settings_ui.btn_ai_def_url.setFrame(top_rect(
+                sec_h,
+                content_w - 68.0,
+                y,
+                68.0,
+                25.0,
+            ));
         }
         y += row_step;
 
+        // 内置混元 HY-MT1.5 模式：与其它模式完全统一的左右两栏对齐（左 72px 标签 + 右 field_x..content_w 控件区）
+        self.settings_ui.t_lbl_hymt_quant.setHidden(!ai_is_hymt);
+        self.settings_ui.ai_hymt_quant_popup.setHidden(!ai_is_hymt);
+        self.settings_ui.t_lbl_hymt_action.setHidden(!ai_is_hymt);
+        self.settings_ui.btn_hymt_check.setHidden(!ai_is_hymt);
+        self.settings_ui
+            .btn_hymt_download_run
+            .setHidden(!ai_is_hymt);
+        self.settings_ui.btn_hymt_stop.setHidden(!ai_is_hymt);
+        self.settings_ui.btn_hymt_delete.setHidden(!ai_is_hymt);
+        self.settings_ui.t_lbl_hymt_status.setHidden(!ai_is_hymt);
+        self.settings_ui.hymt_info_surface.setHidden(!ai_is_hymt);
+        self.settings_ui.hymt_info_label.setHidden(!ai_is_hymt);
+
+        if ai_is_hymt {
+            self.settings_ui
+                .t_lbl_hymt_quant
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            self.settings_ui
+                .ai_hymt_quant_popup
+                .setFrame(top_rect(sec_h, field_x, y, field_w, 26.0));
+            y += row_step;
+
+            self.settings_ui
+                .t_lbl_hymt_action
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            let gap = 6.0;
+            let w_check = 66.0;
+            let w_stop = 44.0;
+            let w_del = 44.0;
+            let w_run = (field_w - w_check - w_stop - w_del - gap * 3.0).max(74.0);
+            self.settings_ui
+                .btn_hymt_check
+                .setFrame(top_rect(sec_h, field_x, y, w_check, 25.0));
+            self.settings_ui.btn_hymt_download_run.setFrame(top_rect(
+                sec_h,
+                field_x + w_check + gap,
+                y,
+                w_run,
+                25.0,
+            ));
+            self.settings_ui.btn_hymt_stop.setFrame(top_rect(
+                sec_h,
+                content_w - w_del - gap - w_stop,
+                y,
+                w_stop,
+                25.0,
+            ));
+            self.settings_ui.btn_hymt_delete.setFrame(top_rect(
+                sec_h,
+                content_w - w_del,
+                y,
+                w_del,
+                25.0,
+            ));
+            y += row_step;
+
+            self.settings_ui
+                .t_lbl_hymt_status
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            let card_h = 42.0;
+            self.settings_ui
+                .hymt_info_surface
+                .setFrame(top_rect(sec_h, field_x, y, field_w, card_h));
+            set_wrapping_label_frame(
+                &self.settings_ui.hymt_info_label,
+                top_rect(
+                    sec_h,
+                    field_x + 8.0,
+                    y + 5.0,
+                    (field_w - 16.0).max(120.0),
+                    card_h - 8.0,
+                ),
+            );
+            y += card_h + 10.0;
+        }
+
         // HTTP 模式：显示接口地址 + 模型名称；云端 API 或本地 MLX/LM Studio 显示 API 密钥（可选）
-        self.settings_ui.t_lbl_url.setHidden(ai_is_gguf);
-        self.settings_ui.ai_base_url_field.setHidden(ai_is_gguf);
-        if !ai_is_gguf {
+        self.settings_ui.t_lbl_url.setHidden(!ai_is_http);
+        self.settings_ui.ai_base_url_field.setHidden(!ai_is_http);
+        if ai_is_http {
             self.settings_ui
                 .t_lbl_url
                 .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
@@ -3454,17 +4078,21 @@ impl AppController {
                 50.0,
                 18.0,
             ));
-            self.settings_ui
-                .btn_ai_clr_key
-                .setFrame(top_rect(sec_h, content_w - 58.0, y, 58.0, 25.0));
+            self.settings_ui.btn_ai_clr_key.setFrame(top_rect(
+                sec_h,
+                content_w - 58.0,
+                y,
+                58.0,
+                25.0,
+            ));
             y += row_step;
         }
 
-        self.settings_ui.t_lbl_model.setHidden(ai_is_gguf);
-        self.settings_ui.ai_model_field.setHidden(ai_is_gguf);
-        self.settings_ui.btn_ai_discover.setHidden(ai_is_gguf);
-        self.settings_ui.ai_discovered_popup.setHidden(ai_is_gguf);
-        if !ai_is_gguf {
+        self.settings_ui.t_lbl_model.setHidden(!ai_is_http);
+        self.settings_ui.ai_model_field.setHidden(!ai_is_http);
+        self.settings_ui.btn_ai_discover.setHidden(!ai_is_http);
+        self.settings_ui.ai_discovered_popup.setHidden(!ai_is_http);
+        if ai_is_http {
             self.settings_ui
                 .t_lbl_model
                 .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
@@ -3475,12 +4103,20 @@ impl AppController {
                 (field_w - 148.0).max(100.0),
                 25.0,
             ));
-            self.settings_ui
-                .btn_ai_discover
-                .setFrame(top_rect(sec_h, content_w - 142.0, y, 68.0, 25.0));
-            self.settings_ui
-                .ai_discovered_popup
-                .setFrame(top_rect(sec_h, content_w - 70.0, y, 70.0, 25.0));
+            self.settings_ui.btn_ai_discover.setFrame(top_rect(
+                sec_h,
+                content_w - 142.0,
+                y,
+                68.0,
+                25.0,
+            ));
+            self.settings_ui.ai_discovered_popup.setFrame(top_rect(
+                sec_h,
+                content_w - 70.0,
+                y,
+                70.0,
+                25.0,
+            ));
             y += row_step;
         }
 
@@ -3524,25 +4160,27 @@ impl AppController {
         }
 
         // 多行翻译提示词大编辑框（上方标题 + 下方全宽多行滚动框）
-        y += 4.0;
+        y += 2.0;
         self.settings_ui
             .t_lbl_prompt
             .setFrame(top_rect(sec_h, 0.0, y, content_w, 18.0));
-        y += 22.0;
-        let ai_prompt_h = (sec_h - y - 42.0).clamp(84.0, 220.0);
+        y += 20.0;
+        let ai_prompt_h = (sec_h - y - 40.0).clamp(64.0, 220.0);
         set_multiline_input_frame(
             &self.settings_ui.ai_prompt_input,
             top_rect(sec_h, 0.0, y, content_w, ai_prompt_h),
         );
         set_multiline_input_hidden(&self.settings_ui.ai_prompt_input, false);
-        y += ai_prompt_h + 10.0;
+        y += ai_prompt_h + 8.0;
         self.settings_ui
             .save_ai_btn
             .setFrame(top_rect(sec_h, 0.0, y, 104.0, 30.0));
 
         // ── 2. AI 对话分区（按所选接入方式动态排布，底部留出宽敞多行系统提示词编辑框） ──
         let chat_backend = self.selected_chat_backend();
+        let chat_is_hymt = chat_backend == AiBackendKind::BuiltInHyMt;
         let chat_is_gguf = chat_backend == AiBackendKind::CandleGguf;
+        let chat_is_http = !chat_is_hymt && !chat_is_gguf;
         let chat_needs_key = matches!(
             chat_backend,
             AiBackendKind::OpenAiCompatible | AiBackendKind::LocalServer
@@ -3555,15 +4193,19 @@ impl AppController {
             (content_w - 146.0).max(150.0),
             20.0,
         ));
-        self.settings_ui
-            .btn_sync_from_trans
-            .setFrame(top_rect(sec_h, content_w - 138.0, 2.0, 138.0, 25.0));
+        self.settings_ui.btn_sync_from_trans.setFrame(top_rect(
+            sec_h,
+            content_w - 138.0,
+            2.0,
+            138.0,
+            25.0,
+        ));
 
-        let mut cy = 36.0;
+        let mut cy = 34.0;
         self.settings_ui
             .c_lbl_backend
             .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
-        if chat_is_gguf {
+        if !chat_is_http {
             self.settings_ui.btn_chat_def_url.setHidden(true);
             self.settings_ui
                 .chat_backend_popup
@@ -3577,15 +4219,47 @@ impl AppController {
                 (field_w - 74.0).max(120.0),
                 26.0,
             ));
-            self.settings_ui
-                .btn_chat_def_url
-                .setFrame(top_rect(sec_h, content_w - 68.0, cy, 68.0, 25.0));
+            self.settings_ui.btn_chat_def_url.setFrame(top_rect(
+                sec_h,
+                content_w - 68.0,
+                cy,
+                68.0,
+                25.0,
+            ));
         }
         cy += row_step;
 
-        self.settings_ui.c_lbl_url.setHidden(chat_is_gguf);
-        self.settings_ui.chat_base_url_field.setHidden(chat_is_gguf);
-        if !chat_is_gguf {
+        self.settings_ui.c_lbl_hymt_quant.setHidden(!chat_is_hymt);
+        self.settings_ui
+            .chat_hymt_quant_popup
+            .setHidden(!chat_is_hymt);
+        self.settings_ui.btn_chat_hymt_run.setHidden(!chat_is_hymt);
+        if chat_is_hymt {
+            self.settings_ui
+                .c_lbl_hymt_quant
+                .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
+            self.settings_ui.chat_hymt_quant_popup.setFrame(top_rect(
+                sec_h,
+                field_x,
+                cy,
+                (field_w - 118.0).max(120.0),
+                26.0,
+            ));
+            self.settings_ui.btn_chat_hymt_run.setFrame(top_rect(
+                sec_h,
+                content_w - 112.0,
+                cy,
+                112.0,
+                26.0,
+            ));
+            cy += row_step;
+        }
+
+        self.settings_ui.c_lbl_url.setHidden(!chat_is_http);
+        self.settings_ui
+            .chat_base_url_field
+            .setHidden(!chat_is_http);
+        if chat_is_http {
             self.settings_ui
                 .c_lbl_url
                 .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
@@ -3619,19 +4293,23 @@ impl AppController {
                 50.0,
                 18.0,
             ));
-            self.settings_ui
-                .btn_chat_clr_key
-                .setFrame(top_rect(sec_h, content_w - 58.0, cy, 58.0, 25.0));
+            self.settings_ui.btn_chat_clr_key.setFrame(top_rect(
+                sec_h,
+                content_w - 58.0,
+                cy,
+                58.0,
+                25.0,
+            ));
             cy += row_step;
         }
 
-        self.settings_ui.c_lbl_model.setHidden(chat_is_gguf);
-        self.settings_ui.chat_model_field.setHidden(chat_is_gguf);
-        self.settings_ui.btn_chat_discover.setHidden(chat_is_gguf);
+        self.settings_ui.c_lbl_model.setHidden(!chat_is_http);
+        self.settings_ui.chat_model_field.setHidden(!chat_is_http);
+        self.settings_ui.btn_chat_discover.setHidden(!chat_is_http);
         self.settings_ui
             .chat_discovered_popup
-            .setHidden(chat_is_gguf);
-        if !chat_is_gguf {
+            .setHidden(!chat_is_http);
+        if chat_is_http {
             self.settings_ui
                 .c_lbl_model
                 .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
@@ -3642,12 +4320,20 @@ impl AppController {
                 (field_w - 148.0).max(100.0),
                 25.0,
             ));
-            self.settings_ui
-                .btn_chat_discover
-                .setFrame(top_rect(sec_h, content_w - 142.0, cy, 68.0, 25.0));
-            self.settings_ui
-                .chat_discovered_popup
-                .setFrame(top_rect(sec_h, content_w - 70.0, cy, 70.0, 25.0));
+            self.settings_ui.btn_chat_discover.setFrame(top_rect(
+                sec_h,
+                content_w - 142.0,
+                cy,
+                68.0,
+                25.0,
+            ));
+            self.settings_ui.chat_discovered_popup.setFrame(top_rect(
+                sec_h,
+                content_w - 70.0,
+                cy,
+                70.0,
+                25.0,
+            ));
             cy += row_step;
         }
 
@@ -3665,9 +4351,13 @@ impl AppController {
                 (field_w - 68.0).max(120.0),
                 25.0,
             ));
-            self.settings_ui
-                .btn_chat_gguf
-                .setFrame(top_rect(sec_h, content_w - 62.0, cy, 62.0, 25.0));
+            self.settings_ui.btn_chat_gguf.setFrame(top_rect(
+                sec_h,
+                content_w - 62.0,
+                cy,
+                62.0,
+                25.0,
+            ));
             cy += row_step;
         }
 
@@ -3676,7 +4366,7 @@ impl AppController {
             .c_lbl_prompt
             .setFrame(top_rect(sec_h, 0.0, cy, content_w, 18.0));
         cy += 22.0;
-        let chat_prompt_h = (sec_h - cy - 42.0).clamp(88.0, 220.0);
+        let chat_prompt_h = (sec_h - cy - 42.0).clamp(80.0, 220.0);
         set_multiline_input_frame(
             &self.settings_ui.chat_prompt_input,
             top_rect(sec_h, 0.0, cy, content_w, chat_prompt_h),
@@ -3703,7 +4393,10 @@ impl AppController {
             .setFrame(top_rect(sec_h, content_w - 96.0, 2.0, 96.0, 25.0));
 
         let sc_rows = [
-            (&self.settings_ui.sc_lbl_toggle, &self.settings_ui.sc_toggle_field),
+            (
+                &self.settings_ui.sc_lbl_toggle,
+                &self.settings_ui.sc_toggle_field,
+            ),
             (&self.settings_ui.sc_lbl_ocr, &self.settings_ui.sc_ocr_field),
             (&self.settings_ui.sc_lbl_ai, &self.settings_ui.sc_ai_field),
             (
@@ -3738,9 +4431,13 @@ impl AppController {
         self.settings_ui
             .gen_lbl_opacity
             .setFrame(top_rect(sec_h, 0.0, 40.0, 120.0, 18.0));
-        self.settings_ui
-            .opacity_val_label
-            .setFrame(top_rect(sec_h, content_w - 60.0, 40.0, 60.0, 18.0));
+        self.settings_ui.opacity_val_label.setFrame(top_rect(
+            sec_h,
+            content_w - 60.0,
+            40.0,
+            60.0,
+            18.0,
+        ));
         self.settings_ui
             .opacity_slider
             .setFrame(top_rect(sec_h, 0.0, 64.0, content_w, 24.0));
@@ -3748,11 +4445,14 @@ impl AppController {
             .autostart_chk
             .setFrame(top_rect(sec_h, 0.0, 104.0, 220.0, 24.0));
         self.settings_ui
+            .ocr_strip_newlines_chk
+            .setFrame(top_rect(sec_h, 0.0, 134.0, 260.0, 24.0));
+        self.settings_ui
             .ver_label
-            .setFrame(top_rect(sec_h, 0.0, 144.0, content_w, 20.0));
+            .setFrame(top_rect(sec_h, 0.0, 174.0, content_w, 20.0));
         set_wrapping_label_frame(
             &self.settings_ui.gen_hint,
-            top_rect(sec_h, 0.0, 178.0, content_w, (sec_h - 178.0).max(80.0)),
+            top_rect(sec_h, 0.0, 206.0, content_w, (sec_h - 206.0).max(80.0)),
         );
     }
 }
@@ -3804,10 +4504,18 @@ mod tests {
             ActionTag::ResetDefaultShortcuts,
             ActionTag::OpacitySliderChanged,
             ActionTag::AutostartToggled,
+            ActionTag::OcrStripNewlinesToggled,
             ActionTag::SettingsSecTranslate,
             ActionTag::SettingsSecChat,
             ActionTag::SettingsSecShortcuts,
             ActionTag::SettingsSecGeneral,
+            ActionTag::HyMtQuantChanged,
+            ActionTag::HyMtCheckCompatibility,
+            ActionTag::HyMtDownloadAndRun,
+            ActionTag::HyMtStopServer,
+            ActionTag::HyMtDeleteModel,
+            ActionTag::ChatHyMtQuantChanged,
+            ActionTag::ChatHyMtDownloadAndRun,
         ];
         for tag in tags {
             assert_eq!(ActionTag::from_raw(tag as isize), Some(tag));

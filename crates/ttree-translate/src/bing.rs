@@ -135,8 +135,7 @@ async fn translate_with_token(
         return Err(format!("必应翻译返回状态 {status}: {body}"));
     }
 
-    let body =
-        read_limited_response(resp, MAX_TRANSLATION_RESPONSE_BYTES, "必应翻译响应").await?;
+    let body = read_limited_response(resp, MAX_TRANSLATION_RESPONSE_BYTES, "必应翻译响应").await?;
     let body: Value =
         serde_json::from_slice(&body).map_err(|e| format!("必应翻译响应解析失败: {e}"))?;
 
@@ -224,6 +223,9 @@ mod tests {
         let now = Instant::now();
         store_cached_token(tok.clone(), now);
         assert_eq!(get_cached_token(now + Duration::from_secs(60)), Some(tok));
-        assert_eq!(get_cached_token(now + TOKEN_TTL + Duration::from_secs(1)), None);
+        assert_eq!(
+            get_cached_token(now + TOKEN_TTL + Duration::from_secs(1)),
+            None
+        );
     }
 }

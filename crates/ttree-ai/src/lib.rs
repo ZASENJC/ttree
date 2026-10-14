@@ -11,12 +11,13 @@
 
 pub mod gguf;
 pub mod http_provider;
+pub mod hy_mt_manager;
 pub mod sse;
 
 use ttree_core::language::language_display_name;
 use ttree_core::{
-    AiBackendKind, AiTranslationConfig, CancelToken, ChatAiConfig, ChatMessage,
-    validate_language_pair, validate_messages,
+    validate_language_pair, validate_messages, AiBackendKind, AiTranslationConfig, CancelToken,
+    ChatAiConfig, ChatMessage, HyMtQuant,
 };
 
 pub use http_provider::discover_local_models;
@@ -46,7 +47,7 @@ fn hy_mt_target_english_name(target: &str) -> &'static str {
 }
 
 /// 组装翻译消息：
-/// - 若模型为腾讯混元专用翻译模型 `HY-MT`（或端口 18082）且使用默认提示词，自动采用 HY-MT 官方单轮 User 指令模板；
+/// - 若模型为腾讯混元专用翻译模型 `HY-MT`（内置后端或端口 18082）且使用默认提示词，自动采用 HY-MT 官方单轮 User 指令模板；
 /// - 若自定义提示词包含 `{text}` 占位符，渲染为单条 User 消息；
 /// - 其余通用大模型：System 放指令，User 仅放待译原文（省去 50% 冗余 Prompt Token）。
 pub fn build_translate_messages(
@@ -63,7 +64,8 @@ pub fn build_translate_messages(
         return vec![ChatMessage::user(rendered)];
     }
 
-    let is_hy_mt = cfg.model.to_ascii_lowercase().contains("hy-mt")
+    let is_hy_mt = cfg.backend == AiBackendKind::BuiltInHyMt
+        || cfg.model.to_ascii_lowercase().contains("hy-mt")
         || cfg.gguf_model_path.to_ascii_lowercase().contains("hy-mt")
         || cfg.base_url.contains(":18082");
 
@@ -127,6 +129,7 @@ where
 
     dispatch_stream(
         cfg.backend,
+        cfg.hy_mt_quant,
         &cfg.base_url,
         &cfg.api_key,
         &cfg.model,
@@ -157,6 +160,7 @@ where
 
     dispatch_stream(
         cfg.backend,
+        cfg.hy_mt_quant,
         &cfg.base_url,
         &cfg.api_key,
         &cfg.model,
@@ -172,6 +176,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_stream<F>(
     backend: AiBackendKind,
+    hy_mt_quant: HyMtQuant,
     base_url: &str,
     api_key: &str,
     model: &str,
@@ -185,9 +190,24 @@ where
     F: FnMut(&str) + Send,
 {
     match backend {
+        AiBackendKind::BuiltInHyMt => {
+            let local_base_url = hy_mt_manager::ensure_server_running(hy_mt_quant, cancel).await?;
+            http_provider::stream_openai_compatible(
+                &local_base_url,
+                None,
+                "hy-mt1.5-1.8b",
+                messages,
+                cancel,
+                on_delta,
+            )
+            .await
+        }
         AiBackendKind::OpenAiCompatible => {
             if api_key.trim().is_empty() {
-                return Err("未配置云端 API Key（可在设置中填入，或切换为本地 Ollama / LM Studio / GGUF 模型）".to_string());
+                return Err(
+                    "未配置云端 API Key（可在设置中填入，或切换为内置 HY-MT1.5 / 本地模型）"
+                        .to_string(),
+                );
             }
             http_provider::stream_openai_compatible(
                 base_url,
@@ -205,12 +225,7 @@ where
         AiBackendKind::LocalServer => {
             let opt_key = (!api_key.trim().is_empty()).then_some(api_key.trim());
             http_provider::stream_openai_compatible(
-                base_url,
-                opt_key,
-                model,
-                messages,
-                cancel,
-                on_delta,
+                base_url, opt_key, model, messages, cancel, on_delta,
             )
             .await
         }
@@ -260,11 +275,9 @@ mod tests {
         let to_en = build_translate_messages(&cfg, "你好世界", "zh-CN", "en");
         assert_eq!(to_en.len(), 1);
         assert_eq!(to_en[0].role, "user");
-        assert!(
-            to_en[0]
-                .content
-                .starts_with("Translate the following segment into English")
-        );
+        assert!(to_en[0]
+            .content
+            .starts_with("Translate the following segment into English"));
         assert!(to_en[0].content.ends_with("你好世界"));
     }
 }

@@ -135,7 +135,9 @@ fn parse_optional_shortcut(label: &str, spec: &str) -> Result<Option<HotKey>, an
         .mods
         .intersects(Modifiers::SUPER | Modifiers::CONTROL | Modifiers::ALT)
     {
-        return Err(anyhow!("{label}必须包含 Cmd/Ctrl/Option 中的至少一个修饰键"));
+        return Err(anyhow!(
+            "{label}必须包含 Cmd/Ctrl/Option 中的至少一个修饰键"
+        ));
     }
     Ok(Some(hotkey))
 }

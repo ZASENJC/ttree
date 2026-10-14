@@ -13,8 +13,8 @@ pub mod image;
 #[cfg(target_os = "macos")]
 pub mod vision;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static OCR_BUSY: AtomicBool = AtomicBool::new(false);
 

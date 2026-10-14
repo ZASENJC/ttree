@@ -60,7 +60,9 @@ pub async fn discover_local_models(
                 .and_then(Value::as_array)
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|item| item.get("name").and_then(Value::as_str).map(String::from))
+                        .filter_map(|item| {
+                            item.get("name").and_then(Value::as_str).map(String::from)
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -99,7 +101,7 @@ pub async fn discover_local_models(
                 .unwrap_or_default();
             Ok(models)
         }
-        AiBackendKind::CandleGguf => Ok(Vec::new()),
+        AiBackendKind::CandleGguf | AiBackendKind::BuiltInHyMt => Ok(Vec::new()),
     }
 }
 
@@ -122,7 +124,9 @@ where
         format!("{base}/chat/completions")
     };
 
-    let is_hy_mt = model.to_ascii_lowercase().contains("hy-mt") || base.contains(":18082");
+    let is_hy_mt = model.to_ascii_lowercase().contains("hy-mt")
+        || base.contains(":18082")
+        || base.contains(":28190");
     let payload = if is_hy_mt {
         json!({
             "model": model,
@@ -130,6 +134,7 @@ where
             "temperature": 0.7,
             "top_p": 0.6,
             "top_k": 20,
+            "repeat_penalty": 1.05,
             "repetition_penalty": 1.05,
             "messages": messages,
         })
@@ -203,7 +208,10 @@ where
     let base = if base_url.trim().is_empty() {
         "http://127.0.0.1:11434"
     } else {
-        base_url.trim().trim_end_matches('/').trim_end_matches("/v1")
+        base_url
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
     };
     let url = format!("{base}/api/chat");
 

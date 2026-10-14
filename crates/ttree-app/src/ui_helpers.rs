@@ -147,7 +147,8 @@ pub fn make_split_bar(mtm: MainThreadMarker, frame: NSRect, splitter_id: u8) -> 
         splitter_id: Cell::new(splitter_id),
         last_screen_y: Cell::new(0.0),
     });
-    let handle: Retained<SplitHandleView> = unsafe { msg_send![super(handle), initWithFrame: frame] };
+    let handle: Retained<SplitHandleView> =
+        unsafe { msg_send![super(handle), initWithFrame: frame] };
 
     let line = make_divider(
         mtm,
@@ -348,12 +349,7 @@ pub fn make_symbol_button(
 }
 
 /// 更新图标按钮的 SF Symbol 与淡雅激活态颜色（不使用刺眼蓝色）。
-pub fn set_button_symbol(
-    btn: &NSButton,
-    symbol_name: &str,
-    fallback_title: &str,
-    active: bool,
-) {
+pub fn set_button_symbol(btn: &NSButton, symbol_name: &str, fallback_title: &str, active: bool) {
     unsafe {
         let ns_sym = NSString::from_str(symbol_name);
         let img: Option<Retained<NSImage>> = msg_send![
@@ -409,7 +405,7 @@ pub fn make_checkbox(
             NSControlStateValueOn
         } else {
             NSControlStateValueOff
-        } );
+        });
         btn.setTag(tag);
         btn.setTarget(Some(target));
         btn.setAction(Some(action));
@@ -520,7 +516,39 @@ pub fn make_slider(
     }
 }
 
-/// 创建无边框、通透扁平的多行 `NSTextView`（采用淡雅文字与柔和光标色）。
+/// 为 `NSTextView` 应用舒适的段落行间距（同时更新 `defaultParagraphStyle`、`typingAttributes` 与现有 `textStorage`）。
+pub fn apply_text_view_line_spacing(tv: &NSTextView, line_spacing: f64) {
+    unsafe {
+        let style: Retained<AnyObject> = msg_send![objc2::class!(NSMutableParagraphStyle), new];
+        let _: () = msg_send![&*style, setLineSpacing: line_spacing as CGFloat];
+        let _: () = msg_send![&*style, setParagraphSpacing: 3.0 as CGFloat];
+        let _: () = msg_send![tv, setDefaultParagraphStyle: Some(&*style)];
+
+        let attr_key = NSString::from_str("NSParagraphStyle");
+        let typing_dict: Option<Retained<AnyObject>> = msg_send![tv, typingAttributes];
+        if let Some(dict) = typing_dict {
+            let mutable_dict: Retained<AnyObject> = msg_send![&*dict, mutableCopy];
+            let _: () = msg_send![&*mutable_dict, setObject: &*style, forKey: &*attr_key];
+            let _: () = msg_send![tv, setTypingAttributes: &*mutable_dict];
+        }
+
+        let len = tv.string().length();
+        if len > 0 {
+            let storage: Option<Retained<AnyObject>> = msg_send![tv, textStorage];
+            if let Some(st) = storage {
+                let range = NSRange::new(0, len);
+                let _: () = msg_send![
+                    &*st,
+                    addAttribute: &*attr_key,
+                    value: &*style,
+                    range: range
+                ];
+            }
+        }
+    }
+}
+
+/// 创建无边框、通透扁平的多行 `NSTextView`（采用淡雅文字、柔和光标色与舒适行间距）。
 pub fn make_scrollable_text_view(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -558,6 +586,7 @@ pub fn make_scrollable_text_view(
             let _: () = msg_send![&*text_view, setAutomaticDashSubstitutionEnabled: false];
             let _: () = msg_send![&*text_view, setAutomaticSpellingCorrectionEnabled: false];
         }
+        apply_text_view_line_spacing(&text_view, 5.5);
         if let Some(del) = delegate {
             let _: () = msg_send![&*text_view, setDelegate: Some(del)];
         }
@@ -582,6 +611,7 @@ pub fn set_text_view_styled(tv: &NSTextView, text: &str, is_muted: bool) {
         pale_ink(0.78)
     };
     tv.setTextColor(Some(&color));
+    apply_text_view_line_spacing(tv, 5.5);
 }
 
 /// 设置 `NSTextView` 的纯文本内容（默认柔和正文色）。
@@ -596,6 +626,7 @@ pub fn append_text_view_string(tv: &NSTextView, delta: &str, scroll_to_end: bool
     let s = NSString::from_str(&current);
     tv.setString(&s);
     tv.setTextColor(Some(&pale_ink(0.78)));
+    apply_text_view_line_spacing(tv, 5.5);
     if scroll_to_end {
         let len = s.length();
         tv.scrollRangeToVisible(NSRange::new(len, 0));
@@ -726,10 +757,7 @@ pub fn make_wrapping_message_label(
             let _: () = msg_send![&*cell, setScrollable: Bool::NO];
             // NSLineBreakByWordWrapping = 0
             let _: () = msg_send![&*cell, setLineBreakMode: 0usize];
-            let bounds = NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(safe_max_w, 20_000.0),
-            );
+            let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(safe_max_w, 20_000.0));
             let sz: NSSize = msg_send![&*cell, cellSizeForBounds: bounds];
             NSSize::new(
                 (sz.width.ceil() + 2.0).clamp(18.0, safe_max_w),
@@ -800,4 +828,3 @@ pub fn set_multiline_input_hidden(widget: &MultilineInputWidget, hidden: bool) {
     widget.surface.setHidden(hidden);
     widget.scroll.setHidden(hidden);
 }
-

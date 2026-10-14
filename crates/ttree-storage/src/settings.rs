@@ -15,7 +15,7 @@ use ttree_core::config::{
 };
 use ttree_core::{
     normalize_base_url, AiBackendKind, AiTranslationConfig, AppearanceConfig, ChatAiConfig,
-    PaneLayoutConfig, ShortcutConfig, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    HyMtQuant, PaneLayoutConfig, ShortcutConfig, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 
 pub const APP_BUNDLE_ID: &str = "com.samwstu.ttree";
@@ -101,7 +101,10 @@ impl SettingsStore {
     }
 
     pub fn appearance(&self) -> AppearanceConfig {
-        self.cache.read().expect("settings lock poisoned").appearance
+        self.cache
+            .read()
+            .expect("settings lock poisoned")
+            .appearance
     }
 
     pub fn pane_layout(&self) -> PaneLayoutConfig {
@@ -112,7 +115,10 @@ impl SettingsStore {
     }
 
     pub fn window_size(&self) -> (f64, f64) {
-        self.cache.read().expect("settings lock poisoned").window_size
+        self.cache
+            .read()
+            .expect("settings lock poisoned")
+            .window_size
     }
 
     pub fn save_ai_translation(&self, input: &AiTranslationConfig) -> Result<(), String> {
@@ -121,20 +127,27 @@ impl SettingsStore {
         validate_field_len("Tokenizer 路径", &input.gguf_tokenizer_path, MAX_PATH_BYTES)?;
         validate_field_len("翻译提示词", &input.translate_prompt, MAX_PROMPT_BYTES)?;
 
-        let base_url =
-            if input.backend == AiBackendKind::CandleGguf && input.base_url.trim().is_empty() {
-                String::new()
-            } else {
-                normalize_base_url(&input.base_url)?
-            };
+        let base_url = if matches!(
+            input.backend,
+            AiBackendKind::CandleGguf | AiBackendKind::BuiltInHyMt
+        ) && input.base_url.trim().is_empty()
+        {
+            String::new()
+        } else {
+            normalize_base_url(&input.base_url)?
+        };
 
         let mut guard = self.cache.write().expect("settings lock poisoned");
-        let resolved_key =
-            resolve_api_key(&guard.ai_translate.api_key, &input.api_key, input.clear_api_key)?;
+        let resolved_key = resolve_api_key(
+            &guard.ai_translate.api_key,
+            &input.api_key,
+            input.clear_api_key,
+        )?;
 
         let updated = AiTranslationConfig {
             enabled: input.enabled,
             backend: input.backend,
+            hy_mt_quant: input.hy_mt_quant,
             base_url: base_url.clone(),
             has_api_key: !resolved_key.is_empty(),
             api_key: resolved_key.clone(),
@@ -154,13 +167,16 @@ impl SettingsStore {
                 .unwrap_or(Value::String("open_ai_compatible".into())),
         );
         guard.raw_map.insert(
+            "openai.hy_mt_quant".into(),
+            serde_json::to_value(updated.hy_mt_quant).unwrap_or(Value::String("q8_0".into())),
+        );
+        guard.raw_map.insert(
             "openai.base_url".into(),
             Value::String(updated.base_url.clone()),
         );
-        guard.raw_map.insert(
-            "openai.api_key".into(),
-            Value::String(resolved_key),
-        );
+        guard
+            .raw_map
+            .insert("openai.api_key".into(), Value::String(resolved_key));
         guard
             .raw_map
             .insert("openai.model".into(), Value::String(updated.model.clone()));
@@ -188,12 +204,15 @@ impl SettingsStore {
         validate_field_len("Tokenizer 路径", &input.gguf_tokenizer_path, MAX_PATH_BYTES)?;
         validate_field_len("AI 对话提示词", &input.chat_prompt, MAX_PROMPT_BYTES)?;
 
-        let base_url =
-            if input.backend == AiBackendKind::CandleGguf && input.base_url.trim().is_empty() {
-                String::new()
-            } else {
-                normalize_base_url(&input.base_url)?
-            };
+        let base_url = if matches!(
+            input.backend,
+            AiBackendKind::CandleGguf | AiBackendKind::BuiltInHyMt
+        ) && input.base_url.trim().is_empty()
+        {
+            String::new()
+        } else {
+            normalize_base_url(&input.base_url)?
+        };
 
         let mut guard = self.cache.write().expect("settings lock poisoned");
         let resolved_key =
@@ -201,6 +220,7 @@ impl SettingsStore {
 
         let updated = ChatAiConfig {
             backend: input.backend,
+            hy_mt_quant: input.hy_mt_quant,
             base_url: base_url.clone(),
             has_api_key: !resolved_key.is_empty(),
             api_key: resolved_key.clone(),
@@ -217,17 +237,19 @@ impl SettingsStore {
                 .unwrap_or(Value::String("open_ai_compatible".into())),
         );
         guard.raw_map.insert(
+            "chat_ai.hy_mt_quant".into(),
+            serde_json::to_value(updated.hy_mt_quant).unwrap_or(Value::String("q8_0".into())),
+        );
+        guard.raw_map.insert(
             "chat_ai.base_url".into(),
             Value::String(updated.base_url.clone()),
         );
-        guard.raw_map.insert(
-            "chat_ai.api_key".into(),
-            Value::String(resolved_key),
-        );
-        guard.raw_map.insert(
-            "chat_ai.model".into(),
-            Value::String(updated.model.clone()),
-        );
+        guard
+            .raw_map
+            .insert("chat_ai.api_key".into(), Value::String(resolved_key));
+        guard
+            .raw_map
+            .insert("chat_ai.model".into(), Value::String(updated.model.clone()));
         guard.raw_map.insert(
             "chat_ai.gguf_model_path".into(),
             Value::String(updated.gguf_model_path.clone()),
@@ -274,11 +296,16 @@ impl SettingsStore {
     pub fn save_appearance(&self, cfg: AppearanceConfig) -> Result<(), String> {
         let clamped = AppearanceConfig {
             panel_opacity: AppearanceConfig::clamp_opacity(cfg.panel_opacity),
+            ocr_strip_newlines: cfg.ocr_strip_newlines,
         };
         let mut guard = self.cache.write().expect("settings lock poisoned");
         guard.raw_map.insert(
             "appearance.panel_opacity".into(),
             Value::from(clamped.panel_opacity),
+        );
+        guard.raw_map.insert(
+            "appearance.ocr_strip_newlines".into(),
+            Value::from(clamped.ocr_strip_newlines),
         );
         write_json_map(&self.path, &guard.raw_map)?;
         guard.appearance = clamped;
@@ -389,9 +416,21 @@ fn load_ai_translation(map: &Map<String, Value>) -> AiTranslationConfig {
     {
         cfg.backend = backend;
     }
+    if let Some(quant) = map
+        .get("openai.hy_mt_quant")
+        .and_then(|v| serde_json::from_value::<HyMtQuant>(v.clone()).ok())
+    {
+        cfg.hy_mt_quant = quant;
+    }
     if let Some(url) = map.get("openai.base_url").and_then(Value::as_str) {
         if let Ok(norm) = normalize_base_url(url) {
             cfg.base_url = norm;
+        } else if matches!(
+            cfg.backend,
+            AiBackendKind::CandleGguf | AiBackendKind::BuiltInHyMt
+        ) && url.trim().is_empty()
+        {
+            cfg.base_url = String::new();
         }
     }
     if let Some(key) = map.get("openai.api_key").and_then(Value::as_str) {
@@ -406,7 +445,10 @@ fn load_ai_translation(map: &Map<String, Value>) -> AiTranslationConfig {
     if let Some(p) = map.get("openai.gguf_model_path").and_then(Value::as_str) {
         cfg.gguf_model_path = p.trim().to_string();
     }
-    if let Some(p) = map.get("openai.gguf_tokenizer_path").and_then(Value::as_str) {
+    if let Some(p) = map
+        .get("openai.gguf_tokenizer_path")
+        .and_then(Value::as_str)
+    {
         cfg.gguf_tokenizer_path = p.trim().to_string();
     }
     if let Some(prompt) = map.get("openai.translate_prompt").and_then(Value::as_str) {
@@ -425,9 +467,21 @@ fn load_chat_ai(map: &Map<String, Value>) -> ChatAiConfig {
     {
         cfg.backend = backend;
     }
+    if let Some(quant) = map
+        .get("chat_ai.hy_mt_quant")
+        .and_then(|v| serde_json::from_value::<HyMtQuant>(v.clone()).ok())
+    {
+        cfg.hy_mt_quant = quant;
+    }
     if let Some(url) = map.get("chat_ai.base_url").and_then(Value::as_str) {
         if let Ok(norm) = normalize_base_url(url) {
             cfg.base_url = norm;
+        } else if matches!(
+            cfg.backend,
+            AiBackendKind::CandleGguf | AiBackendKind::BuiltInHyMt
+        ) && url.trim().is_empty()
+        {
+            cfg.base_url = String::new();
         }
     }
     if let Some(key) = map.get("chat_ai.api_key").and_then(Value::as_str) {
@@ -442,7 +496,10 @@ fn load_chat_ai(map: &Map<String, Value>) -> ChatAiConfig {
     if let Some(p) = map.get("chat_ai.gguf_model_path").and_then(Value::as_str) {
         cfg.gguf_model_path = p.trim().to_string();
     }
-    if let Some(p) = map.get("chat_ai.gguf_tokenizer_path").and_then(Value::as_str) {
+    if let Some(p) = map
+        .get("chat_ai.gguf_tokenizer_path")
+        .and_then(Value::as_str)
+    {
         cfg.gguf_tokenizer_path = p.trim().to_string();
     }
     if let Some(prompt) = map.get("chat_ai.chat_prompt").and_then(Value::as_str) {
@@ -486,6 +543,12 @@ fn load_appearance(map: &Map<String, Value>) -> AppearanceConfig {
     let mut cfg = AppearanceConfig::default();
     if let Some(v) = map.get("appearance.panel_opacity").and_then(Value::as_f64) {
         cfg.panel_opacity = AppearanceConfig::clamp_opacity(v);
+    }
+    if let Some(v) = map
+        .get("appearance.ocr_strip_newlines")
+        .and_then(Value::as_bool)
+    {
+        cfg.ocr_strip_newlines = v;
     }
     cfg
 }
@@ -558,5 +621,32 @@ mod tests {
 
         let loaded_layout = reloaded.pane_layout();
         assert_eq!(loaded_layout, custom_layout);
+    }
+
+    #[test]
+    fn persists_and_reloads_builtin_hy_mt_and_quant_with_empty_base_url() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SettingsStore::open_at(tmp.path().to_path_buf());
+
+        let mut ai_cfg = store.ai_translation_for_request();
+        ai_cfg.backend = AiBackendKind::BuiltInHyMt;
+        ai_cfg.base_url.clear();
+        ai_cfg.hy_mt_quant = HyMtQuant::Q5KM;
+        store.save_ai_translation(&ai_cfg).unwrap();
+
+        let mut chat_cfg = store.chat_ai_for_request();
+        chat_cfg.backend = AiBackendKind::BuiltInHyMt;
+        chat_cfg.base_url.clear();
+        chat_cfg.hy_mt_quant = HyMtQuant::F16;
+        store.save_chat_ai(&chat_cfg).unwrap();
+
+        let reloaded = SettingsStore::open_at(tmp.path().to_path_buf());
+        let loaded_ai = reloaded.ai_translation_for_request();
+        assert_eq!(loaded_ai.backend, AiBackendKind::BuiltInHyMt);
+        assert_eq!(loaded_ai.hy_mt_quant, HyMtQuant::Q5KM);
+
+        let loaded_chat = reloaded.chat_ai_for_request();
+        assert_eq!(loaded_chat.backend, AiBackendKind::BuiltInHyMt);
+        assert_eq!(loaded_chat.hy_mt_quant, HyMtQuant::F16);
     }
 }

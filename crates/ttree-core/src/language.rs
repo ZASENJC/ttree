@@ -128,7 +128,10 @@ pub fn resolve_adaptive_target(text: &str) -> &'static str {
 /// 将用户选择的 `(source, target)`（可能含 `adaptive`）解析为实际请求的语言对。
 pub fn resolve_language_pair(source: &str, target: &str, text: &str) -> (String, String) {
     if target == ADAPTIVE_TARGET {
-        ("auto".to_string(), resolve_adaptive_target(text).to_string())
+        (
+            "auto".to_string(),
+            resolve_adaptive_target(text).to_string(),
+        )
     } else {
         (source.to_string(), target.to_string())
     }

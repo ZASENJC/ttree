@@ -22,8 +22,7 @@ pub fn parse_sse_line(line: &str) -> Result<Option<StreamDelta>, String> {
     if data == "[DONE]" {
         return Ok(Some(StreamDelta::Done));
     }
-    let v: Value =
-        serde_json::from_str(data).map_err(|e| format!("SSE JSON 解析失败: {e}"))?;
+    let v: Value = serde_json::from_str(data).map_err(|e| format!("SSE JSON 解析失败: {e}"))?;
     let content = v
         .get("choices")
         .and_then(|c| c.get(0))
@@ -163,7 +162,10 @@ mod tests {
     fn decodes_sse_and_ollama_ndjson_streams() {
         let mut sse = LineStreamDecoder::new_sse();
         let out = sse
-            .push("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: [DONE]\n".as_bytes())
+            .push(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: [DONE]\n"
+                    .as_bytes(),
+            )
             .unwrap();
         assert_eq!(
             out,

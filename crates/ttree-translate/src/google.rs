@@ -1,9 +1,11 @@
 //! 谷歌翻译 —— 改用 POST 表单请求避免长文本 URL 膨胀，并配合 1.8s 快速连接超时。
 
-use std::time::Duration;
 use serde_json::Value;
+use std::time::Duration;
 
-use crate::{read_error_body, read_limited_response, shared_client, MAX_TRANSLATION_RESPONSE_BYTES};
+use crate::{
+    read_error_body, read_limited_response, shared_client, MAX_TRANSLATION_RESPONSE_BYTES,
+};
 
 const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -29,8 +31,7 @@ pub async fn translate(text: &str, source: &str, target: &str) -> Result<String,
         return Err(format!("谷歌翻译返回状态 {status}: {body}"));
     }
 
-    let body =
-        read_limited_response(resp, MAX_TRANSLATION_RESPONSE_BYTES, "谷歌翻译响应").await?;
+    let body = read_limited_response(resp, MAX_TRANSLATION_RESPONSE_BYTES, "谷歌翻译响应").await?;
     let body: Value =
         serde_json::from_slice(&body).map_err(|e| format!("谷歌翻译响应解析失败: {e}"))?;
 
