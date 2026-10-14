@@ -18,6 +18,16 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn dispatch_splitter_drag(splitter_id: u8, delta_down: f64) {
+    macos_app::on_splitter_drag(splitter_id, delta_down);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn dispatch_splitter_drag_end() {
+    macos_app::on_splitter_drag_end();
+}
+
+#[cfg(target_os = "macos")]
 mod macos_app {
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -38,7 +48,7 @@ mod macos_app {
     };
     use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-    use ttree_core::{WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
+    use ttree_core::{WINDOW_MAX_HEIGHT, WINDOW_MAX_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH};
     use ttree_storage::{HistoryStore, SettingsStore};
 
     use crate::state::{ActionTag, AppController, TabMode, UiEvent};
@@ -61,6 +71,14 @@ mod macos_app {
                 }
             }
         });
+    }
+
+    pub fn on_splitter_drag(splitter_id: u8, delta_down: f64) {
+        with_ctx(|ctx| ctx.ctrl.on_splitter_drag(splitter_id, delta_down));
+    }
+
+    pub fn on_splitter_drag_end() {
+        with_ctx(|ctx| ctx.ctrl.on_splitter_drag_end());
     }
 
     define_class!(
@@ -167,7 +185,10 @@ mod macos_app {
         let history = Arc::new(HistoryStore::open_default());
         let hotkey_mgr = GlobalHotKeyManager::new().expect("初始化全局快捷键管理器失败");
 
-        let (win_w, win_h) = settings.window_size();
+        let pane_layout = settings.pane_layout();
+        let ai_enabled = settings.ai_translation_for_request().enabled;
+        let win_w = pane_layout.width;
+        let win_h = pane_layout.translate_window_height(ai_enabled);
         let appearance = settings.appearance();
         let (window, effect_view) =
             build_main_window(mtm, win_w, win_h, appearance.panel_opacity, &dispatcher);
@@ -243,6 +264,7 @@ mod macos_app {
             window.setBackgroundColor(Some(&NSColor::clearColor()));
             window.setAlphaValue(opacity);
             window.setMinSize(NSSize::new(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT));
+            window.setMaxSize(NSSize::new(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT));
 
             for btn_kind in [
                 NSWindowButton::CloseButton,

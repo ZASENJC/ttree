@@ -22,9 +22,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use ttree_core::{
     recent_chat_context, resolve_language_pair, AiBackendKind, AiTranslationConfig,
-    AppearanceConfig, CancelSlot, ChatAiConfig, ChatMessage, Conversation, ShortcutConfig,
-    ADAPTIVE_TARGET, PANEL_OPACITY_MAX, PANEL_OPACITY_MIN, SOURCE_LANGUAGES, TARGET_LANGUAGES,
-    WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    AppearanceConfig, CancelSlot, ChatAiConfig, ChatMessage, Conversation, PaneLayoutConfig,
+    ShortcutConfig, ADAPTIVE_TARGET, PANEL_OPACITY_MAX, PANEL_OPACITY_MIN, SOURCE_LANGUAGES,
+    TARGET_LANGUAGES, TOP_BAR_HEIGHT, WINDOW_MAX_HEIGHT, WINDOW_MAX_WIDTH, WINDOW_MIN_HEIGHT,
+    WINDOW_MIN_WIDTH,
 };
 use ttree_ocr::OcrOutcome;
 use ttree_platform_macos::hotkey::{parse_shortcut_config, ParsedShortcuts, ShortcutAction};
@@ -33,13 +34,19 @@ use ttree_storage::{HistoryStore, SettingsStore};
 use crate::ui_helpers::{
     add_subview, append_text_view_string, copy_to_pasteboard, get_field_string,
     get_text_view_string, make_button, make_checkbox, make_divider, make_flat_button, make_label,
-    make_popup, make_scrollable_text_view, make_secure_field, make_slider, make_surface_box,
-    make_symbol_button, make_text_field, set_button_symbol, set_field_string,
-    set_flat_button_active, set_text_view_string, set_text_view_styled, top_rect,
+    make_popup, make_scrollable_text_view, make_secure_field, make_slider, make_split_bar,
+    make_surface_box, make_symbol_button, make_text_field, set_button_symbol, set_field_string,
+    set_flat_button_active, set_split_bar_frame, set_text_view_string, set_text_view_styled,
+    top_rect, SplitBarWidget, SPLITTER_HIT_HEIGHT,
 };
 
 const AUTO_TRANSLATE_DEBOUNCE: Duration = Duration::from_millis(650);
-const RESIZE_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const RESIZE_SAVE_DEBOUNCE: Duration = Duration::from_millis(350);
+
+const SPLITTER_SOURCE: u8 = 1;
+const SPLITTER_LANG: u8 = 2;
+const SPLITTER_WEB: u8 = 3;
+const SPLITTER_CHAT: u8 = 4;
 
 const WEB_PLACEHOLDER: &str = "译文显示在这里";
 const AI_PLACEHOLDER: &str = "AI 译文显示在这里";
@@ -207,27 +214,27 @@ pub enum UiEvent {
     },
 }
 
-/// 翻译视图（原版四层上下分栏：上方原文输入框 → 语言选择条 → 谷歌/微软译文框 → AI 译文框）
+/// 翻译视图（原版四层上下分栏：上方原文输入框 → 语言选择条 → 谷歌/微软译文框 → AI 译文框，每栏间均可上下拖拽调整高度）
 pub struct TranslateViewWidgets {
     pub root: Retained<NSView>,
     pub source_surface: Retained<NSBox>,
     pub input_scroll: Retained<NSScrollView>,
     pub input_tv: Retained<NSTextView>,
     pub input_placeholder: Retained<NSTextField>,
-    pub source_bottom_line: Retained<NSBox>,
+    pub source_split_bar: SplitBarWidget,
 
     pub lang_surface: Retained<NSBox>,
     pub source_popup: Retained<NSPopUpButton>,
     pub swap_btn: Retained<NSButton>,
     pub target_popup: Retained<NSPopUpButton>,
     pub status_label: Retained<NSTextField>,
-    pub lang_bottom_line: Retained<NSBox>,
+    pub lang_split_bar: SplitBarWidget,
 
     pub web_header_label: Retained<NSTextField>,
     pub web_copy_btn: Retained<NSButton>,
     pub web_scroll: Retained<NSScrollView>,
     pub web_tv: Retained<NSTextView>,
-    pub web_bottom_line: Retained<NSBox>,
+    pub web_split_bar: SplitBarWidget,
 
     pub ai_header_label: Retained<NSTextField>,
     pub ai_copy_btn: Retained<NSButton>,
@@ -243,7 +250,7 @@ pub struct ChatViewWidgets {
     pub history_bottom_line: Retained<NSBox>,
     pub transcript_scroll: Retained<NSScrollView>,
     pub transcript_tv: Retained<NSTextView>,
-    pub composer_top_line: Retained<NSBox>,
+    pub composer_split_bar: SplitBarWidget,
     pub composer_surface: Retained<NSBox>,
     pub input_scroll: Retained<NSScrollView>,
     pub input_tv: Retained<NSTextView>,
@@ -355,6 +362,8 @@ pub struct AppController {
     pub pending_clear_ai_key: bool,
     pub pending_clear_chat_key: bool,
 
+    pub pane_layout: PaneLayoutConfig,
+    pub is_programmatic_resize: bool,
     pub last_known_size: (f64, f64),
     pub pending_resize_save: Option<Instant>,
 }
@@ -373,17 +382,21 @@ impl AppController {
         dispatcher: &AnyObject,
     ) -> Self {
         let action_sel: Sel = sel!(handleControl:);
-        let (win_w, win_h) = settings.window_size();
+        let pane_layout = settings.pane_layout();
+        let ai_enabled = settings.ai_translation_for_request().enabled;
+        let win_w = pane_layout.width;
+        let win_h = pane_layout.translate_window_height(ai_enabled);
 
-        // ── 顶部栏：左上角 [翻译 | AI] 分段切换器，右上角图标功能区 ──
-        let segmented_bg = make_surface_box(mtm, top_rect(win_h, 12.0, 7.0, 132.0, 32.0), 9.0, 0.45);
+        // ── 顶部栏：左上角 [翻译 | AI] 分段切换器，右上角图标功能区（全淡色） ──
+        let segmented_bg =
+            make_surface_box(mtm, top_rect(win_h, 12.0, 5.0, 128.0, 28.0), 8.0, 0.35);
         let segmented_pill =
-            make_surface_box(mtm, top_rect(win_h, 15.0, 10.0, 62.0, 26.0), 7.0, 0.95);
+            make_surface_box(mtm, top_rect(win_h, 15.0, 7.0, 59.0, 24.0), 6.0, 0.70);
         let tab_translate_btn = make_flat_button(
             mtm,
-            top_rect(win_h, 15.0, 10.0, 62.0, 26.0),
+            top_rect(win_h, 15.0, 7.0, 59.0, 24.0),
             "翻译",
-            13.0,
+            12.5,
             true,
             false,
             ActionTag::TabTranslate as isize,
@@ -392,9 +405,9 @@ impl AppController {
         );
         let tab_chat_btn = make_flat_button(
             mtm,
-            top_rect(win_h, 79.0, 10.0, 62.0, 26.0),
+            top_rect(win_h, 78.0, 7.0, 59.0, 24.0),
             "AI",
-            13.0,
+            12.5,
             true,
             false,
             ActionTag::TabChat as isize,
@@ -406,9 +419,9 @@ impl AppController {
 
         let settings_title_label = make_label(
             mtm,
-            top_rect(win_h, 16.0, 11.0, 120.0, 24.0),
+            top_rect(win_h, 16.0, 8.0, 120.0, 22.0),
             "设置",
-            16.5,
+            15.0,
             true,
             false,
         );
@@ -417,7 +430,7 @@ impl AppController {
         // 右上角功能区按钮
         let pin_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 78.0, 7.0, 32.0, 32.0),
+            top_rect(win_h, win_w - 76.0, 5.0, 28.0, 28.0),
             "pin",
             "📌",
             "固定窗口",
@@ -427,7 +440,7 @@ impl AppController {
         );
         let new_chat_top_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 112.0, 7.0, 32.0, 32.0),
+            top_rect(win_h, win_w - 108.0, 5.0, 28.0, 28.0),
             "square.and.pencil",
             "＋",
             "新对话",
@@ -439,7 +452,7 @@ impl AppController {
 
         let history_top_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 78.0, 7.0, 32.0, 32.0),
+            top_rect(win_h, win_w - 76.0, 5.0, 28.0, 28.0),
             "clock.arrow.circlepath",
             "⏱",
             "查看对话历史",
@@ -451,7 +464,7 @@ impl AppController {
 
         let gear_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 44.0, 7.0, 32.0, 32.0),
+            top_rect(win_h, win_w - 42.0, 5.0, 28.0, 28.0),
             "gearshape",
             "⚙",
             "设置",
@@ -462,11 +475,11 @@ impl AppController {
 
         let done_settings_btn = make_flat_button(
             mtm,
-            top_rect(win_h, win_w - 58.0, 8.0, 46.0, 30.0),
+            top_rect(win_h, win_w - 56.0, 6.0, 44.0, 26.0),
             "完成",
-            13.5,
+            13.0,
             true,
-            true,
+            false,
             ActionTag::CloseSettings as isize,
             dispatcher,
             action_sel,
@@ -484,11 +497,19 @@ impl AppController {
         add_subview(&effect_view, &gear_btn);
         add_subview(&effect_view, &done_settings_btn);
 
-        let body_h = (win_h - 46.0).max(290.0);
+        let body_h = (win_h - TOP_BAR_HEIGHT).max(174.0);
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w, body_h));
 
-        let translate_ui = Self::build_translate_view(mtm, body_frame, dispatcher, action_sel);
-        let chat_ui = Self::build_chat_view(mtm, body_frame, dispatcher, action_sel);
+        let translate_ui = Self::build_translate_view(
+            mtm,
+            body_frame,
+            &pane_layout,
+            ai_enabled,
+            dispatcher,
+            action_sel,
+        );
+        let chat_ui =
+            Self::build_chat_view(mtm, body_frame, &pane_layout, dispatcher, action_sel);
         let settings_ui =
             Self::build_settings_view(mtm, body_frame, &settings, dispatcher, action_sel);
 
@@ -561,17 +582,20 @@ impl AppController {
             streaming_assistant_buffer: String::new(),
             pending_clear_ai_key: false,
             pending_clear_chat_key: false,
+            pane_layout,
+            is_programmatic_resize: false,
             last_known_size: (win_w, win_h),
             pending_resize_save: None,
         };
 
+        ctrl.update_window_min_max_constraints();
         ctrl.refresh_ai_header_badge();
         ctrl.refresh_conversations_popup();
         ctrl.render_chat_transcript();
         ctrl
     }
 
-    /// 构建原版四层上下分栏翻译面板：
+    /// 构建原版四层上下分栏翻译面板（每一栏均带独立最小/最大高度限制与可拖拽分栏条）：
     /// 1. 上方翻译输入框 (`source_surface` + `input_tv`)
     /// 2. 语言选择条 (`lang_surface`: `[自动检测] → [中 ⇄ 英（自适应）]`)
     /// 3. 谷歌/微软负载均衡翻译显示框 (`web_header_label` + `web_tv`)
@@ -579,6 +603,8 @@ impl AppController {
     fn build_translate_view(
         mtm: MainThreadMarker,
         frame: NSRect,
+        layout: &PaneLayoutConfig,
+        ai_enabled: bool,
         dispatcher: &AnyObject,
         action_sel: Sel,
     ) -> TranslateViewWidgets {
@@ -586,43 +612,53 @@ impl AppController {
         let h = frame.size.height;
         let root = NSView::initWithFrame(mtm.alloc(), frame);
 
-        let source_h = (h * 0.33).clamp(108.0, 210.0);
-        let lang_h = 38.0;
+        let source_h = layout.source_height;
+        let lang_h = layout.lang_height;
         let results_top = source_h + lang_h;
-        let results_h = (h - results_top).max(160.0);
-        let web_h = (results_h * 0.47).floor();
+        let web_h = layout.web_height;
         let ai_top = results_top + web_h;
-        let ai_h = results_h - web_h;
+        let ai_h = layout.ai_height;
 
         // 1. 上方翻译输入框
         let source_surface =
-            make_surface_box(mtm, top_rect(h, 0.0, 0.0, w, source_h), 0.0, 0.35);
+            make_surface_box(mtm, top_rect(h, 0.0, 0.0, w, source_h), 0.0, 0.25);
         let (input_scroll, input_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 2.0, 2.0, w - 4.0, source_h - 4.0),
+            top_rect(h, 2.0, 2.0, w - 4.0, (source_h - 6.0).max(40.0)),
             true,
-            16.0,
+            15.0,
             Some(dispatcher),
         );
         let input_placeholder = make_label(
             mtm,
-            top_rect(h, 16.0, 12.0, w - 32.0, 22.0),
+            top_rect(h, 16.0, 12.0, w - 32.0, 20.0),
             "输入文字，回车翻译",
-            16.0,
+            15.0,
             false,
             true,
         );
-        let source_bottom_line = make_divider(mtm, top_rect(h, 0.0, source_h - 1.0, w, 1.0));
+        let source_split_bar = make_split_bar(
+            mtm,
+            top_rect(
+                h,
+                0.0,
+                source_h - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+            SPLITTER_SOURCE,
+        );
 
         // 2. 下方选择语言条
         let lang_surface =
-            make_surface_box(mtm, top_rect(h, 0.0, source_h, w, lang_h), 0.0, 0.55);
+            make_surface_box(mtm, top_rect(h, 0.0, source_h, w, lang_h), 0.0, 0.35);
         let src_labels: Vec<&str> = SOURCE_LANGUAGES.iter().map(|l| l.label).collect();
         let tgt_labels: Vec<&str> = TARGET_LANGUAGES.iter().map(|l| l.label).collect();
+        let popup_top = source_h + ((lang_h - 24.0) * 0.5).max(2.0);
 
         let source_popup = make_popup(
             mtm,
-            top_rect(h, 12.0, source_h + 6.0, 116.0, 26.0),
+            top_rect(h, 12.0, popup_top, 114.0, 24.0),
             &src_labels,
             0,
             false,
@@ -632,10 +668,10 @@ impl AppController {
         );
         let swap_btn = make_flat_button(
             mtm,
-            top_rect(h, 130.0, source_h + 6.0, 24.0, 26.0),
+            top_rect(h, 128.0, popup_top, 24.0, 24.0),
             "→",
-            13.0,
-            true,
+            12.5,
+            false,
             false,
             ActionTag::SwapLanguages as isize,
             dispatcher,
@@ -643,7 +679,7 @@ impl AppController {
         );
         let target_popup = make_popup(
             mtm,
-            top_rect(h, 156.0, source_h + 6.0, 154.0, 26.0),
+            top_rect(h, 154.0, popup_top, 152.0, 24.0),
             &tgt_labels,
             0,
             false,
@@ -653,30 +689,39 @@ impl AppController {
         );
         let status_label = make_label(
             mtm,
-            top_rect(h, 314.0, source_h + 10.0, (w - 328.0).max(80.0), 18.0),
+            top_rect(h, 310.0, popup_top + 3.0, (w - 322.0).max(60.0), 18.0),
             "",
-            11.5,
+            11.0,
             false,
             true,
         );
-        let lang_bottom_line =
-            make_divider(mtm, top_rect(h, 0.0, source_h + lang_h - 1.0, w, 1.0));
+        let lang_split_bar = make_split_bar(
+            mtm,
+            top_rect(
+                h,
+                0.0,
+                results_top - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+            SPLITTER_LANG,
+        );
 
         // 3. 接下方谷歌/微软负载均衡翻译显示框
         let web_header_label = make_label(
             mtm,
-            top_rect(h, 16.0, results_top + 8.0, 240.0, 16.0),
+            top_rect(h, 16.0, results_top + 7.0, 240.0, 15.0),
             "翻译  ·  GOOGLE / BING",
-            11.0,
-            true,
+            10.5,
+            false,
             true,
         );
         let web_copy_btn = make_flat_button(
             mtm,
-            top_rect(h, w - 60.0, results_top + 5.0, 48.0, 22.0),
+            top_rect(h, w - 58.0, results_top + 4.0, 46.0, 20.0),
             "复制",
-            11.5,
-            true,
+            11.0,
+            false,
             false,
             ActionTag::CopyWebResult as isize,
             dispatcher,
@@ -686,30 +731,39 @@ impl AppController {
 
         let (web_scroll, web_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 2.0, results_top + 24.0, w - 4.0, web_h - 26.0),
+            top_rect(h, 2.0, results_top + 22.0, w - 4.0, (web_h - 26.0).max(40.0)),
             false,
-            15.5,
+            14.5,
             None,
         );
         set_text_view_styled(&web_tv, WEB_PLACEHOLDER, true);
-        let web_bottom_line =
-            make_divider(mtm, top_rect(h, 0.0, results_top + web_h - 1.0, w, 1.0));
+        let web_split_bar = make_split_bar(
+            mtm,
+            top_rect(
+                h,
+                0.0,
+                results_top + web_h - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+            SPLITTER_WEB,
+        );
 
         // 4. 接下方 AI 翻译显示框
         let ai_header_label = make_label(
             mtm,
-            top_rect(h, 16.0, ai_top + 8.0, 280.0, 16.0),
+            top_rect(h, 16.0, ai_top + 7.0, 280.0, 15.0),
             "AI",
-            11.0,
-            true,
+            10.5,
+            false,
             true,
         );
         let ai_copy_btn = make_flat_button(
             mtm,
-            top_rect(h, w - 60.0, ai_top + 5.0, 48.0, 22.0),
+            top_rect(h, w - 58.0, ai_top + 4.0, 46.0, 20.0),
             "复制",
-            11.5,
-            true,
+            11.0,
+            false,
             false,
             ActionTag::CopyAiResult as isize,
             dispatcher,
@@ -719,33 +773,39 @@ impl AppController {
 
         let (ai_scroll, ai_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 2.0, ai_top + 24.0, w - 4.0, ai_h - 28.0),
+            top_rect(h, 2.0, ai_top + 22.0, w - 4.0, (ai_h - 26.0).max(40.0)),
             false,
-            15.5,
+            14.5,
             None,
         );
         set_text_view_styled(&ai_tv, AI_PLACEHOLDER, true);
 
+        web_split_bar.handle.setHidden(!ai_enabled);
+        ai_header_label.setHidden(!ai_enabled);
+        ai_scroll.setHidden(!ai_enabled);
+
         add_subview(&root, &source_surface);
         add_subview(&root, &input_placeholder);
         add_subview(&root, &input_scroll);
-        add_subview(&root, &source_bottom_line);
 
         add_subview(&root, &lang_surface);
         add_subview(&root, &source_popup);
         add_subview(&root, &swap_btn);
         add_subview(&root, &target_popup);
         add_subview(&root, &status_label);
-        add_subview(&root, &lang_bottom_line);
 
         add_subview(&root, &web_header_label);
         add_subview(&root, &web_copy_btn);
         add_subview(&root, &web_scroll);
-        add_subview(&root, &web_bottom_line);
 
         add_subview(&root, &ai_header_label);
         add_subview(&root, &ai_copy_btn);
         add_subview(&root, &ai_scroll);
+
+        // 将可拖拽分栏条放在最顶层以确保鼠标悬停与拖拽命中
+        add_subview(&root, &source_split_bar.handle);
+        add_subview(&root, &lang_split_bar.handle);
+        add_subview(&root, &web_split_bar.handle);
 
         TranslateViewWidgets {
             root,
@@ -753,18 +813,18 @@ impl AppController {
             input_scroll,
             input_tv,
             input_placeholder,
-            source_bottom_line,
+            source_split_bar,
             lang_surface,
             source_popup,
             swap_btn,
             target_popup,
             status_label,
-            lang_bottom_line,
+            lang_split_bar,
             web_header_label,
             web_copy_btn,
             web_scroll,
             web_tv,
-            web_bottom_line,
+            web_split_bar,
             ai_header_label,
             ai_copy_btn,
             ai_scroll,
@@ -775,6 +835,7 @@ impl AppController {
     fn build_chat_view(
         mtm: MainThreadMarker,
         frame: NSRect,
+        layout: &PaneLayoutConfig,
         dispatcher: &AnyObject,
         action_sel: Sel,
     ) -> ChatViewWidgets {
@@ -783,10 +844,10 @@ impl AppController {
         let root = NSView::initWithFrame(mtm.alloc(), frame);
 
         // 顶部折叠式历史对话选择条（点击右上角时钟按钮展开/收起）
-        let history_bar = NSView::initWithFrame(mtm.alloc(), top_rect(h, 0.0, 0.0, w, 36.0));
+        let history_bar = NSView::initWithFrame(mtm.alloc(), top_rect(h, 0.0, 0.0, w, 34.0));
         let conv_popup = make_popup(
             mtm,
-            top_rect(36.0, 12.0, 5.0, w - 104.0, 26.0),
+            top_rect(34.0, 12.0, 4.0, w - 104.0, 24.0),
             &["当前对话"],
             0,
             true,
@@ -796,57 +857,67 @@ impl AppController {
         );
         let clear_hist_btn = make_flat_button(
             mtm,
-            top_rect(36.0, w - 84.0, 5.0, 72.0, 26.0),
+            top_rect(34.0, w - 84.0, 4.0, 72.0, 24.0),
             "清空历史",
-            12.0,
-            true,
-            true,
+            11.5,
+            false,
+            false,
             ActionTag::ClearChatHistory as isize,
             dispatcher,
             action_sel,
         );
-        let history_bottom_line = make_divider(mtm, top_rect(36.0, 0.0, 35.0, w, 1.0));
+        let history_bottom_line = make_divider(mtm, top_rect(34.0, 0.0, 33.0, w, 1.0));
         add_subview(&history_bar, &conv_popup);
         add_subview(&history_bar, &clear_hist_btn);
         add_subview(&history_bar, &history_bottom_line);
         history_bar.setHidden(true);
 
-        let composer_h = 56.0;
-        let transcript_h = (h - composer_h).max(160.0);
+        let composer_h = layout.chat_input_height;
+        let transcript_h = (h - composer_h).max(120.0);
         let (transcript_scroll, transcript_tv) = make_scrollable_text_view(
             mtm,
             top_rect(h, 4.0, 0.0, w - 8.0, transcript_h),
             false,
-            14.5,
+            14.0,
             None,
         );
 
         let composer_top = transcript_h;
-        let composer_top_line = make_divider(mtm, top_rect(h, 0.0, composer_top, w, 1.0));
+        let composer_split_bar = make_split_bar(
+            mtm,
+            top_rect(
+                h,
+                0.0,
+                composer_top - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+            SPLITTER_CHAT,
+        );
         let composer_surface = make_surface_box(
             mtm,
             top_rect(h, 0.0, composer_top + 1.0, w, composer_h - 1.0),
             0.0,
-            0.45,
+            0.35,
         );
         let (input_scroll, input_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 4.0, composer_top + 6.0, w - 84.0, composer_h - 12.0),
+            top_rect(h, 4.0, composer_top + 6.0, w - 84.0, (composer_h - 12.0).max(40.0)),
             true,
-            14.5,
+            14.0,
             Some(dispatcher),
         );
         let input_placeholder = make_label(
             mtm,
-            top_rect(h, 18.0, composer_top + 16.0, 200.0, 20.0),
+            top_rect(h, 18.0, composer_top + 15.0, 200.0, 20.0),
             "输入消息，回车发送",
-            14.5,
+            14.0,
             false,
             true,
         );
         let send_btn = make_button(
             mtm,
-            top_rect(h, w - 74.0, composer_top + 13.0, 62.0, 30.0),
+            top_rect(h, w - 74.0, composer_top + (composer_h - 28.0) * 0.5, 62.0, 28.0),
             "发送",
             ActionTag::SendChat as isize,
             dispatcher,
@@ -855,11 +926,11 @@ impl AppController {
 
         add_subview(&root, &transcript_scroll);
         add_subview(&root, &history_bar);
-        add_subview(&root, &composer_top_line);
         add_subview(&root, &composer_surface);
         add_subview(&root, &input_placeholder);
         add_subview(&root, &input_scroll);
         add_subview(&root, &send_btn);
+        add_subview(&root, &composer_split_bar.handle);
 
         ChatViewWidgets {
             root,
@@ -869,7 +940,7 @@ impl AppController {
             history_bottom_line,
             transcript_scroll,
             transcript_tv,
-            composer_top_line,
+            composer_split_bar,
             composer_surface,
             input_scroll,
             input_tv,
@@ -1583,6 +1654,69 @@ impl AppController {
         );
     }
 
+    pub fn update_window_min_max_constraints(&self) {
+        let ai_enabled = self.settings.ai_translation_for_request().enabled;
+        match self.active_tab {
+            TabMode::Translate => {
+                self.window.setMinSize(NSSize::new(
+                    WINDOW_MIN_WIDTH,
+                    PaneLayoutConfig::min_window_height(ai_enabled),
+                ));
+                self.window.setMaxSize(NSSize::new(
+                    WINDOW_MAX_WIDTH,
+                    PaneLayoutConfig::max_window_height(ai_enabled),
+                ));
+            }
+            TabMode::Chat => {
+                self.window
+                    .setMinSize(NSSize::new(WINDOW_MIN_WIDTH, 320.0));
+                self.window
+                    .setMaxSize(NSSize::new(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT));
+            }
+            TabMode::Settings => {
+                self.window
+                    .setMinSize(NSSize::new(WINDOW_MIN_WIDTH, 430.0));
+                self.window
+                    .setMaxSize(NSSize::new(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT));
+            }
+        }
+    }
+
+    /// 将窗口尺寸严格同步至记忆的 `pane_layout`（顶边在屏幕上的位置保持固定不动）。
+    pub fn sync_window_to_pane_layout(&mut self) {
+        self.pane_layout = self.pane_layout.clamped();
+        let ai_enabled = self.settings.ai_translation_for_request().enabled;
+        self.update_window_min_max_constraints();
+
+        let target_w = self.pane_layout.width;
+        let target_h = match self.active_tab {
+            TabMode::Translate => self.pane_layout.translate_window_height(ai_enabled),
+            TabMode::Chat => self
+                .pane_layout
+                .translate_window_height(ai_enabled)
+                .max(360.0),
+            TabMode::Settings => self
+                .pane_layout
+                .translate_window_height(ai_enabled)
+                .max(450.0),
+        };
+
+        let frame = self.window.frame();
+        let top_y = frame.origin.y + frame.size.height;
+        if (frame.size.width - target_w).abs() >= 0.5 || (frame.size.height - target_h).abs() >= 0.5
+        {
+            let new_frame = NSRect::new(
+                NSPoint::new(frame.origin.x, top_y - target_h),
+                NSSize::new(target_w, target_h),
+            );
+            self.is_programmatic_resize = true;
+            self.window.setFrame_display(new_frame, true);
+            self.is_programmatic_resize = false;
+        }
+        self.last_known_size = (target_w, target_h);
+        self.relayout_all(target_w, target_h);
+    }
+
     pub fn switch_tab(&mut self, tab: TabMode) {
         if self.active_tab == TabMode::Settings && tab != TabMode::Settings {
             self.set_pinned(self.pin_before_settings);
@@ -1611,22 +1745,12 @@ impl AppController {
         self.new_chat_top_btn.setHidden(tab != TabMode::Chat);
         self.history_top_btn.setHidden(tab != TabMode::Chat);
 
-        let (win_w, win_h) = self.last_known_size;
         if !in_settings {
-            let pill_x = if tab == TabMode::Translate { 15.0 } else { 79.0 };
-            self.segmented_pill
-                .setFrame(top_rect(win_h, pill_x, 10.0, 62.0, 26.0));
             set_flat_button_active(&self.tab_translate_btn, tab == TabMode::Translate, false);
             set_flat_button_active(&self.tab_chat_btn, tab == TabMode::Chat, false);
         }
 
-        // 调整右上角固定按钮坐标以适配当前模式的右上角图标列
-        let pin_x = match tab {
-            TabMode::Translate => win_w - 78.0,
-            TabMode::Chat => win_w - 146.0,
-            TabMode::Settings => win_w - 94.0,
-        };
-        self.pin_btn.setFrame(top_rect(win_h, pin_x, 7.0, 32.0, 32.0));
+        self.sync_window_to_pane_layout();
 
         match tab {
             TabMode::Translate => {
@@ -1652,8 +1776,11 @@ impl AppController {
     }
 
     pub fn show_and_focus_window(&mut self) {
+        let was_visible = self.window.isVisible();
+        self.sync_window_to_pane_layout();
+
         let app = NSApplication::sharedApplication(self.mtm);
-        if !self.window.isVisible() {
+        if !was_visible {
             if let Some(screen) = NSScreen::mainScreen(self.mtm) {
                 let vf = screen.visibleFrame();
                 let wf = self.window.frame();
@@ -1677,6 +1804,9 @@ impl AppController {
     }
 
     pub fn hide_window(&mut self) {
+        if self.pending_resize_save.take().is_some() {
+            self.settings.save_pane_layout(self.pane_layout);
+        }
         self.window.orderOut(None);
     }
 
@@ -2209,7 +2339,10 @@ impl AppController {
             "⏱",
             self.show_chat_history_bar,
         );
-        self.relayout_chat_view(self.last_known_size.0, (self.last_known_size.1 - 46.0).max(290.0));
+        self.relayout_chat_view(
+            self.last_known_size.0,
+            (self.last_known_size.1 - TOP_BAR_HEIGHT).max(200.0),
+        );
     }
 
     fn selected_ai_trans_backend(&self) -> AiBackendKind {
@@ -2669,8 +2802,7 @@ impl AppController {
         if let Some(since) = self.pending_resize_save {
             if since.elapsed() >= RESIZE_SAVE_DEBOUNCE {
                 self.pending_resize_save = None;
-                let (w, h) = self.last_known_size;
-                self.settings.save_window_size(w, h);
+                self.settings.save_pane_layout(self.pane_layout);
             }
         }
     }
@@ -2681,131 +2813,228 @@ impl AppController {
         }
     }
 
+    pub fn on_splitter_drag(&mut self, splitter_id: u8, delta_down: f64) {
+        match splitter_id {
+            SPLITTER_SOURCE => {
+                self.pane_layout.adjust_source_height(delta_down);
+                self.sync_window_to_pane_layout();
+            }
+            SPLITTER_LANG => {
+                self.pane_layout.adjust_lang_height(delta_down);
+                self.sync_window_to_pane_layout();
+            }
+            SPLITTER_WEB => {
+                self.pane_layout.adjust_web_height(delta_down);
+                self.sync_window_to_pane_layout();
+            }
+            SPLITTER_CHAT => {
+                self.pane_layout.adjust_chat_input_height(-delta_down);
+                let (w, h) = self.last_known_size;
+                self.relayout_chat_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
+            }
+            _ => return,
+        }
+        self.pending_resize_save = Some(Instant::now());
+    }
+
+    pub fn on_splitter_drag_end(&mut self) {
+        self.pending_resize_save = None;
+        self.settings.save_pane_layout(self.pane_layout);
+    }
+
     pub fn on_window_did_resize(&mut self) {
         let Some(content_view) = self.window.contentView() else {
             return;
         };
         let bounds = content_view.bounds();
-        let w = bounds.size.width.max(WINDOW_MIN_WIDTH);
-        let h = bounds.size.height.max(WINDOW_MIN_HEIGHT);
+        let w = bounds
+            .size
+            .width
+            .clamp(WINDOW_MIN_WIDTH, WINDOW_MAX_WIDTH);
+        let h = bounds
+            .size
+            .height
+            .clamp(WINDOW_MIN_HEIGHT, WINDOW_MAX_HEIGHT);
         if (w - self.last_known_size.0).abs() < 0.5 && (h - self.last_known_size.1).abs() < 0.5 {
             return;
         }
         self.last_known_size = (w, h);
-        self.pending_resize_save = Some(Instant::now());
 
-        self.effect_view.setFrame(bounds);
+        if !self.is_programmatic_resize {
+            let ai_enabled = self.settings.ai_translation_for_request().enabled;
+            match self.active_tab {
+                TabMode::Translate => {
+                    self.pane_layout.apply_window_resize(w, h, ai_enabled);
+                }
+                TabMode::Chat | TabMode::Settings => {
+                    self.pane_layout.width = w;
+                }
+            }
+            self.pending_resize_save = Some(Instant::now());
+        }
+
+        self.relayout_all(w, h);
+    }
+
+    pub fn relayout_all(&self, w: f64, h: f64) {
+        self.effect_view.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(w, h),
+        ));
 
         // 顶栏重排
         self.segmented_bg
-            .setFrame(top_rect(h, 12.0, 7.0, 132.0, 32.0));
+            .setFrame(top_rect(h, 12.0, 5.0, 128.0, 28.0));
         let pill_x = if self.active_tab == TabMode::Chat {
-            79.0
+            78.0
         } else {
             15.0
         };
         self.segmented_pill
-            .setFrame(top_rect(h, pill_x, 10.0, 62.0, 26.0));
+            .setFrame(top_rect(h, pill_x, 7.0, 59.0, 24.0));
         self.tab_translate_btn
-            .setFrame(top_rect(h, 15.0, 10.0, 62.0, 26.0));
+            .setFrame(top_rect(h, 15.0, 7.0, 59.0, 24.0));
         self.tab_chat_btn
-            .setFrame(top_rect(h, 79.0, 10.0, 62.0, 26.0));
+            .setFrame(top_rect(h, 78.0, 7.0, 59.0, 24.0));
         self.settings_title_label
-            .setFrame(top_rect(h, 16.0, 11.0, 120.0, 24.0));
+            .setFrame(top_rect(h, 16.0, 8.0, 120.0, 22.0));
 
         let pin_x = match self.active_tab {
-            TabMode::Translate => w - 78.0,
-            TabMode::Chat => w - 146.0,
-            TabMode::Settings => w - 94.0,
+            TabMode::Translate => w - 76.0,
+            TabMode::Chat => w - 140.0,
+            TabMode::Settings => w - 92.0,
         };
-        self.pin_btn.setFrame(top_rect(h, pin_x, 7.0, 32.0, 32.0));
+        self.pin_btn.setFrame(top_rect(h, pin_x, 5.0, 28.0, 28.0));
         self.new_chat_top_btn
-            .setFrame(top_rect(h, w - 112.0, 7.0, 32.0, 32.0));
+            .setFrame(top_rect(h, w - 108.0, 5.0, 28.0, 28.0));
         self.history_top_btn
-            .setFrame(top_rect(h, w - 78.0, 7.0, 32.0, 32.0));
+            .setFrame(top_rect(h, w - 76.0, 5.0, 28.0, 28.0));
         self.gear_btn
-            .setFrame(top_rect(h, w - 44.0, 7.0, 32.0, 32.0));
+            .setFrame(top_rect(h, w - 42.0, 5.0, 28.0, 28.0));
         self.done_settings_btn
-            .setFrame(top_rect(h, w - 58.0, 8.0, 46.0, 30.0));
+            .setFrame(top_rect(h, w - 56.0, 6.0, 44.0, 26.0));
 
-        let body_h = (h - 46.0).max(290.0);
+        let body_h = (h - TOP_BAR_HEIGHT).max(174.0);
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
 
-        // 翻译上下四层分栏重排
+        // 翻译上下四层分栏重排（严格遵循每栏高度与最小/最大限高）
         self.translate_ui.root.setFrame(body_frame);
-        let source_h = (body_h * 0.33).clamp(108.0, 210.0);
-        let lang_h = 38.0;
+        let ai_enabled = self.settings.ai_translation_for_request().enabled;
+        let layout = self.pane_layout.clamped();
+        let source_h = layout.source_height;
+        let lang_h = layout.lang_height;
         let results_top = source_h + lang_h;
-        let results_h = (body_h - results_top).max(160.0);
-        let web_h = (results_h * 0.47).floor();
+        let web_h = if ai_enabled {
+            layout.web_height
+        } else {
+            (body_h - results_top).max(layout.web_height)
+        };
         let ai_top = results_top + web_h;
-        let ai_h = results_h - web_h;
+        let ai_h = (body_h - ai_top).max(layout.ai_height);
 
         self.translate_ui
             .source_surface
             .setFrame(top_rect(body_h, 0.0, 0.0, w, source_h));
-        self.translate_ui
-            .input_scroll
-            .setFrame(top_rect(body_h, 2.0, 2.0, w - 4.0, source_h - 4.0));
+        self.translate_ui.input_scroll.setFrame(top_rect(
+            body_h,
+            2.0,
+            2.0,
+            w - 4.0,
+            (source_h - 6.0).max(40.0),
+        ));
         self.translate_ui
             .input_placeholder
-            .setFrame(top_rect(body_h, 16.0, 12.0, w - 32.0, 22.0));
-        self.translate_ui
-            .source_bottom_line
-            .setFrame(top_rect(body_h, 0.0, source_h - 1.0, w, 1.0));
+            .setFrame(top_rect(body_h, 16.0, 12.0, w - 32.0, 20.0));
+        set_split_bar_frame(
+            &self.translate_ui.source_split_bar,
+            top_rect(
+                body_h,
+                0.0,
+                source_h - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+        );
 
+        let popup_top = source_h + ((lang_h - 24.0) * 0.5).max(2.0);
         self.translate_ui
             .lang_surface
             .setFrame(top_rect(body_h, 0.0, source_h, w, lang_h));
         self.translate_ui
             .source_popup
-            .setFrame(top_rect(body_h, 12.0, source_h + 6.0, 116.0, 26.0));
+            .setFrame(top_rect(body_h, 12.0, popup_top, 114.0, 24.0));
         self.translate_ui
             .swap_btn
-            .setFrame(top_rect(body_h, 130.0, source_h + 6.0, 24.0, 26.0));
+            .setFrame(top_rect(body_h, 128.0, popup_top, 24.0, 24.0));
         self.translate_ui
             .target_popup
-            .setFrame(top_rect(body_h, 156.0, source_h + 6.0, 154.0, 26.0));
+            .setFrame(top_rect(body_h, 154.0, popup_top, 152.0, 24.0));
         self.translate_ui.status_label.setFrame(top_rect(
             body_h,
-            314.0,
-            source_h + 10.0,
-            (w - 328.0).max(80.0),
+            310.0,
+            popup_top + 3.0,
+            (w - 322.0).max(60.0),
             18.0,
         ));
-        self.translate_ui
-            .lang_bottom_line
-            .setFrame(top_rect(body_h, 0.0, source_h + lang_h - 1.0, w, 1.0));
+        set_split_bar_frame(
+            &self.translate_ui.lang_split_bar,
+            top_rect(
+                body_h,
+                0.0,
+                results_top - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+        );
 
         self.translate_ui
             .web_header_label
-            .setFrame(top_rect(body_h, 16.0, results_top + 8.0, 240.0, 16.0));
+            .setFrame(top_rect(body_h, 16.0, results_top + 7.0, 240.0, 15.0));
         self.translate_ui
             .web_copy_btn
-            .setFrame(top_rect(body_h, w - 60.0, results_top + 5.0, 48.0, 22.0));
+            .setFrame(top_rect(body_h, w - 58.0, results_top + 4.0, 46.0, 20.0));
         self.translate_ui.web_scroll.setFrame(top_rect(
             body_h,
             2.0,
-            results_top + 24.0,
+            results_top + 22.0,
             w - 4.0,
-            web_h - 26.0,
+            (web_h - 26.0).max(40.0),
         ));
+        set_split_bar_frame(
+            &self.translate_ui.web_split_bar,
+            top_rect(
+                body_h,
+                0.0,
+                results_top + web_h - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+        );
+
         self.translate_ui
-            .web_bottom_line
-            .setFrame(top_rect(body_h, 0.0, results_top + web_h - 1.0, w, 1.0));
+            .web_split_bar
+            .handle
+            .setHidden(!ai_enabled);
+        self.translate_ui.ai_header_label.setHidden(!ai_enabled);
+        self.translate_ui.ai_scroll.setHidden(!ai_enabled);
+        if !ai_enabled {
+            self.translate_ui.ai_copy_btn.setHidden(true);
+        } else if self.ai_has_content {
+            self.translate_ui.ai_copy_btn.setHidden(false);
+        }
 
         self.translate_ui
             .ai_header_label
-            .setFrame(top_rect(body_h, 16.0, ai_top + 8.0, 280.0, 16.0));
+            .setFrame(top_rect(body_h, 16.0, ai_top + 7.0, 280.0, 15.0));
         self.translate_ui
             .ai_copy_btn
-            .setFrame(top_rect(body_h, w - 60.0, ai_top + 5.0, 48.0, 22.0));
+            .setFrame(top_rect(body_h, w - 58.0, ai_top + 4.0, 46.0, 20.0));
         self.translate_ui.ai_scroll.setFrame(top_rect(
             body_h,
             2.0,
-            ai_top + 24.0,
+            ai_top + 22.0,
             w - 4.0,
-            ai_h - 28.0,
+            (ai_h - 26.0).max(40.0),
         ));
 
         // 对话视图重排
@@ -2837,22 +3066,26 @@ impl AppController {
     fn relayout_chat_view(&self, w: f64, body_h: f64) {
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
         self.chat_ui.root.setFrame(body_frame);
-        let hist_offset = if self.show_chat_history_bar { 36.0 } else { 0.0 };
+        let hist_offset = if self.show_chat_history_bar { 34.0 } else { 0.0 };
         self.chat_ui
             .history_bar
-            .setFrame(top_rect(body_h, 0.0, 0.0, w, 36.0));
+            .setFrame(top_rect(body_h, 0.0, 0.0, w, 34.0));
         self.chat_ui
             .conv_popup
-            .setFrame(top_rect(36.0, 12.0, 5.0, w - 104.0, 26.0));
+            .setFrame(top_rect(34.0, 12.0, 4.0, w - 104.0, 24.0));
         self.chat_ui
             .clear_hist_btn
-            .setFrame(top_rect(36.0, w - 84.0, 5.0, 72.0, 26.0));
+            .setFrame(top_rect(34.0, w - 84.0, 4.0, 72.0, 24.0));
         self.chat_ui
             .history_bottom_line
-            .setFrame(top_rect(36.0, 0.0, 35.0, w, 1.0));
+            .setFrame(top_rect(34.0, 0.0, 33.0, w, 1.0));
 
-        let composer_h = 56.0;
-        let transcript_h = (body_h - hist_offset - composer_h).max(140.0);
+        let composer_h = self
+            .pane_layout
+            .clamped()
+            .chat_input_height
+            .min((body_h - hist_offset - 100.0).max(68.0));
+        let transcript_h = (body_h - hist_offset - composer_h).max(100.0);
         self.chat_ui.transcript_scroll.setFrame(top_rect(
             body_h,
             4.0,
@@ -2861,9 +3094,16 @@ impl AppController {
             transcript_h,
         ));
         let composer_top = hist_offset + transcript_h;
-        self.chat_ui
-            .composer_top_line
-            .setFrame(top_rect(body_h, 0.0, composer_top, w, 1.0));
+        set_split_bar_frame(
+            &self.chat_ui.composer_split_bar,
+            top_rect(
+                body_h,
+                0.0,
+                composer_top - SPLITTER_HIT_HEIGHT * 0.5,
+                w,
+                SPLITTER_HIT_HEIGHT,
+            ),
+        );
         self.chat_ui.composer_surface.setFrame(top_rect(
             body_h,
             0.0,
@@ -2876,14 +3116,18 @@ impl AppController {
             4.0,
             composer_top + 6.0,
             w - 84.0,
-            composer_h - 12.0,
+            (composer_h - 12.0).max(40.0),
         ));
         self.chat_ui
             .input_placeholder
-            .setFrame(top_rect(body_h, 18.0, composer_top + 16.0, 200.0, 20.0));
-        self.chat_ui
-            .send_btn
-            .setFrame(top_rect(body_h, w - 74.0, composer_top + 13.0, 62.0, 30.0));
+            .setFrame(top_rect(body_h, 18.0, composer_top + 15.0, 200.0, 20.0));
+        self.chat_ui.send_btn.setFrame(top_rect(
+            body_h,
+            w - 74.0,
+            composer_top + (composer_h - 28.0) * 0.5,
+            62.0,
+            28.0,
+        ));
     }
 }
 

@@ -1,26 +1,166 @@
-//! macOS 原生 AppKit (`objc2-app-kit`) 扁平化控件与上下分栏排版辅助函数。
+//! macOS 原生 AppKit (`objc2-app-kit`) 极简淡雅色调控件与可拖拽分栏辅助函数。
 
 #![cfg(target_os = "macos")]
 #![allow(clippy::too_many_arguments)]
 
+use std::cell::Cell;
+
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
-use objc2::{msg_send, ClassType, MainThreadMarker};
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezelStyle, NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSImage, NSPasteboard, NSPasteboardTypeString, NSPopUpButton,
-    NSScrollView, NSSecureTextField, NSSlider, NSTextField, NSTextView, NSView,
+    NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage, NSPasteboard,
+    NSPasteboardTypeString, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider, NSTextField,
+    NSTextView, NSView,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
+
+pub const SPLITTER_HIT_HEIGHT: f64 = 7.0;
+
+/// 生成低饱和、柔和淡雅的自适应文本/线条颜色（严禁使用突兀的高对比或高饱和强调色）。
+pub fn pale_ink(alpha: f64) -> Retained<NSColor> {
+    NSColor::labelColor().colorWithAlphaComponent(alpha as CGFloat)
+}
 
 /// 将以顶部为原点的 `(x, top_y, width, height)` 转换为 AppKit 默认左下角原点的 `NSRect`。
 pub fn top_rect(parent_height: f64, x: f64, top_y: f64, width: f64, height: f64) -> NSRect {
     let y = (parent_height - top_y - height).max(0.0);
-    NSRect::new(NSPoint::new(x.max(0.0), y), NSSize::new(width.max(1.0), height.max(1.0)))
+    NSRect::new(
+        NSPoint::new(x.max(0.0), y),
+        NSSize::new(width.max(1.0), height.max(1.0)),
+    )
 }
 
-/// 创建静态文本标签 (`NSTextField` 只读无边框)。
+pub struct SplitHandleIvars {
+    splitter_id: Cell<u8>,
+    last_screen_y: Cell<f64>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = SplitHandleIvars]
+    #[name = "TTreeSplitHandleView"]
+    pub struct SplitHandleView;
+
+    unsafe impl NSObjectProtocol for SplitHandleView {}
+
+    impl SplitHandleView {
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> Bool {
+            Bool::NO
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> Bool {
+            Bool::YES
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let bounds = self.bounds();
+            #[allow(deprecated)]
+            let cursor = NSCursor::resizeUpDownCursor();
+            self.addCursorRect_cursor(bounds, &cursor);
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            let loc = NSEvent::mouseLocation();
+            self.ivars().last_screen_y.set(loc.y);
+            #[allow(deprecated)]
+            NSCursor::resizeUpDownCursor().push();
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, _event: &NSEvent) {
+            let loc = NSEvent::mouseLocation();
+            let prev_y = self.ivars().last_screen_y.get();
+            let delta_down = prev_y - loc.y;
+            if delta_down.abs() >= 0.5 {
+                self.ivars().last_screen_y.set(loc.y);
+                let id = self.ivars().splitter_id.get();
+                crate::dispatch_splitter_drag(id, delta_down);
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            NSCursor::pop_class();
+            crate::dispatch_splitter_drag_end();
+        }
+    }
+);
+
+/// 可拖拽的水平分栏手柄组件（含命中区、1px 极淡分隔线、中央微弱握把）。
+pub struct SplitBarWidget {
+    pub handle: Retained<SplitHandleView>,
+    pub line: Retained<NSBox>,
+    pub grip: Retained<NSBox>,
+}
+
+/// 创建可上下拖拽调整栏高的水平分栏条 (`splitter_id` 标识对应分栏)。
+pub fn make_split_bar(mtm: MainThreadMarker, frame: NSRect, splitter_id: u8) -> SplitBarWidget {
+    let handle = mtm.alloc::<SplitHandleView>().set_ivars(SplitHandleIvars {
+        splitter_id: Cell::new(splitter_id),
+        last_screen_y: Cell::new(0.0),
+    });
+    let handle: Retained<SplitHandleView> = unsafe { msg_send![super(handle), initWithFrame: frame] };
+
+    let line = make_divider(
+        mtm,
+        NSRect::new(
+            NSPoint::new(0.0, (frame.size.height - 1.0) * 0.5),
+            NSSize::new(frame.size.width, 1.0),
+        ),
+    );
+    let grip_w = 26.0;
+    let grip_h = 2.0;
+    let grip = NSBox::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(
+            NSPoint::new(
+                ((frame.size.width - grip_w) * 0.5).max(0.0),
+                ((frame.size.height - grip_h) * 0.5).max(0.0),
+            ),
+            NSSize::new(grip_w, grip_h),
+        ),
+    );
+    grip.setBoxType(NSBoxType::Custom);
+    grip.setBorderWidth(0.0);
+    grip.setCornerRadius(1.0);
+    grip.setFillColor(&pale_ink(0.11));
+    grip.setContentViewMargins(CGSize::new(0.0, 0.0));
+
+    handle.addSubview(&line);
+    handle.addSubview(&grip);
+
+    SplitBarWidget { handle, line, grip }
+}
+
+/// 更新水平分栏条及其内部细线与握把的位置。
+pub fn set_split_bar_frame(bar: &SplitBarWidget, frame: NSRect) {
+    bar.handle.setFrame(frame);
+    let h = frame.size.height;
+    let w = frame.size.width;
+    bar.line.setFrame(NSRect::new(
+        NSPoint::new(0.0, ((h - 1.0) * 0.5).max(0.0)),
+        NSSize::new(w.max(1.0), 1.0),
+    ));
+    let grip_w = 26.0;
+    let grip_h = 2.0;
+    bar.grip.setFrame(NSRect::new(
+        NSPoint::new(((w - grip_w) * 0.5).max(0.0), ((h - grip_h) * 0.5).max(0.0)),
+        NSSize::new(grip_w, grip_h),
+    ));
+    if let Some(win) = bar.handle.window() {
+        win.invalidateCursorRectsForView(&bar.handle);
+    }
+}
+
+/// 创建静态文本标签 (`NSTextField` 只读无边框，采用柔和淡雅字体色)。
 pub fn make_label(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -43,26 +183,26 @@ pub fn make_label(
     };
     label.setFont(Some(&font));
     let color = if secondary {
-        NSColor::secondaryLabelColor()
+        pale_ink(0.38)
     } else {
-        NSColor::labelColor()
+        pale_ink(0.72)
     };
     label.setTextColor(Some(&color));
     label
 }
 
-/// 创建 1px 极淡分隔线（用于上下分栏与左右侧栏分隔）。
+/// 创建 1px 极淡分隔线。
 pub fn make_divider(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSBox> {
     let line = NSBox::initWithFrame(mtm.alloc(), frame);
     line.setBoxType(NSBoxType::Custom);
     line.setBorderWidth(0.0);
     line.setCornerRadius(0.0);
-    line.setFillColor(&NSColor::separatorColor());
+    line.setFillColor(&pale_ink(0.055));
     line.setContentViewMargins(CGSize::new(0.0, 0.0));
     line
 }
 
-/// 创建扁平色块背景容器 (`NSBox` 无边框)。
+/// 创建极淡半透明色块背景容器 (`NSBox` 无边框，将传入 alpha 自动缩放到柔和区间)。
 pub fn make_surface_box(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -73,12 +213,13 @@ pub fn make_surface_box(
     surface.setBoxType(NSBoxType::Custom);
     surface.setBorderWidth(0.0);
     surface.setCornerRadius(corner_radius as CGFloat);
-    surface.setFillColor(&NSColor::controlBackgroundColor().colorWithAlphaComponent(alpha as CGFloat));
+    let soft_alpha = (alpha * 0.08).clamp(0.015, 0.06);
+    surface.setFillColor(&pale_ink(soft_alpha));
     surface.setContentViewMargins(CGSize::new(0.0, 0.0));
     surface
 }
 
-/// 创建圆角按钮 (`NSButton`)。
+/// 创建柔和淡色圆角按钮 (`NSButton`，无突兀高亮蓝色)。
 pub fn make_button(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -89,10 +230,18 @@ pub fn make_button(
 ) -> Retained<NSButton> {
     unsafe {
         let btn = NSButton::initWithFrame(mtm.alloc(), frame);
+        btn.setBordered(false);
+        btn.setWantsLayer(true);
         btn.setTitle(&NSString::from_str(title));
-        #[allow(deprecated)]
-        btn.setBezelStyle(NSBezelStyle::Rounded);
-        btn.setFont(Some(&NSFont::systemFontOfSize(12.5)));
+        btn.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        let tint = pale_ink(0.68);
+        let _: () = msg_send![&*btn, setContentTintColor: Some(&*tint)];
+        if let Some(layer) = btn.layer() {
+            layer.setCornerRadius(6.0);
+            let bg = pale_ink(0.05);
+            let cg_bg: *const AnyObject = msg_send![&*bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg_bg];
+        }
         btn.setTag(tag);
         btn.setTarget(Some(target));
         btn.setAction(Some(action));
@@ -100,7 +249,7 @@ pub fn make_button(
     }
 }
 
-/// 创建无边框扁平文字按钮（用于「复制」「完成」、顶部模式切换、设置左侧导航）。
+/// 创建无边框扁平文字按钮（全部使用淡雅灰白/灰黑层级，不使用高亮色）。
 pub fn make_flat_button(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -123,9 +272,9 @@ pub fn make_flat_button(
         };
         btn.setFont(Some(&font));
         let color = if accent {
-            NSColor::controlAccentColor()
+            pale_ink(0.62)
         } else {
-            NSColor::secondaryLabelColor()
+            pale_ink(0.42)
         };
         let _: () = msg_send![&*btn, setContentTintColor: Some(&*color)];
         btn.setTag(tag);
@@ -135,7 +284,7 @@ pub fn make_flat_button(
     }
 }
 
-/// 创建右上角功能区 SF Symbols 图标按钮（如 `pin`, `gearshape`, `square.and.pencil`）。
+/// 创建右上角功能区 SF Symbols 图标按钮（淡雅色调）。
 pub fn make_symbol_button(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -158,7 +307,7 @@ pub fn make_symbol_button(
     }
 }
 
-/// 更新图标按钮的 SF Symbol 与激活态颜色。
+/// 更新图标按钮的 SF Symbol 与淡雅激活态颜色（不使用刺眼蓝色）。
 pub fn set_button_symbol(
     btn: &NSButton,
     symbol_name: &str,
@@ -179,31 +328,27 @@ pub fn set_button_symbol(
             btn.setTitle(&NSString::from_str(fallback_title));
         }
         let tint = if active {
-            NSColor::controlAccentColor()
+            pale_ink(0.75)
         } else {
-            NSColor::secondaryLabelColor()
+            pale_ink(0.40)
         };
         let _: () = msg_send![btn, setContentTintColor: Some(&*tint)];
     }
 }
 
-/// 设置扁平按钮的文字颜色（用于激活态切换）。
-pub fn set_flat_button_active(btn: &NSButton, active: bool, is_accent: bool) {
+/// 设置扁平按钮的文字颜色（用于激活态切换，保持淡雅克制）。
+pub fn set_flat_button_active(btn: &NSButton, active: bool, _is_accent: bool) {
     unsafe {
         let tint = if active {
-            if is_accent {
-                NSColor::controlAccentColor()
-            } else {
-                NSColor::labelColor()
-            }
+            pale_ink(0.76)
         } else {
-            NSColor::secondaryLabelColor()
+            pale_ink(0.38)
         };
         let _: () = msg_send![btn, setContentTintColor: Some(&*tint)];
     }
 }
 
-/// 创建复选框按钮 (`NSButtonType::Switch`)。
+/// 创建复选框按钮 (`NSButtonType::Switch`，弱化色调)。
 pub fn make_checkbox(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -217,12 +362,14 @@ pub fn make_checkbox(
         let btn = NSButton::initWithFrame(mtm.alloc(), frame);
         btn.setButtonType(NSButtonType::Switch);
         btn.setTitle(&NSString::from_str(title));
-        btn.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        btn.setFont(Some(&NSFont::systemFontOfSize(12.5)));
+        let tint = pale_ink(0.55);
+        let _: () = msg_send![&*btn, setContentTintColor: Some(&*tint)];
         btn.setState(if checked {
             NSControlStateValueOn
         } else {
             NSControlStateValueOff
-        });
+        } );
         btn.setTag(tag);
         btn.setTarget(Some(target));
         btn.setAction(Some(action));
@@ -230,7 +377,7 @@ pub fn make_checkbox(
     }
 }
 
-/// 创建下拉选择框 (`NSPopUpButton`)；`bordered = false` 时呈原版扁平语言选择条风格。
+/// 创建下拉选择框 (`NSPopUpButton`)；`bordered = false` 时呈极简淡色语言选择条风格。
 pub fn make_popup(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -244,12 +391,10 @@ pub fn make_popup(
     unsafe {
         let popup = NSPopUpButton::initWithFrame_pullsDown(mtm.alloc(), frame, false);
         popup.setBordered(bordered);
-        let font = if bordered {
-            NSFont::systemFontOfSize(12.5)
-        } else {
-            NSFont::boldSystemFontOfSize(13.0)
-        };
+        let font = NSFont::systemFontOfSize(12.5);
         popup.setFont(Some(&font));
+        let tint = pale_ink(0.62);
+        let _: () = msg_send![&*popup, setContentTintColor: Some(&*tint)];
         for item in items {
             popup.addItemWithTitle(&NSString::from_str(item));
         }
@@ -263,7 +408,7 @@ pub fn make_popup(
     }
 }
 
-/// 创建单行可编辑输入框 (`NSTextField`)。
+/// 创建单行可编辑输入框 (`NSTextField`，柔和低对比背景)。
 pub fn make_text_field(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -275,13 +420,19 @@ pub fn make_text_field(
     field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     field.setEditable(true);
     field.setSelectable(true);
-    field.setBezeled(true);
+    field.setBezeled(false);
     field.setDrawsBackground(true);
+    field.setBackgroundColor(Some(&pale_ink(0.045)));
+    field.setTextColor(Some(&pale_ink(0.78)));
     field.setFont(Some(&NSFont::systemFontOfSize(12.5)));
+    field.setWantsLayer(true);
+    if let Some(layer) = field.layer() {
+        layer.setCornerRadius(5.0);
+    }
     field
 }
 
-/// 创建单行密码/密钥输入框 (`NSSecureTextField`)。
+/// 创建单行密码/密钥输入框 (`NSSecureTextField`，柔和低对比背景)。
 pub fn make_secure_field(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -291,9 +442,15 @@ pub fn make_secure_field(
     field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     field.setEditable(true);
     field.setSelectable(true);
-    field.setBezeled(true);
+    field.setBezeled(false);
     field.setDrawsBackground(true);
+    field.setBackgroundColor(Some(&pale_ink(0.045)));
+    field.setTextColor(Some(&pale_ink(0.78)));
     field.setFont(Some(&NSFont::systemFontOfSize(12.5)));
+    field.setWantsLayer(true);
+    if let Some(layer) = field.layer() {
+        layer.setCornerRadius(5.0);
+    }
     field
 }
 
@@ -314,6 +471,8 @@ pub fn make_slider(
         slider.setMaxValue(max);
         slider.setDoubleValue(value);
         slider.setContinuous(true);
+        let tint = pale_ink(0.50);
+        let _: () = msg_send![&*slider, setTrackFillColor: Some(&*tint)];
         slider.setTag(tag);
         slider.setTarget(Some(target));
         slider.setAction(Some(action));
@@ -321,7 +480,7 @@ pub fn make_slider(
     }
 }
 
-/// 创建无边框、通透扁平的多行 `NSTextView`（完全贴合原版上下分栏输入框与译文框视觉）。
+/// 创建无边框、通透扁平的多行 `NSTextView`（采用淡雅文字与柔和光标色）。
 pub fn make_scrollable_text_view(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -343,7 +502,9 @@ pub fn make_scrollable_text_view(
         text_view.setRichText(false);
         text_view.setDrawsBackground(false);
         text_view.setFont(Some(&NSFont::systemFontOfSize(font_size as CGFloat)));
-        text_view.setTextColor(Some(&NSColor::labelColor()));
+        text_view.setTextColor(Some(&pale_ink(0.78)));
+        let insertion_color = pale_ink(0.55);
+        text_view.setInsertionPointColor(Some(&insertion_color));
         text_view.setVerticallyResizable(true);
         text_view.setHorizontallyResizable(false);
         let inset = NSSize::new(12.0, 10.0);
@@ -371,19 +532,19 @@ pub fn get_text_view_string(tv: &NSTextView) -> String {
     tv.string().to_string()
 }
 
-/// 设置 `NSTextView` 的纯文本与色调（区分占位符灰字与正文颜色）。
+/// 设置 `NSTextView` 的纯文本与淡雅色调（区分占位符浅灰字与柔和正文颜色）。
 pub fn set_text_view_styled(tv: &NSTextView, text: &str, is_muted: bool) {
     let s = NSString::from_str(text);
     tv.setString(&s);
     let color = if is_muted {
-        NSColor::tertiaryLabelColor()
+        pale_ink(0.28)
     } else {
-        NSColor::labelColor()
+        pale_ink(0.78)
     };
     tv.setTextColor(Some(&color));
 }
 
-/// 设置 `NSTextView` 的纯文本内容（默认正文色）。
+/// 设置 `NSTextView` 的纯文本内容（默认柔和正文色）。
 pub fn set_text_view_string(tv: &NSTextView, text: &str) {
     set_text_view_styled(tv, text, false);
 }
@@ -394,7 +555,7 @@ pub fn append_text_view_string(tv: &NSTextView, delta: &str, scroll_to_end: bool
     current.push_str(delta);
     let s = NSString::from_str(&current);
     tv.setString(&s);
-    tv.setTextColor(Some(&NSColor::labelColor()));
+    tv.setTextColor(Some(&pale_ink(0.78)));
     if scroll_to_end {
         let len = s.length();
         tv.scrollRangeToVisible(NSRange::new(len, 0));

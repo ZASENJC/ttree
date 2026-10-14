@@ -11,8 +11,39 @@ pub const MAX_API_KEY_BYTES: usize = 16 * 1024;
 pub const PANEL_OPACITY_MIN: f64 = 0.35;
 pub const PANEL_OPACITY_MAX: f64 = 1.0;
 
-pub const WINDOW_MIN_WIDTH: f64 = 480.0;
-pub const WINDOW_MIN_HEIGHT: f64 = 340.0;
+pub const TOP_BAR_HEIGHT: f64 = 38.0;
+
+pub const WINDOW_MIN_WIDTH: f64 = 380.0;
+pub const WINDOW_MAX_WIDTH: f64 = 880.0;
+pub const WINDOW_DEFAULT_WIDTH: f64 = 480.0;
+
+pub const SOURCE_PANE_MIN_HEIGHT: f64 = 68.0;
+pub const SOURCE_PANE_MAX_HEIGHT: f64 = 240.0;
+pub const SOURCE_PANE_DEFAULT_HEIGHT: f64 = 104.0;
+
+pub const LANG_PANE_MIN_HEIGHT: f64 = 30.0;
+pub const LANG_PANE_MAX_HEIGHT: f64 = 56.0;
+pub const LANG_PANE_DEFAULT_HEIGHT: f64 = 34.0;
+
+pub const WEB_PANE_MIN_HEIGHT: f64 = 76.0;
+pub const WEB_PANE_MAX_HEIGHT: f64 = 400.0;
+pub const WEB_PANE_DEFAULT_HEIGHT: f64 = 162.0;
+
+pub const AI_PANE_MIN_HEIGHT: f64 = 76.0;
+pub const AI_PANE_MAX_HEIGHT: f64 = 400.0;
+pub const AI_PANE_DEFAULT_HEIGHT: f64 = 162.0;
+
+pub const CHAT_INPUT_MIN_HEIGHT: f64 = 68.0;
+pub const CHAT_INPUT_MAX_HEIGHT: f64 = 220.0;
+pub const CHAT_INPUT_DEFAULT_HEIGHT: f64 = 96.0;
+
+pub const WINDOW_MIN_HEIGHT: f64 =
+    TOP_BAR_HEIGHT + SOURCE_PANE_MIN_HEIGHT + LANG_PANE_MIN_HEIGHT + WEB_PANE_MIN_HEIGHT;
+pub const WINDOW_MAX_HEIGHT: f64 = TOP_BAR_HEIGHT
+    + SOURCE_PANE_MAX_HEIGHT
+    + LANG_PANE_MAX_HEIGHT
+    + WEB_PANE_MAX_HEIGHT
+    + AI_PANE_MAX_HEIGHT;
 
 /// AI 引擎后端类型：支持云端 OpenAI 兼容、本机 Ollama/LM Studio/MLX 服务、以及直接加载 GGUF。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -221,6 +252,198 @@ impl AppearanceConfig {
     }
 }
 
+/// 窗口宽度与各分栏高度记忆配置（每一栏均带有严格的最小/最大高度限制）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PaneLayoutConfig {
+    pub width: f64,
+    pub source_height: f64,
+    pub lang_height: f64,
+    pub web_height: f64,
+    pub ai_height: f64,
+    pub chat_input_height: f64,
+}
+
+impl Default for PaneLayoutConfig {
+    fn default() -> Self {
+        Self {
+            width: WINDOW_DEFAULT_WIDTH,
+            source_height: SOURCE_PANE_DEFAULT_HEIGHT,
+            lang_height: LANG_PANE_DEFAULT_HEIGHT,
+            web_height: WEB_PANE_DEFAULT_HEIGHT,
+            ai_height: AI_PANE_DEFAULT_HEIGHT,
+            chat_input_height: CHAT_INPUT_DEFAULT_HEIGHT,
+        }
+    }
+}
+
+fn clamp_dimension(val: f64, min: f64, max: f64, fallback: f64) -> f64 {
+    if !val.is_finite() {
+        return fallback;
+    }
+    val.clamp(min, max)
+}
+
+impl PaneLayoutConfig {
+    pub fn clamped(self) -> Self {
+        Self {
+            width: clamp_dimension(
+                self.width,
+                WINDOW_MIN_WIDTH,
+                WINDOW_MAX_WIDTH,
+                WINDOW_DEFAULT_WIDTH,
+            ),
+            source_height: clamp_dimension(
+                self.source_height,
+                SOURCE_PANE_MIN_HEIGHT,
+                SOURCE_PANE_MAX_HEIGHT,
+                SOURCE_PANE_DEFAULT_HEIGHT,
+            ),
+            lang_height: clamp_dimension(
+                self.lang_height,
+                LANG_PANE_MIN_HEIGHT,
+                LANG_PANE_MAX_HEIGHT,
+                LANG_PANE_DEFAULT_HEIGHT,
+            ),
+            web_height: clamp_dimension(
+                self.web_height,
+                WEB_PANE_MIN_HEIGHT,
+                WEB_PANE_MAX_HEIGHT,
+                WEB_PANE_DEFAULT_HEIGHT,
+            ),
+            ai_height: clamp_dimension(
+                self.ai_height,
+                AI_PANE_MIN_HEIGHT,
+                AI_PANE_MAX_HEIGHT,
+                AI_PANE_DEFAULT_HEIGHT,
+            ),
+            chat_input_height: clamp_dimension(
+                self.chat_input_height,
+                CHAT_INPUT_MIN_HEIGHT,
+                CHAT_INPUT_MAX_HEIGHT,
+                CHAT_INPUT_DEFAULT_HEIGHT,
+            ),
+        }
+    }
+
+    pub fn min_window_height(ai_enabled: bool) -> f64 {
+        let base =
+            TOP_BAR_HEIGHT + SOURCE_PANE_MIN_HEIGHT + LANG_PANE_MIN_HEIGHT + WEB_PANE_MIN_HEIGHT;
+        if ai_enabled {
+            base + AI_PANE_MIN_HEIGHT
+        } else {
+            base
+        }
+    }
+
+    pub fn max_window_height(ai_enabled: bool) -> f64 {
+        let base =
+            TOP_BAR_HEIGHT + SOURCE_PANE_MAX_HEIGHT + LANG_PANE_MAX_HEIGHT + WEB_PANE_MAX_HEIGHT;
+        if ai_enabled {
+            base + AI_PANE_MAX_HEIGHT
+        } else {
+            base
+        }
+    }
+
+    /// 计算翻译视图下的总窗口高度（严格等于顶栏 + 各启用分栏高度之和）。
+    pub fn translate_window_height(&self, ai_enabled: bool) -> f64 {
+        let c = self.clamped();
+        let base = TOP_BAR_HEIGHT + c.source_height + c.lang_height + c.web_height;
+        if ai_enabled {
+            base + c.ai_height
+        } else {
+            base
+        }
+    }
+
+    pub fn adjust_source_height(&mut self, delta: f64) {
+        self.source_height = clamp_dimension(
+            self.source_height + delta,
+            SOURCE_PANE_MIN_HEIGHT,
+            SOURCE_PANE_MAX_HEIGHT,
+            SOURCE_PANE_DEFAULT_HEIGHT,
+        );
+    }
+
+    pub fn adjust_lang_height(&mut self, delta: f64) {
+        self.lang_height = clamp_dimension(
+            self.lang_height + delta,
+            LANG_PANE_MIN_HEIGHT,
+            LANG_PANE_MAX_HEIGHT,
+            LANG_PANE_DEFAULT_HEIGHT,
+        );
+    }
+
+    pub fn adjust_web_height(&mut self, delta: f64) {
+        self.web_height = clamp_dimension(
+            self.web_height + delta,
+            WEB_PANE_MIN_HEIGHT,
+            WEB_PANE_MAX_HEIGHT,
+            WEB_PANE_DEFAULT_HEIGHT,
+        );
+    }
+
+    pub fn adjust_ai_height(&mut self, delta: f64) {
+        self.ai_height = clamp_dimension(
+            self.ai_height + delta,
+            AI_PANE_MIN_HEIGHT,
+            AI_PANE_MAX_HEIGHT,
+            AI_PANE_DEFAULT_HEIGHT,
+        );
+    }
+
+    pub fn adjust_chat_input_height(&mut self, delta: f64) {
+        self.chat_input_height = clamp_dimension(
+            self.chat_input_height + delta,
+            CHAT_INPUT_MIN_HEIGHT,
+            CHAT_INPUT_MAX_HEIGHT,
+            CHAT_INPUT_DEFAULT_HEIGHT,
+        );
+    }
+
+    /// 当用户拖拽窗口边缘调整宽度/高度时，同步更新宽度并按每一栏的最小/最大限制分配高度。
+    pub fn apply_window_resize(&mut self, new_width: f64, new_height: f64, ai_enabled: bool) {
+        *self = self.clamped();
+        self.width = clamp_dimension(
+            new_width,
+            WINDOW_MIN_WIDTH,
+            WINDOW_MAX_WIDTH,
+            WINDOW_DEFAULT_WIDTH,
+        );
+        let min_h = Self::min_window_height(ai_enabled);
+        let max_h = Self::max_window_height(ai_enabled);
+        let target_h = clamp_dimension(
+            new_height,
+            min_h,
+            max_h,
+            self.translate_window_height(ai_enabled),
+        );
+        let mut rem = target_h - self.translate_window_height(ai_enabled);
+        if rem.abs() < 0.5 {
+            return;
+        }
+
+        if ai_enabled {
+            let old = self.ai_height;
+            self.adjust_ai_height(rem);
+            rem -= self.ai_height - old;
+        }
+        if rem.abs() >= 0.5 {
+            let old = self.web_height;
+            self.adjust_web_height(rem);
+            rem -= self.web_height - old;
+        }
+        if rem.abs() >= 0.5 {
+            let old = self.source_height;
+            self.adjust_source_height(rem);
+            rem -= self.source_height - old;
+        }
+        if rem.abs() >= 0.5 {
+            self.adjust_lang_height(rem);
+        }
+    }
+}
+
 pub fn validate_field_len(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
     if value.len() > max_bytes {
         return Err(format!("{label}超出 {max_bytes} 字节上限"));
@@ -295,5 +518,34 @@ mod tests {
         assert!(normalize_base_url("http://example.com/v1").is_err());
         assert!(normalize_base_url("file:///etc/passwd").is_err());
         assert!(normalize_base_url("https://user:pass@example.com/v1").is_err());
+    }
+
+    #[test]
+    fn clamps_pane_heights_and_window_width_within_bounds() {
+        let mut layout = PaneLayoutConfig {
+            width: 120.0,
+            source_height: 10.0,
+            lang_height: 100.0,
+            web_height: 999.0,
+            ai_height: 20.0,
+            chat_input_height: 500.0,
+        }
+        .clamped();
+        assert_eq!(layout.width, WINDOW_MIN_WIDTH);
+        assert_eq!(layout.source_height, SOURCE_PANE_MIN_HEIGHT);
+        assert_eq!(layout.lang_height, LANG_PANE_MAX_HEIGHT);
+        assert_eq!(layout.web_height, WEB_PANE_MAX_HEIGHT);
+        assert_eq!(layout.ai_height, AI_PANE_MIN_HEIGHT);
+        assert_eq!(layout.chat_input_height, CHAT_INPUT_MAX_HEIGHT);
+
+        layout.adjust_source_height(1000.0);
+        assert_eq!(layout.source_height, SOURCE_PANE_MAX_HEIGHT);
+
+        layout.apply_window_resize(520.0, 200.0, true);
+        assert_eq!(layout.width, 520.0);
+        assert_eq!(
+            layout.translate_window_height(true),
+            PaneLayoutConfig::min_window_height(true)
+        );
     }
 }

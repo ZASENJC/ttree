@@ -15,7 +15,7 @@ use ttree_core::config::{
 };
 use ttree_core::{
     normalize_base_url, AiBackendKind, AiTranslationConfig, AppearanceConfig, ChatAiConfig,
-    ShortcutConfig, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    PaneLayoutConfig, ShortcutConfig, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 
 pub const APP_BUNDLE_ID: &str = "com.samwstu.ttree";
@@ -28,6 +28,7 @@ struct CachedSettings {
     chat_ai: ChatAiConfig,
     shortcuts: ShortcutConfig,
     appearance: AppearanceConfig,
+    pane_layout: PaneLayoutConfig,
     window_size: (f64, f64),
 }
 
@@ -55,7 +56,9 @@ impl SettingsStore {
         let chat_ai = load_chat_ai(&raw_map);
         let shortcuts = load_shortcuts(&raw_map);
         let appearance = load_appearance(&raw_map);
-        let window_size = load_window_size(&raw_map).unwrap_or((480.0, 500.0));
+        let pane_layout = load_pane_layout(&raw_map);
+        let default_h = pane_layout.translate_window_height(ai_translate.enabled);
+        let window_size = load_window_size(&raw_map).unwrap_or((pane_layout.width, default_h));
 
         Self {
             path,
@@ -65,6 +68,7 @@ impl SettingsStore {
                 chat_ai,
                 shortcuts,
                 appearance,
+                pane_layout,
                 window_size,
             }),
         }
@@ -98,6 +102,13 @@ impl SettingsStore {
 
     pub fn appearance(&self) -> AppearanceConfig {
         self.cache.read().expect("settings lock poisoned").appearance
+    }
+
+    pub fn pane_layout(&self) -> PaneLayoutConfig {
+        self.cache
+            .read()
+            .expect("settings lock poisoned")
+            .pane_layout
     }
 
     pub fn window_size(&self) -> (f64, f64) {
@@ -274,6 +285,50 @@ impl SettingsStore {
         Ok(())
     }
 
+    pub fn save_pane_layout(&self, layout: PaneLayoutConfig) {
+        let clamped = layout.clamped();
+        if let Ok(mut guard) = self.cache.write() {
+            let cur = guard.pane_layout;
+            if (cur.width - clamped.width).abs() < 0.5
+                && (cur.source_height - clamped.source_height).abs() < 0.5
+                && (cur.lang_height - clamped.lang_height).abs() < 0.5
+                && (cur.web_height - clamped.web_height).abs() < 0.5
+                && (cur.ai_height - clamped.ai_height).abs() < 0.5
+                && (cur.chat_input_height - clamped.chat_input_height).abs() < 0.5
+            {
+                return;
+            }
+            let win_h = clamped.translate_window_height(guard.ai_translate.enabled);
+            guard.pane_layout = clamped;
+            guard.window_size = (clamped.width, win_h);
+            guard
+                .raw_map
+                .insert("window.width".into(), Value::from(clamped.width));
+            guard
+                .raw_map
+                .insert("window.height".into(), Value::from(win_h));
+            guard.raw_map.insert(
+                "layout.source_height".into(),
+                Value::from(clamped.source_height),
+            );
+            guard.raw_map.insert(
+                "layout.lang_height".into(),
+                Value::from(clamped.lang_height),
+            );
+            guard
+                .raw_map
+                .insert("layout.web_height".into(), Value::from(clamped.web_height));
+            guard
+                .raw_map
+                .insert("layout.ai_height".into(), Value::from(clamped.ai_height));
+            guard.raw_map.insert(
+                "layout.chat_input_height".into(),
+                Value::from(clamped.chat_input_height),
+            );
+            let _ = write_json_map(&self.path, &guard.raw_map);
+        }
+    }
+
     pub fn save_window_size(&self, width: f64, height: f64) {
         let w = width.max(WINDOW_MIN_WIDTH);
         let h = height.max(WINDOW_MIN_HEIGHT);
@@ -435,6 +490,29 @@ fn load_appearance(map: &Map<String, Value>) -> AppearanceConfig {
     cfg
 }
 
+fn load_pane_layout(map: &Map<String, Value>) -> PaneLayoutConfig {
+    let mut cfg = PaneLayoutConfig::default();
+    if let Some(w) = map.get("window.width").and_then(Value::as_f64) {
+        cfg.width = w;
+    }
+    if let Some(v) = map.get("layout.source_height").and_then(Value::as_f64) {
+        cfg.source_height = v;
+    }
+    if let Some(v) = map.get("layout.lang_height").and_then(Value::as_f64) {
+        cfg.lang_height = v;
+    }
+    if let Some(v) = map.get("layout.web_height").and_then(Value::as_f64) {
+        cfg.web_height = v;
+    }
+    if let Some(v) = map.get("layout.ai_height").and_then(Value::as_f64) {
+        cfg.ai_height = v;
+    }
+    if let Some(v) = map.get("layout.chat_input_height").and_then(Value::as_f64) {
+        cfg.chat_input_height = v;
+    }
+    cfg.clamped()
+}
+
 fn load_window_size(map: &Map<String, Value>) -> Option<(f64, f64)> {
     let w = map.get("window.width").and_then(Value::as_f64)?;
     let h = map.get("window.height").and_then(Value::as_f64)?;
@@ -460,6 +538,16 @@ mod tests {
         cfg.model = "gpt-4o-mini".to_string();
         store.save_ai_translation(&cfg).unwrap();
 
+        let custom_layout = PaneLayoutConfig {
+            width: 560.0,
+            source_height: 140.0,
+            lang_height: 38.0,
+            web_height: 210.0,
+            ai_height: 195.0,
+            chat_input_height: 120.0,
+        };
+        store.save_pane_layout(custom_layout);
+
         let reloaded = SettingsStore::open_at(tmp.path().to_path_buf());
         let loaded_cfg = reloaded.ai_translation_for_request();
         assert_eq!(loaded_cfg.backend, AiBackendKind::OpenAiCompatible);
@@ -467,5 +555,8 @@ mod tests {
         assert_eq!(loaded_cfg.api_key, "sk-test-json-123");
         assert!(loaded_cfg.has_api_key);
         assert_eq!(loaded_cfg.model, "gpt-4o-mini");
+
+        let loaded_layout = reloaded.pane_layout();
+        assert_eq!(loaded_layout, custom_layout);
     }
 }
