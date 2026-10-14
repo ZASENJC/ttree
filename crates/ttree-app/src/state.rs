@@ -12,11 +12,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{sel, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSBox, NSButton, NSControlStateValueOn, NSFloatingWindowLevel,
+    NSApplication, NSBox, NSBoxType, NSButton, NSControlStateValueOn, NSFloatingWindowLevel,
     NSModalResponseOK, NSNormalWindowLevel, NSOpenPanel, NSPopUpButton, NSScreen, NSScrollView,
     NSSecureTextField, NSSlider, NSTextField, NSTextView, NSView, NSVisualEffectView, NSWindow,
 };
-use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_core_foundation::CGSize;
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -32,12 +33,16 @@ use ttree_platform_macos::hotkey::{parse_shortcut_config, ParsedShortcuts, Short
 use ttree_storage::{HistoryStore, SettingsStore};
 
 use crate::ui_helpers::{
-    add_subview, append_text_view_string, copy_to_pasteboard, get_field_string,
-    get_text_view_string, make_button, make_checkbox, make_divider, make_flat_button, make_label,
+    add_subview, append_text_view_string, clean_markdown_for_bubble, clear_subviews,
+    copy_to_pasteboard, get_field_string, get_text_view_string, make_button, make_checkbox,
+    make_divider, make_flat_button, make_flipped_view, make_label, make_multiline_input,
     make_popup, make_scrollable_text_view, make_secure_field, make_slider, make_split_bar,
-    make_surface_box, make_symbol_button, make_text_field, set_button_symbol, set_field_string,
-    set_flat_button_active, set_split_bar_frame, set_text_view_string, set_text_view_styled,
-    top_rect, SplitBarWidget, SPLITTER_HIT_HEIGHT,
+    make_surface_box, make_symbol_button, make_text_field, make_wrapping_label,
+    make_wrapping_message_label, pale_ink, set_button_symbol, set_field_string,
+    set_flat_button_active, set_label_alignment_right, set_multiline_input_frame,
+    set_multiline_input_hidden, set_split_bar_frame, set_text_view_string, set_text_view_styled,
+    set_wrapping_label_frame, top_rect, FlippedView, MultilineInputWidget, SplitBarWidget,
+    SPLITTER_HIT_HEIGHT,
 };
 
 const AUTO_TRANSLATE_DEBOUNCE: Duration = Duration::from_millis(650);
@@ -245,11 +250,14 @@ pub struct TranslateViewWidgets {
 pub struct ChatViewWidgets {
     pub root: Retained<NSView>,
     pub history_bar: Retained<NSView>,
+    pub history_surface: Retained<NSBox>,
+    pub history_label: Retained<NSTextField>,
     pub conv_popup: Retained<NSPopUpButton>,
+    pub new_conv_btn: Retained<NSButton>,
     pub clear_hist_btn: Retained<NSButton>,
     pub history_bottom_line: Retained<NSBox>,
     pub transcript_scroll: Retained<NSScrollView>,
-    pub transcript_tv: Retained<NSTextView>,
+    pub transcript_doc: Retained<FlippedView>,
     pub composer_split_bar: SplitBarWidget,
     pub composer_surface: Retained<NSBox>,
     pub input_scroll: Retained<NSScrollView>,
@@ -272,35 +280,80 @@ pub struct SettingsViewWidgets {
     pub sec_shortcuts: Retained<NSView>,
     pub sec_general: Retained<NSView>,
 
+    // Section 1: AI 翻译
+    pub t_head: Retained<NSTextField>,
     pub ai_enabled_chk: Retained<NSButton>,
+    pub t_lbl_backend: Retained<NSTextField>,
     pub ai_backend_popup: Retained<NSPopUpButton>,
+    pub btn_ai_def_url: Retained<NSButton>,
+    pub t_lbl_url: Retained<NSTextField>,
     pub ai_base_url_field: Retained<NSTextField>,
+    pub t_lbl_key: Retained<NSTextField>,
     pub ai_key_field: Retained<NSSecureTextField>,
     pub ai_key_status_label: Retained<NSTextField>,
+    pub btn_ai_clr_key: Retained<NSButton>,
+    pub t_lbl_model: Retained<NSTextField>,
     pub ai_model_field: Retained<NSTextField>,
+    pub btn_ai_discover: Retained<NSButton>,
     pub ai_discovered_popup: Retained<NSPopUpButton>,
+    pub t_lbl_gguf: Retained<NSTextField>,
     pub ai_gguf_field: Retained<NSTextField>,
+    pub btn_ai_gguf: Retained<NSButton>,
+    pub t_lbl_tok: Retained<NSTextField>,
     pub ai_tokenizer_field: Retained<NSTextField>,
-    pub ai_prompt_field: Retained<NSTextField>,
+    pub btn_ai_tok: Retained<NSButton>,
+    pub t_lbl_prompt: Retained<NSTextField>,
+    pub ai_prompt_input: MultilineInputWidget,
+    pub save_ai_btn: Retained<NSButton>,
 
+    // Section 2: AI 对话
+    pub c_head: Retained<NSTextField>,
+    pub btn_sync_from_trans: Retained<NSButton>,
+    pub c_lbl_backend: Retained<NSTextField>,
     pub chat_backend_popup: Retained<NSPopUpButton>,
+    pub btn_chat_def_url: Retained<NSButton>,
+    pub c_lbl_url: Retained<NSTextField>,
     pub chat_base_url_field: Retained<NSTextField>,
+    pub c_lbl_key: Retained<NSTextField>,
     pub chat_key_field: Retained<NSSecureTextField>,
     pub chat_key_status_label: Retained<NSTextField>,
+    pub btn_chat_clr_key: Retained<NSButton>,
+    pub c_lbl_model: Retained<NSTextField>,
     pub chat_model_field: Retained<NSTextField>,
+    pub btn_chat_discover: Retained<NSButton>,
     pub chat_discovered_popup: Retained<NSPopUpButton>,
+    pub c_lbl_gguf: Retained<NSTextField>,
     pub chat_gguf_field: Retained<NSTextField>,
-    pub chat_prompt_field: Retained<NSTextField>,
+    pub btn_chat_gguf: Retained<NSButton>,
+    pub c_lbl_prompt: Retained<NSTextField>,
+    pub chat_prompt_input: MultilineInputWidget,
+    pub save_chat_btn: Retained<NSButton>,
 
+    // Section 3: 快捷键
+    pub sc_head: Retained<NSTextField>,
+    pub btn_reset_sc: Retained<NSButton>,
+    pub sc_lbl_toggle: Retained<NSTextField>,
     pub sc_toggle_field: Retained<NSTextField>,
+    pub sc_lbl_ocr: Retained<NSTextField>,
     pub sc_ocr_field: Retained<NSTextField>,
+    pub sc_lbl_ai: Retained<NSTextField>,
     pub sc_ai_field: Retained<NSTextField>,
+    pub sc_lbl_sel_trans: Retained<NSTextField>,
     pub sc_sel_trans_field: Retained<NSTextField>,
+    pub sc_lbl_sel_ai: Retained<NSTextField>,
     pub sc_sel_ai_field: Retained<NSTextField>,
+    pub save_sc_btn: Retained<NSButton>,
+    pub sc_hint: Retained<NSTextField>,
 
+    // Section 4: 通用
+    pub gen_head: Retained<NSTextField>,
+    pub gen_lbl_opacity: Retained<NSTextField>,
     pub opacity_slider: Retained<NSSlider>,
     pub opacity_val_label: Retained<NSTextField>,
     pub autostart_chk: Retained<NSButton>,
+    pub ver_label: Retained<NSTextField>,
+    pub gen_hint: Retained<NSTextField>,
+
     pub settings_status_label: Retained<NSTextField>,
 }
 
@@ -455,11 +508,12 @@ impl AppController {
             top_rect(win_h, win_w - 76.0, 5.0, 28.0, 28.0),
             "clock.arrow.circlepath",
             "⏱",
-            "查看对话历史",
+            "展开/收起对话历史条",
             ActionTag::ToggleHistoryBar as isize,
             dispatcher,
             action_sel,
         );
+        set_button_symbol(&history_top_btn, "clock.arrow.circlepath", "⏱", true);
         history_top_btn.setHidden(true);
 
         let gear_btn = make_symbol_button(
@@ -562,7 +616,7 @@ impl AppController {
             active_tab: TabMode::Translate,
             last_main_mode: TabMode::Translate,
             active_settings_sec: SettingsSection::Translate,
-            show_chat_history_bar: false,
+            show_chat_history_bar: true,
             is_pinned: false,
             pin_before_settings: false,
             is_modal_open: false,
@@ -591,7 +645,7 @@ impl AppController {
         ctrl.update_window_min_max_constraints();
         ctrl.refresh_ai_header_badge();
         ctrl.refresh_conversations_popup();
-        ctrl.render_chat_transcript();
+        ctrl.relayout_all(win_w, win_h);
         ctrl
     }
 
@@ -843,46 +897,70 @@ impl AppController {
         let h = frame.size.height;
         let root = NSView::initWithFrame(mtm.alloc(), frame);
 
-        // 顶部折叠式历史对话选择条（点击右上角时钟按钮展开/收起）
-        let history_bar = NSView::initWithFrame(mtm.alloc(), top_rect(h, 0.0, 0.0, w, 34.0));
+        // 顶部对话历史选取条（默认展示，也可点击右上角时钟按钮展开/收起）
+        let hist_h = 38.0;
+        let history_bar = NSView::initWithFrame(mtm.alloc(), top_rect(h, 0.0, 0.0, w, hist_h));
+        let history_surface =
+            make_surface_box(mtm, top_rect(hist_h, 0.0, 0.0, w, hist_h), 0.0, 0.28);
+        let history_label = make_label(
+            mtm,
+            top_rect(hist_h, 14.0, 10.0, 56.0, 18.0),
+            "历史对话",
+            12.0,
+            false,
+            true,
+        );
         let conv_popup = make_popup(
             mtm,
-            top_rect(34.0, 12.0, 4.0, w - 104.0, 24.0),
-            &["当前对话"],
+            top_rect(hist_h, 72.0, 6.0, (w - 216.0).max(120.0), 25.0),
+            &["● 当前新对话"],
             0,
             true,
             ActionTag::SelectConversation as isize,
             dispatcher,
             action_sel,
         );
-        let clear_hist_btn = make_flat_button(
+        let new_conv_btn = make_button(
             mtm,
-            top_rect(34.0, w - 84.0, 4.0, 72.0, 24.0),
-            "清空历史",
-            11.5,
-            false,
-            false,
+            top_rect(hist_h, w - 136.0, 7.0, 64.0, 24.0),
+            "＋ 新对话",
+            ActionTag::NewConversation as isize,
+            dispatcher,
+            action_sel,
+        );
+        let clear_hist_btn = make_button(
+            mtm,
+            top_rect(hist_h, w - 66.0, 7.0, 54.0, 24.0),
+            "清空",
             ActionTag::ClearChatHistory as isize,
             dispatcher,
             action_sel,
         );
-        let history_bottom_line = make_divider(mtm, top_rect(34.0, 0.0, 33.0, w, 1.0));
+        let history_bottom_line = make_divider(mtm, top_rect(hist_h, 0.0, hist_h - 1.0, w, 1.0));
+        add_subview(&history_bar, &history_surface);
+        add_subview(&history_bar, &history_label);
         add_subview(&history_bar, &conv_popup);
+        add_subview(&history_bar, &new_conv_btn);
         add_subview(&history_bar, &clear_hist_btn);
         add_subview(&history_bar, &history_bottom_line);
-        history_bar.setHidden(true);
+        history_bar.setHidden(false);
 
         let composer_h = layout.chat_input_height;
-        let transcript_h = (h - composer_h).max(120.0);
-        let (transcript_scroll, transcript_tv) = make_scrollable_text_view(
-            mtm,
-            top_rect(h, 4.0, 0.0, w - 8.0, transcript_h),
-            false,
-            14.0,
-            None,
+        let transcript_h = (h - hist_h - composer_h).max(120.0);
+        let transcript_scroll = NSScrollView::initWithFrame(
+            mtm.alloc(),
+            top_rect(h, 0.0, hist_h, w, transcript_h),
         );
+        transcript_scroll.setHasVerticalScroller(true);
+        transcript_scroll.setHasHorizontalScroller(false);
+        transcript_scroll.setDrawsBackground(false);
+        let transcript_doc = make_flipped_view(
+            mtm,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, transcript_h)),
+        );
+        transcript_scroll.setDocumentView(Some(&transcript_doc));
 
-        let composer_top = transcript_h;
+        let composer_top = hist_h + transcript_h;
         let composer_split_bar = make_split_bar(
             mtm,
             top_rect(
@@ -902,16 +980,16 @@ impl AppController {
         );
         let (input_scroll, input_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 4.0, composer_top + 6.0, w - 84.0, (composer_h - 12.0).max(40.0)),
+            top_rect(h, 6.0, composer_top + 6.0, w - 88.0, (composer_h - 12.0).max(40.0)),
             true,
             14.0,
             Some(dispatcher),
         );
         let input_placeholder = make_label(
             mtm,
-            top_rect(h, 18.0, composer_top + 15.0, 200.0, 20.0),
-            "输入消息，回车发送",
-            14.0,
+            top_rect(h, 20.0, composer_top + 15.0, 220.0, 20.0),
+            "输入消息，回车发送 (Shift+Enter 换行)",
+            13.5,
             false,
             true,
         );
@@ -935,11 +1013,14 @@ impl AppController {
         ChatViewWidgets {
             root,
             history_bar,
+            history_surface,
+            history_label,
             conv_popup,
+            new_conv_btn,
             clear_hist_btn,
             history_bottom_line,
             transcript_scroll,
-            transcript_tv,
+            transcript_doc,
             composer_split_bar,
             composer_surface,
             input_scroll,
@@ -949,7 +1030,7 @@ impl AppController {
         }
     }
 
-    /// 构建原版左侧分类栏 (`AI 翻译` / `AI 对话` / `快捷键` / `通用`) + 右侧纵向表单的设置面板。
+    /// 构建原版左侧分类栏 (`AI 翻译` / `AI 对话` / `快捷键` / `通用`) + 右侧自适应宽度与动态字段的设置面板。
     fn build_settings_view(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -967,7 +1048,7 @@ impl AppController {
 
         let nav_translate_btn = make_flat_button(
             mtm,
-            top_rect(h, 10.0, 12.0, sidebar_w - 20.0, 30.0),
+            top_rect(h, 10.0, 14.0, sidebar_w - 20.0, 32.0),
             "● AI 翻译",
             13.0,
             true,
@@ -978,7 +1059,7 @@ impl AppController {
         );
         let nav_chat_btn = make_flat_button(
             mtm,
-            top_rect(h, 10.0, 46.0, sidebar_w - 20.0, 30.0),
+            top_rect(h, 10.0, 50.0, sidebar_w - 20.0, 32.0),
             "   AI 对话",
             13.0,
             false,
@@ -989,7 +1070,7 @@ impl AppController {
         );
         let nav_shortcuts_btn = make_flat_button(
             mtm,
-            top_rect(h, 10.0, 80.0, sidebar_w - 20.0, 30.0),
+            top_rect(h, 10.0, 86.0, sidebar_w - 20.0, 32.0),
             "   快捷键",
             13.0,
             false,
@@ -1000,7 +1081,7 @@ impl AppController {
         );
         let nav_general_btn = make_flat_button(
             mtm,
-            top_rect(h, 10.0, 114.0, sidebar_w - 20.0, 30.0),
+            top_rect(h, 10.0, 122.0, sidebar_w - 20.0, 32.0),
             "   通用",
             13.0,
             false,
@@ -1017,9 +1098,9 @@ impl AppController {
         add_subview(&root, &nav_shortcuts_btn);
         add_subview(&root, &nav_general_btn);
 
-        let content_x = sidebar_w + 14.0;
-        let content_w = (w - content_x - 14.0).max(310.0);
-        let sec_frame = top_rect(h, content_x, 6.0, content_w, h - 38.0);
+        let content_x = sidebar_w + 18.0;
+        let content_w = (w - content_x - 18.0).max(300.0);
+        let sec_frame = top_rect(h, content_x, 8.0, content_w, (h - 38.0).max(260.0));
         let sec_h = sec_frame.size.height;
 
         let sec_translate = NSView::initWithFrame(mtm.alloc(), sec_frame);
@@ -1046,34 +1127,30 @@ impl AppController {
             .position(|&b| b == chat_cfg.backend)
             .unwrap_or(0);
 
-        // ── Section 1: AI 翻译 ──
+        let dummy = top_rect(sec_h, 0.0, 0.0, 100.0, 24.0);
+
+        // ── Section 1: AI 翻译（根据所选接入方式动态展示对应字段，多行提示词大框） ──
         let t_head = make_label(
             mtm,
-            top_rect(sec_h, 0.0, 6.0, 180.0, 18.0),
+            dummy,
             "AI 翻译（云端 / 本地服务 / GGUF）",
-            12.0,
+            12.5,
             true,
             true,
         );
         let ai_enabled_chk = make_checkbox(
             mtm,
-            top_rect(sec_h, content_w - 110.0, 4.0, 110.0, 20.0),
+            dummy,
             "启用 AI 翻译",
             ai_cfg.enabled,
             0,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_translate, &t_head);
-        add_subview(&sec_translate, &ai_enabled_chk);
-
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 32.0, 72.0, 18.0), "接入方式", 12.0, false, true),
-        );
+        let t_lbl_backend = make_label(mtm, dummy, "接入方式", 12.5, false, true);
         let ai_backend_popup = make_popup(
             mtm,
-            top_rect(sec_h, 74.0, 29.0, content_w - 144.0, 25.0),
+            dummy,
             &backend_labels,
             ai_backend_idx,
             true,
@@ -1083,73 +1160,59 @@ impl AppController {
         );
         let btn_ai_def_url = make_button(
             mtm,
-            top_rect(sec_h, content_w - 66.0, 29.0, 66.0, 25.0),
+            dummy,
             "默认地址",
             ActionTag::AiTransFillDefaultUrl as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_translate, &ai_backend_popup);
-        add_subview(&sec_translate, &btn_ai_def_url);
 
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 64.0, 72.0, 18.0), "接口地址", 12.0, false, true),
-        );
+        let t_lbl_url = make_label(mtm, dummy, "接口地址", 12.5, false, true);
         let ai_base_url_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 62.0, content_w - 74.0, 23.0),
+            dummy,
             &ai_cfg.base_url,
             "https://api.openai.com/v1 或 http://127.0.0.1:11434",
         );
-        add_subview(&sec_translate, &ai_base_url_field);
 
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 96.0, 72.0, 18.0), "API 密钥", 12.0, false, true),
-        );
+        let t_lbl_key = make_label(mtm, dummy, "API 密钥", 12.5, false, true);
         let ai_key_field = make_secure_field(
             mtm,
-            top_rect(sec_h, 74.0, 94.0, content_w - 190.0, 23.0),
+            dummy,
             if ai_cfg.has_api_key {
                 "已保存，留空保持不变"
             } else {
-                "sk-… (本地服务/GGUF免填)"
+                "sk-… (保存在本地 JSON，不弹窗)"
             },
         );
         let ai_key_status_label = make_label(
             mtm,
-            top_rect(sec_h, content_w - 112.0, 96.0, 50.0, 18.0),
+            dummy,
             if ai_cfg.has_api_key { "已保存" } else { "未设置" },
-            11.0,
+            11.5,
             false,
             true,
         );
+        set_label_alignment_right(&ai_key_status_label);
         let btn_ai_clr_key = make_button(
             mtm,
-            top_rect(sec_h, content_w - 60.0, 93.0, 60.0, 24.0),
+            dummy,
             "清除",
             ActionTag::AiTransClearKey as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_translate, &ai_key_field);
-        add_subview(&sec_translate, &ai_key_status_label);
-        add_subview(&sec_translate, &btn_ai_clr_key);
 
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 128.0, 72.0, 18.0), "模型名称", 12.0, false, true),
-        );
+        let t_lbl_model = make_label(mtm, dummy, "模型名称", 12.5, false, true);
         let ai_model_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 126.0, content_w - 216.0, 23.0),
+            dummy,
             &ai_cfg.model,
-            "gpt-4o-mini / qwen2.5:7b",
+            "gpt-4o-mini / qwen2.5:7b / deepseek-chat",
         );
         let btn_ai_discover = make_button(
             mtm,
-            top_rect(sec_h, content_w - 138.0, 125.0, 66.0, 25.0),
+            dummy,
             "探测模型",
             ActionTag::AiTransDiscoverModels as isize,
             dispatcher,
@@ -1157,7 +1220,7 @@ impl AppController {
         );
         let ai_discovered_popup = make_popup(
             mtm,
-            top_rect(sec_h, content_w - 70.0, 125.0, 70.0, 25.0),
+            dummy,
             &["选择…"],
             0,
             true,
@@ -1165,101 +1228,109 @@ impl AppController {
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_translate, &ai_model_field);
-        add_subview(&sec_translate, &btn_ai_discover);
-        add_subview(&sec_translate, &ai_discovered_popup);
 
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 160.0, 72.0, 18.0), "GGUF模型", 12.0, false, true),
-        );
+        let t_lbl_gguf = make_label(mtm, dummy, "GGUF模型", 12.5, false, true);
         let ai_gguf_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 158.0, content_w - 138.0, 23.0),
+            dummy,
             &ai_cfg.gguf_model_path,
-            "本地 .gguf 模型文件路径（仅直接加载模式需填）",
+            "选择本地 .gguf 量化模型文件路径",
         );
         let btn_ai_gguf = make_button(
             mtm,
-            top_rect(sec_h, content_w - 60.0, 157.0, 60.0, 25.0),
+            dummy,
             "浏览…",
             ActionTag::AiTransBrowseGguf as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_translate, &ai_gguf_field);
-        add_subview(&sec_translate, &btn_ai_gguf);
 
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 192.0, 72.0, 18.0), "分词词表", 12.0, false, true),
-        );
+        let t_lbl_tok = make_label(mtm, dummy, "分词词表", 12.5, false, true);
         let ai_tokenizer_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 190.0, content_w - 138.0, 23.0),
+            dummy,
             &ai_cfg.gguf_tokenizer_path,
-            "可选 tokenizer.json (留空自动读取 GGUF 内嵌词表)",
+            "可选 tokenizer.json (留空则自动读取 GGUF 内嵌词表)",
         );
         let btn_ai_tok = make_button(
             mtm,
-            top_rect(sec_h, content_w - 60.0, 189.0, 60.0, 25.0),
+            dummy,
             "浏览…",
             ActionTag::AiTransBrowseTokenizer as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_translate, &ai_tokenizer_field);
-        add_subview(&sec_translate, &btn_ai_tok);
 
-        add_subview(
-            &sec_translate,
-            &make_label(mtm, top_rect(sec_h, 0.0, 224.0, 72.0, 18.0), "翻译提示词", 12.0, false, true),
-        );
-        let ai_prompt_field = make_text_field(
+        let t_lbl_prompt = make_label(
             mtm,
-            top_rect(sec_h, 74.0, 222.0, content_w - 74.0, 23.0),
-            &ai_cfg.translate_prompt,
-            "用 {source} 和 {target} 表示源语言和目标语言",
+            dummy,
+            "翻译提示词（可用 {source} 与 {target} 占位符）",
+            12.0,
+            false,
+            true,
         );
-        add_subview(&sec_translate, &ai_prompt_field);
-
+        let ai_prompt_input = make_multiline_input(
+            mtm,
+            top_rect(sec_h, 0.0, 180.0, content_w, 92.0),
+            &ai_cfg.translate_prompt,
+            12.5,
+        );
         let save_ai_btn = make_button(
             mtm,
-            top_rect(sec_h, 0.0, 260.0, 96.0, 28.0),
+            dummy,
             "保存配置",
             ActionTag::SaveSettings as isize,
             dispatcher,
             action_sel,
         );
+
+        add_subview(&sec_translate, &t_head);
+        add_subview(&sec_translate, &ai_enabled_chk);
+        add_subview(&sec_translate, &t_lbl_backend);
+        add_subview(&sec_translate, &ai_backend_popup);
+        add_subview(&sec_translate, &btn_ai_def_url);
+        add_subview(&sec_translate, &t_lbl_url);
+        add_subview(&sec_translate, &ai_base_url_field);
+        add_subview(&sec_translate, &t_lbl_key);
+        add_subview(&sec_translate, &ai_key_field);
+        add_subview(&sec_translate, &ai_key_status_label);
+        add_subview(&sec_translate, &btn_ai_clr_key);
+        add_subview(&sec_translate, &t_lbl_model);
+        add_subview(&sec_translate, &ai_model_field);
+        add_subview(&sec_translate, &btn_ai_discover);
+        add_subview(&sec_translate, &ai_discovered_popup);
+        add_subview(&sec_translate, &t_lbl_gguf);
+        add_subview(&sec_translate, &ai_gguf_field);
+        add_subview(&sec_translate, &btn_ai_gguf);
+        add_subview(&sec_translate, &t_lbl_tok);
+        add_subview(&sec_translate, &ai_tokenizer_field);
+        add_subview(&sec_translate, &btn_ai_tok);
+        add_subview(&sec_translate, &t_lbl_prompt);
+        add_subview(&sec_translate, &ai_prompt_input.surface);
+        add_subview(&sec_translate, &ai_prompt_input.scroll);
         add_subview(&sec_translate, &save_ai_btn);
 
-        // ── Section 2: AI 对话 ──
+        // ── Section 2: AI 对话（根据接入方式动态展示对应字段，多行系统提示词大框） ──
         let c_head = make_label(
             mtm,
-            top_rect(sec_h, 0.0, 6.0, 180.0, 18.0),
-            "AI 对话（独立配置）",
-            12.0,
+            dummy,
+            "AI 对话（独立模型与系统提示词）",
+            12.5,
             true,
             true,
         );
         let btn_sync_from_trans = make_button(
             mtm,
-            top_rect(sec_h, content_w - 138.0, 3.0, 138.0, 24.0),
+            dummy,
             "复用 AI 翻译配置",
             ActionTag::ChatCopyFromTrans as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_chat, &c_head);
-        add_subview(&sec_chat, &btn_sync_from_trans);
-
-        add_subview(
-            &sec_chat,
-            &make_label(mtm, top_rect(sec_h, 0.0, 36.0, 72.0, 18.0), "接入方式", 12.0, false, true),
-        );
+        let c_lbl_backend = make_label(mtm, dummy, "接入方式", 12.5, false, true);
         let chat_backend_popup = make_popup(
             mtm,
-            top_rect(sec_h, 74.0, 33.0, content_w - 144.0, 25.0),
+            dummy,
             &backend_labels,
             chat_backend_idx,
             true,
@@ -1269,73 +1340,59 @@ impl AppController {
         );
         let btn_chat_def_url = make_button(
             mtm,
-            top_rect(sec_h, content_w - 66.0, 33.0, 66.0, 25.0),
+            dummy,
             "默认地址",
             ActionTag::ChatFillDefaultUrl as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_chat, &chat_backend_popup);
-        add_subview(&sec_chat, &btn_chat_def_url);
 
-        add_subview(
-            &sec_chat,
-            &make_label(mtm, top_rect(sec_h, 0.0, 68.0, 72.0, 18.0), "接口地址", 12.0, false, true),
-        );
+        let c_lbl_url = make_label(mtm, dummy, "接口地址", 12.5, false, true);
         let chat_base_url_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 66.0, content_w - 74.0, 23.0),
+            dummy,
             &chat_cfg.base_url,
             "https://api.openai.com/v1 或 http://127.0.0.1:11434",
         );
-        add_subview(&sec_chat, &chat_base_url_field);
 
-        add_subview(
-            &sec_chat,
-            &make_label(mtm, top_rect(sec_h, 0.0, 100.0, 72.0, 18.0), "API 密钥", 12.0, false, true),
-        );
+        let c_lbl_key = make_label(mtm, dummy, "API 密钥", 12.5, false, true);
         let chat_key_field = make_secure_field(
             mtm,
-            top_rect(sec_h, 74.0, 98.0, content_w - 190.0, 23.0),
+            dummy,
             if chat_cfg.has_api_key {
                 "已保存，留空保持不变"
             } else {
-                "sk-… (本地服务/GGUF免填)"
+                "sk-… (保存在本地 JSON，不弹窗)"
             },
         );
         let chat_key_status_label = make_label(
             mtm,
-            top_rect(sec_h, content_w - 112.0, 100.0, 50.0, 18.0),
+            dummy,
             if chat_cfg.has_api_key { "已保存" } else { "未设置" },
-            11.0,
+            11.5,
             false,
             true,
         );
+        set_label_alignment_right(&chat_key_status_label);
         let btn_chat_clr_key = make_button(
             mtm,
-            top_rect(sec_h, content_w - 60.0, 97.0, 60.0, 24.0),
+            dummy,
             "清除",
             ActionTag::ChatClearKey as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_chat, &chat_key_field);
-        add_subview(&sec_chat, &chat_key_status_label);
-        add_subview(&sec_chat, &btn_chat_clr_key);
 
-        add_subview(
-            &sec_chat,
-            &make_label(mtm, top_rect(sec_h, 0.0, 132.0, 72.0, 18.0), "模型名称", 12.0, false, true),
-        );
+        let c_lbl_model = make_label(mtm, dummy, "模型名称", 12.5, false, true);
         let chat_model_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 130.0, content_w - 216.0, 23.0),
+            dummy,
             &chat_cfg.model,
-            "gpt-4o-mini / qwen2.5:7b",
+            "gpt-4o-mini / qwen2.5:7b / deepseek-chat",
         );
         let btn_chat_discover = make_button(
             mtm,
-            top_rect(sec_h, content_w - 138.0, 129.0, 66.0, 25.0),
+            dummy,
             "探测模型",
             ActionTag::ChatDiscoverModels as isize,
             dispatcher,
@@ -1343,7 +1400,7 @@ impl AppController {
         );
         let chat_discovered_popup = make_popup(
             mtm,
-            top_rect(sec_h, content_w - 70.0, 129.0, 70.0, 25.0),
+            dummy,
             &["选择…"],
             0,
             true,
@@ -1351,167 +1408,146 @@ impl AppController {
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_chat, &chat_model_field);
-        add_subview(&sec_chat, &btn_chat_discover);
-        add_subview(&sec_chat, &chat_discovered_popup);
 
-        add_subview(
-            &sec_chat,
-            &make_label(mtm, top_rect(sec_h, 0.0, 164.0, 72.0, 18.0), "GGUF模型", 12.0, false, true),
-        );
+        let c_lbl_gguf = make_label(mtm, dummy, "GGUF模型", 12.5, false, true);
         let chat_gguf_field = make_text_field(
             mtm,
-            top_rect(sec_h, 74.0, 162.0, content_w - 138.0, 23.0),
+            dummy,
             &chat_cfg.gguf_model_path,
-            "本地 .gguf 模型文件路径",
+            "选择本地 .gguf 量化模型文件路径",
         );
         let btn_chat_gguf = make_button(
             mtm,
-            top_rect(sec_h, content_w - 60.0, 161.0, 60.0, 25.0),
+            dummy,
             "浏览…",
             ActionTag::ChatBrowseGguf as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_chat, &chat_gguf_field);
-        add_subview(&sec_chat, &btn_chat_gguf);
 
-        add_subview(
-            &sec_chat,
-            &make_label(mtm, top_rect(sec_h, 0.0, 196.0, 72.0, 18.0), "系统提示词", 12.0, false, true),
-        );
-        let chat_prompt_field = make_text_field(
+        let c_lbl_prompt = make_label(
             mtm,
-            top_rect(sec_h, 74.0, 194.0, content_w - 74.0, 23.0),
-            &chat_cfg.chat_prompt,
-            "可选，会作为系统提示加在对话开头",
+            dummy,
+            "系统提示词（可选，作为多轮对话开头的 System Prompt）",
+            12.0,
+            false,
+            true,
         );
-        add_subview(&sec_chat, &chat_prompt_field);
-
+        let chat_prompt_input = make_multiline_input(
+            mtm,
+            top_rect(sec_h, 0.0, 180.0, content_w, 96.0),
+            &chat_cfg.chat_prompt,
+            12.5,
+        );
         let save_chat_btn = make_button(
             mtm,
-            top_rect(sec_h, 0.0, 232.0, 96.0, 28.0),
+            dummy,
             "保存配置",
             ActionTag::SaveSettings as isize,
             dispatcher,
             action_sel,
         );
+
+        add_subview(&sec_chat, &c_head);
+        add_subview(&sec_chat, &btn_sync_from_trans);
+        add_subview(&sec_chat, &c_lbl_backend);
+        add_subview(&sec_chat, &chat_backend_popup);
+        add_subview(&sec_chat, &btn_chat_def_url);
+        add_subview(&sec_chat, &c_lbl_url);
+        add_subview(&sec_chat, &chat_base_url_field);
+        add_subview(&sec_chat, &c_lbl_key);
+        add_subview(&sec_chat, &chat_key_field);
+        add_subview(&sec_chat, &chat_key_status_label);
+        add_subview(&sec_chat, &btn_chat_clr_key);
+        add_subview(&sec_chat, &c_lbl_model);
+        add_subview(&sec_chat, &chat_model_field);
+        add_subview(&sec_chat, &btn_chat_discover);
+        add_subview(&sec_chat, &chat_discovered_popup);
+        add_subview(&sec_chat, &c_lbl_gguf);
+        add_subview(&sec_chat, &chat_gguf_field);
+        add_subview(&sec_chat, &btn_chat_gguf);
+        add_subview(&sec_chat, &c_lbl_prompt);
+        add_subview(&sec_chat, &chat_prompt_input.surface);
+        add_subview(&sec_chat, &chat_prompt_input.scroll);
         add_subview(&sec_chat, &save_chat_btn);
 
         // ── Section 3: 快捷键 ──
-        let sc_head = make_label(
-            mtm,
-            top_rect(sec_h, 0.0, 6.0, 160.0, 18.0),
-            "全局快捷键",
-            12.0,
-            true,
-            true,
-        );
+        let sc_head = make_label(mtm, dummy, "全局快捷键", 12.5, true, true);
         let btn_reset_sc = make_button(
             mtm,
-            top_rect(sec_h, content_w - 92.0, 3.0, 92.0, 24.0),
+            dummy,
             "恢复默认热键",
             ActionTag::ResetDefaultShortcuts as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&sec_shortcuts, &sc_head);
-        add_subview(&sec_shortcuts, &btn_reset_sc);
-
-        add_subview(
-            &sec_shortcuts,
-            &make_label(mtm, top_rect(sec_h, 0.0, 38.0, 88.0, 18.0), "呼出翻译", 12.0, false, true),
-        );
-        let sc_toggle_field = make_text_field(
-            mtm,
-            top_rect(sec_h, 90.0, 36.0, content_w - 90.0, 23.0),
-            &sc_cfg.toggle,
-            "CmdOrCtrl+Shift+Space",
-        );
-        add_subview(
-            &sec_shortcuts,
-            &make_label(mtm, top_rect(sec_h, 0.0, 72.0, 88.0, 18.0), "截图 OCR", 12.0, false, true),
-        );
-        let sc_ocr_field = make_text_field(
-            mtm,
-            top_rect(sec_h, 90.0, 70.0, content_w - 90.0, 23.0),
-            &sc_cfg.ocr,
-            "CmdOrCtrl+Shift+S",
-        );
-        add_subview(
-            &sec_shortcuts,
-            &make_label(mtm, top_rect(sec_h, 0.0, 106.0, 88.0, 18.0), "呼出 AI 对话", 12.0, false, true),
-        );
-        let sc_ai_field = make_text_field(
-            mtm,
-            top_rect(sec_h, 90.0, 104.0, content_w - 90.0, 23.0),
-            &sc_cfg.ai_dialog,
-            "Option+Space",
-        );
-        add_subview(
-            &sec_shortcuts,
-            &make_label(mtm, top_rect(sec_h, 0.0, 140.0, 88.0, 18.0), "划词翻译", 12.0, false, true),
-        );
+        let sc_lbl_toggle = make_label(mtm, dummy, "呼出翻译", 12.5, false, true);
+        let sc_toggle_field =
+            make_text_field(mtm, dummy, &sc_cfg.toggle, "CmdOrCtrl+Shift+Space");
+        let sc_lbl_ocr = make_label(mtm, dummy, "截图 OCR", 12.5, false, true);
+        let sc_ocr_field = make_text_field(mtm, dummy, &sc_cfg.ocr, "CmdOrCtrl+Shift+S");
+        let sc_lbl_ai = make_label(mtm, dummy, "呼出 AI 对话", 12.5, false, true);
+        let sc_ai_field = make_text_field(mtm, dummy, &sc_cfg.ai_dialog, "Option+Space");
+        let sc_lbl_sel_trans = make_label(mtm, dummy, "划词翻译", 12.5, false, true);
         let sc_sel_trans_field = make_text_field(
             mtm,
-            top_rect(sec_h, 90.0, 138.0, content_w - 90.0, 23.0),
+            dummy,
             &sc_cfg.selection_translate,
-            "可与呼出翻译共用同一按键",
+            "可与「呼出翻译」共用同一按键",
         );
-        add_subview(
-            &sec_shortcuts,
-            &make_label(mtm, top_rect(sec_h, 0.0, 174.0, 88.0, 18.0), "划词 AI 对话", 12.0, false, true),
-        );
+        let sc_lbl_sel_ai = make_label(mtm, dummy, "划词 AI 对话", 12.5, false, true);
         let sc_sel_ai_field = make_text_field(
             mtm,
-            top_rect(sec_h, 90.0, 172.0, content_w - 90.0, 23.0),
+            dummy,
             &sc_cfg.selection_ai_dialog,
-            "可与呼出 AI 对话共用同一按键",
+            "可与「呼出 AI 对话」共用同一按键",
         );
         let save_sc_btn = make_button(
             mtm,
-            top_rect(sec_h, 0.0, 212.0, 104.0, 28.0),
+            dummy,
             "保存快捷键",
             ActionTag::SaveSettings as isize,
             dispatcher,
             action_sel,
         );
-        let sc_hint = make_label(
+        let sc_hint = make_wrapping_label(
             mtm,
-            top_rect(sec_h, 0.0, 248.0, content_w, 54.0),
-            "每个快捷键都可单独设置或留空关闭。「呼出翻译」和「划词翻译」可共用同一个键：有选中文本时走划词，无选中文本则呼出窗口。",
-            11.0,
-            false,
+            top_rect(sec_h, 0.0, 260.0, content_w, 60.0),
+            "每个快捷键都可单独设置或留空关闭。「呼出翻译」与「划词翻译」（以及「呼出 AI 对话」与「划词 AI 对话」）支持共用同一个按键：有选中文本时自动执行划词，无选中文本则切换主窗口。",
+            11.5,
             true,
         );
+
+        add_subview(&sec_shortcuts, &sc_head);
+        add_subview(&sec_shortcuts, &btn_reset_sc);
+        add_subview(&sec_shortcuts, &sc_lbl_toggle);
         add_subview(&sec_shortcuts, &sc_toggle_field);
+        add_subview(&sec_shortcuts, &sc_lbl_ocr);
         add_subview(&sec_shortcuts, &sc_ocr_field);
+        add_subview(&sec_shortcuts, &sc_lbl_ai);
         add_subview(&sec_shortcuts, &sc_ai_field);
+        add_subview(&sec_shortcuts, &sc_lbl_sel_trans);
         add_subview(&sec_shortcuts, &sc_sel_trans_field);
+        add_subview(&sec_shortcuts, &sc_lbl_sel_ai);
         add_subview(&sec_shortcuts, &sc_sel_ai_field);
         add_subview(&sec_shortcuts, &save_sc_btn);
         add_subview(&sec_shortcuts, &sc_hint);
 
         // ── Section 4: 通用 ──
-        add_subview(
-            &sec_general,
-            &make_label(mtm, top_rect(sec_h, 0.0, 6.0, 120.0, 18.0), "通用", 12.0, true, true),
-        );
-        add_subview(
-            &sec_general,
-            &make_label(mtm, top_rect(sec_h, 0.0, 38.0, 88.0, 18.0), "面板透明度", 12.5, false, false),
-        );
+        let gen_head = make_label(mtm, dummy, "通用与外观", 12.5, true, true);
+        let gen_lbl_opacity = make_label(mtm, dummy, "面板透明度", 12.5, false, false);
         let opacity_val_label = make_label(
             mtm,
-            top_rect(sec_h, content_w - 52.0, 38.0, 52.0, 18.0),
+            dummy,
             &format!("{:.0}%", app_cfg.panel_opacity * 100.0),
             12.0,
             true,
             true,
         );
+        set_label_alignment_right(&opacity_val_label);
         let opacity_slider = make_slider(
             mtm,
-            top_rect(sec_h, 0.0, 62.0, content_w, 22.0),
+            dummy,
             PANEL_OPACITY_MIN,
             PANEL_OPACITY_MAX,
             app_cfg.panel_opacity,
@@ -1521,7 +1557,7 @@ impl AppController {
         );
         let autostart_chk = make_checkbox(
             mtm,
-            top_rect(sec_h, 0.0, 98.0, 220.0, 22.0),
+            dummy,
             "开机自动启动",
             ttree_platform_macos::autostart::is_enabled(),
             ActionTag::AutostartToggled as isize,
@@ -1530,20 +1566,21 @@ impl AppController {
         );
         let ver_label = make_label(
             mtm,
-            top_rect(sec_h, 0.0, 136.0, content_w, 20.0),
+            dummy,
             "版本：0.2.0 (100% Pure Rust Native AppKit)",
             12.0,
             false,
             true,
         );
-        let gen_hint = make_label(
+        let gen_hint = make_wrapping_label(
             mtm,
-            top_rect(sec_h, 0.0, 166.0, content_w, 72.0),
-            "调整面板透明度可让底层桌面毛玻璃透出。\n截图 OCR 需要“屏幕录制”权限；划词翻译优先使用“辅助功能”权限，未授权时会临时用复制代替。\n所有配置直接保存在本地 JSON，不再调用 macOS 钥匙串。",
+            top_rect(sec_h, 0.0, 176.0, content_w, 88.0),
+            "调整面板透明度可让底层桌面毛玻璃透出。\n截图 OCR 需要 macOS「屏幕录制」权限；划词翻译优先使用「辅助功能」权限，未授权时会临时使用剪贴板回退。\n所有配置与分栏尺寸均保存在本地 JSON，不再调用 macOS 钥匙串。",
             11.5,
-            false,
             true,
         );
+        add_subview(&sec_general, &gen_head);
+        add_subview(&sec_general, &gen_lbl_opacity);
         add_subview(&sec_general, &opacity_val_label);
         add_subview(&sec_general, &opacity_slider);
         add_subview(&sec_general, &autostart_chk);
@@ -1577,32 +1614,72 @@ impl AppController {
             sec_chat,
             sec_shortcuts,
             sec_general,
+            t_head,
             ai_enabled_chk,
+            t_lbl_backend,
             ai_backend_popup,
+            btn_ai_def_url,
+            t_lbl_url,
             ai_base_url_field,
+            t_lbl_key,
             ai_key_field,
             ai_key_status_label,
+            btn_ai_clr_key,
+            t_lbl_model,
             ai_model_field,
+            btn_ai_discover,
             ai_discovered_popup,
+            t_lbl_gguf,
             ai_gguf_field,
+            btn_ai_gguf,
+            t_lbl_tok,
             ai_tokenizer_field,
-            ai_prompt_field,
+            btn_ai_tok,
+            t_lbl_prompt,
+            ai_prompt_input,
+            save_ai_btn,
+            c_head,
+            btn_sync_from_trans,
+            c_lbl_backend,
             chat_backend_popup,
+            btn_chat_def_url,
+            c_lbl_url,
             chat_base_url_field,
+            c_lbl_key,
             chat_key_field,
             chat_key_status_label,
+            btn_chat_clr_key,
+            c_lbl_model,
             chat_model_field,
+            btn_chat_discover,
             chat_discovered_popup,
+            c_lbl_gguf,
             chat_gguf_field,
-            chat_prompt_field,
+            btn_chat_gguf,
+            c_lbl_prompt,
+            chat_prompt_input,
+            save_chat_btn,
+            sc_head,
+            btn_reset_sc,
+            sc_lbl_toggle,
             sc_toggle_field,
+            sc_lbl_ocr,
             sc_ocr_field,
+            sc_lbl_ai,
             sc_ai_field,
+            sc_lbl_sel_trans,
             sc_sel_trans_field,
+            sc_lbl_sel_ai,
             sc_sel_ai_field,
+            save_sc_btn,
+            sc_hint,
+            gen_head,
+            gen_lbl_opacity,
             opacity_slider,
             opacity_val_label,
             autostart_chk,
+            ver_label,
+            gen_hint,
             settings_status_label,
         }
     }
@@ -1669,13 +1746,12 @@ impl AppController {
             }
             TabMode::Chat => {
                 self.window
-                    .setMinSize(NSSize::new(WINDOW_MIN_WIDTH, 320.0));
+                    .setMinSize(NSSize::new(WINDOW_MIN_WIDTH.max(420.0), 360.0));
                 self.window
                     .setMaxSize(NSSize::new(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT));
             }
             TabMode::Settings => {
-                self.window
-                    .setMinSize(NSSize::new(WINDOW_MIN_WIDTH, 430.0));
+                self.window.setMinSize(NSSize::new(480.0, 470.0));
                 self.window
                     .setMaxSize(NSSize::new(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT));
             }
@@ -1688,17 +1764,21 @@ impl AppController {
         let ai_enabled = self.settings.ai_translation_for_request().enabled;
         self.update_window_min_max_constraints();
 
-        let target_w = self.pane_layout.width;
+        let target_w = match self.active_tab {
+            TabMode::Translate => self.pane_layout.width,
+            TabMode::Chat => self.pane_layout.width.max(440.0),
+            TabMode::Settings => self.pane_layout.width.max(540.0),
+        };
         let target_h = match self.active_tab {
             TabMode::Translate => self.pane_layout.translate_window_height(ai_enabled),
             TabMode::Chat => self
                 .pane_layout
                 .translate_window_height(ai_enabled)
-                .max(360.0),
+                .max(420.0),
             TabMode::Settings => self
                 .pane_layout
                 .translate_window_height(ai_enabled)
-                .max(450.0),
+                .max(490.0),
         };
 
         let frame = self.window.frame();
@@ -2175,6 +2255,12 @@ impl AppController {
                     self.active_conversation_id = Some(conv.id);
                     self.current_messages = conv.messages.clone();
                     self.streaming_assistant_buffer.clear();
+                    self.refresh_conversations_popup();
+                    self.render_chat_transcript();
+                } else if idx >= 0 && (idx as usize) == self.conversations.len() {
+                    self.active_conversation_id = None;
+                    self.current_messages.clear();
+                    self.streaming_assistant_buffer.clear();
                     self.render_chat_transcript();
                 }
             }
@@ -2204,6 +2290,8 @@ impl AppController {
                         backend.default_base_url(),
                     );
                 }
+                let (w, h) = self.last_known_size;
+                self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
             }
             ActionTag::AiTransFillDefaultUrl => {
                 let backend = self.selected_ai_trans_backend();
@@ -2225,6 +2313,8 @@ impl AppController {
                 if let Some(path) = self.pick_file(&["gguf"]) {
                     set_field_string(&self.settings_ui.ai_gguf_field, &path);
                     self.settings_ui.ai_backend_popup.selectItemAtIndex(3);
+                    let (w, h) = self.last_known_size;
+                    self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
                 }
             }
             ActionTag::AiTransBrowseTokenizer => {
@@ -2250,6 +2340,8 @@ impl AppController {
                         backend.default_base_url(),
                     );
                 }
+                let (w, h) = self.last_known_size;
+                self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
             }
             ActionTag::ChatFillDefaultUrl => {
                 let backend = self.selected_chat_backend();
@@ -2271,6 +2363,8 @@ impl AppController {
                 if let Some(path) = self.pick_file(&["gguf"]) {
                     set_field_string(&self.settings_ui.chat_gguf_field, &path);
                     self.settings_ui.chat_backend_popup.selectItemAtIndex(3);
+                    let (w, h) = self.last_known_size;
+                    self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
                 }
             }
             ActionTag::ChatCopyFromTrans => {
@@ -2288,6 +2382,8 @@ impl AppController {
                     &self.settings_ui.chat_gguf_field,
                     &get_field_string(&self.settings_ui.ai_gguf_field),
                 );
+                let (w, h) = self.last_known_size;
+                self.relayout_settings_view(w, (h - TOP_BAR_HEIGHT).max(200.0));
                 self.set_status("✓ 已同步翻译模型配置，请点击保存");
             }
             ActionTag::ChatClearKey => {
@@ -2422,7 +2518,7 @@ impl AppController {
             model: get_field_string(&self.settings_ui.ai_model_field),
             gguf_model_path: get_field_string(&self.settings_ui.ai_gguf_field),
             gguf_tokenizer_path: get_field_string(&self.settings_ui.ai_tokenizer_field),
-            translate_prompt: get_field_string(&self.settings_ui.ai_prompt_field),
+            translate_prompt: get_text_view_string(&self.settings_ui.ai_prompt_input.tv),
         };
         if let Err(e) = self.settings.save_ai_translation(&ai_input) {
             self.set_status(&format!("❌ {e}"));
@@ -2439,7 +2535,7 @@ impl AppController {
             model: get_field_string(&self.settings_ui.chat_model_field),
             gguf_model_path: get_field_string(&self.settings_ui.chat_gguf_field),
             gguf_tokenizer_path: get_field_string(&self.settings_ui.ai_tokenizer_field),
-            chat_prompt: get_field_string(&self.settings_ui.chat_prompt_field),
+            chat_prompt: get_text_view_string(&self.settings_ui.chat_prompt_input.tv),
         };
         if let Err(e) = self.settings.save_chat_ai(&chat_input) {
             self.set_status(&format!("❌ {e}"));
@@ -2538,15 +2634,17 @@ impl AppController {
         if self.conversations.is_empty() {
             self.chat_ui
                 .conv_popup
-                .addItemWithTitle(&NSString::from_str("当前新对话"));
+                .addItemWithTitle(&NSString::from_str("● 当前新对话"));
             return;
         }
         for (i, conv) in self.conversations.iter().enumerate() {
-            let title = if conv.summary.is_empty() {
+            let msg_count = conv.messages.len();
+            let summary = if conv.summary.is_empty() {
                 format!("对话 #{}", i + 1)
             } else {
-                format!("{}. {}", i + 1, conv.summary)
+                conv.summary.clone()
             };
+            let title = format!("{}. {}  ({}条)", i + 1, summary, msg_count);
             self.chat_ui
                 .conv_popup
                 .addItemWithTitle(&NSString::from_str(&title));
@@ -2564,29 +2662,123 @@ impl AppController {
         }
     }
 
+    /// 渲染左（AI）/右（用户）分栏聊天气泡列表，类似信息对话排版。
     pub fn render_chat_transcript(&self) {
+        clear_subviews(&self.chat_ui.transcript_doc);
+
+        let content_size = self.chat_ui.transcript_scroll.contentSize();
+        let scroll_w = content_size.width.max(260.0);
+        let scroll_h = content_size.height.max(100.0);
+
         if self.current_messages.is_empty() && !self.chat_streaming {
-            set_text_view_styled(&self.chat_ui.transcript_tv, "和 AI 自由对话。", true);
+            let empty_label = make_label(
+                self.mtm,
+                NSRect::new(
+                    NSPoint::new(18.0, (scroll_h * 0.42).max(20.0)),
+                    NSSize::new((scroll_w - 36.0).max(160.0), 22.0),
+                ),
+                "和 AI 自由对话（顶部可切换历史对话或开启新对话）",
+                13.0,
+                false,
+                true,
+            );
+            add_subview(&self.chat_ui.transcript_doc, &empty_label);
+            self.chat_ui.transcript_doc.setFrame(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(scroll_w, scroll_h),
+            ));
             return;
         }
-        let mut out = String::new();
+
+        let max_bubble_w = (scroll_w * 0.78).clamp(180.0, 560.0);
+        let pad_x = 12.0;
+        let pad_y = 8.0;
+        let max_text_w = (max_bubble_w - pad_x * 2.0).max(120.0);
+        let mut y = 14.0;
+
+        let mut render_bubble = |is_user: bool, raw_content: &str| {
+            let role_w = 64.0;
+            let role_h = 15.0;
+            let role_x = if is_user {
+                (scroll_w - 16.0 - role_w).max(16.0)
+            } else {
+                18.0
+            };
+            let role_label = make_label(
+                self.mtm,
+                NSRect::new(NSPoint::new(role_x, y), NSSize::new(role_w, role_h)),
+                if is_user { "你" } else { "AI" },
+                11.0,
+                true,
+                true,
+            );
+            if is_user {
+                set_label_alignment_right(&role_label);
+            }
+            add_subview(&self.chat_ui.transcript_doc, &role_label);
+            y += role_h + 3.0;
+
+            let cleaned = clean_markdown_for_bubble(raw_content);
+            let (msg_label, text_size) =
+                make_wrapping_message_label(self.mtm, &cleaned, max_text_w, 13.5, false);
+
+            let bubble_w = (text_size.width + pad_x * 2.0).clamp(44.0, max_bubble_w);
+            let bubble_h = (text_size.height + pad_y * 2.0).max(34.0);
+            let bubble_x = if is_user {
+                (scroll_w - 16.0 - bubble_w).max(16.0)
+            } else {
+                16.0
+            };
+
+            let bubble_box = NSBox::initWithFrame(
+                self.mtm.alloc(),
+                NSRect::new(NSPoint::new(bubble_x, y), NSSize::new(bubble_w, bubble_h)),
+            );
+            bubble_box.setBoxType(NSBoxType::Custom);
+            bubble_box.setCornerRadius(10.0);
+            bubble_box.setContentViewMargins(CGSize::new(0.0, 0.0));
+            if is_user {
+                bubble_box.setBorderWidth(0.5);
+                bubble_box.setBorderColor(&pale_ink(0.095));
+                bubble_box.setFillColor(&pale_ink(0.075));
+            } else {
+                bubble_box.setBorderWidth(0.5);
+                bubble_box.setBorderColor(&pale_ink(0.06));
+                bubble_box.setFillColor(&pale_ink(0.035));
+            }
+
+            msg_label.setFrame(NSRect::new(
+                NSPoint::new(bubble_x + pad_x, y + pad_y),
+                NSSize::new(text_size.width, text_size.height),
+            ));
+
+            add_subview(&self.chat_ui.transcript_doc, &bubble_box);
+            add_subview(&self.chat_ui.transcript_doc, &msg_label);
+            y += bubble_h + 12.0;
+        };
+
         for msg in &self.current_messages {
-            let prefix = if msg.role == "user" { "你" } else { "AI" };
-            out.push_str(prefix);
-            out.push('\n');
-            out.push_str(&msg.content);
-            out.push_str("\n\n");
+            let is_user = msg.role == "user";
+            render_bubble(is_user, &msg.content);
         }
         if self.chat_streaming {
-            out.push_str("AI\n");
-            out.push_str(&self.streaming_assistant_buffer);
-            out.push_str(" ▍");
+            let stream_text = if self.streaming_assistant_buffer.trim().is_empty() {
+                "思考中… ▍".to_string()
+            } else {
+                format!("{} ▍", self.streaming_assistant_buffer)
+            };
+            render_bubble(false, &stream_text);
         }
-        set_text_view_styled(&self.chat_ui.transcript_tv, &out, false);
-        let len = NSString::from_str(&out).length();
+
+        let doc_h = (y + 8.0).max(scroll_h);
+        self.chat_ui.transcript_doc.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(scroll_w, doc_h),
+        ));
+        let bottom_y = (doc_h - scroll_h).max(0.0);
         self.chat_ui
-            .transcript_tv
-            .scrollRangeToVisible(NSRange::new(len, 0));
+            .transcript_doc
+            .scrollPoint(NSPoint::new(0.0, bottom_y));
     }
 
     pub fn handle_ui_event(&mut self, event: UiEvent) {
@@ -3040,57 +3232,52 @@ impl AppController {
         // 对话视图重排
         self.relayout_chat_view(w, body_h);
 
-        // 设置视图重排
-        self.settings_ui.root.setFrame(body_frame);
-        self.settings_ui
-            .top_divider
-            .setFrame(top_rect(body_h, 12.0, 0.0, w - 24.0, 1.0));
-        let sidebar_w = 114.0;
-        self.settings_ui
-            .sidebar_divider
-            .setFrame(top_rect(body_h, sidebar_w, 1.0, 1.0, body_h - 1.0));
-        self.settings_ui
-            .nav_translate_btn
-            .setFrame(top_rect(body_h, 10.0, 12.0, sidebar_w - 20.0, 30.0));
-        self.settings_ui
-            .nav_chat_btn
-            .setFrame(top_rect(body_h, 10.0, 46.0, sidebar_w - 20.0, 30.0));
-        self.settings_ui
-            .nav_shortcuts_btn
-            .setFrame(top_rect(body_h, 10.0, 80.0, sidebar_w - 20.0, 30.0));
-        self.settings_ui
-            .nav_general_btn
-            .setFrame(top_rect(body_h, 10.0, 114.0, sidebar_w - 20.0, 30.0));
+        // 设置视图重排（全宽度自适应 + 按接入方式动态排布字段）
+        self.relayout_settings_view(w, body_h);
     }
 
     fn relayout_chat_view(&self, w: f64, body_h: f64) {
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
         self.chat_ui.root.setFrame(body_frame);
-        let hist_offset = if self.show_chat_history_bar { 34.0 } else { 0.0 };
+        let hist_h = 38.0;
+        let hist_offset = if self.show_chat_history_bar { hist_h } else { 0.0 };
         self.chat_ui
             .history_bar
-            .setFrame(top_rect(body_h, 0.0, 0.0, w, 34.0));
+            .setFrame(top_rect(body_h, 0.0, 0.0, w, hist_h));
         self.chat_ui
-            .conv_popup
-            .setFrame(top_rect(34.0, 12.0, 4.0, w - 104.0, 24.0));
+            .history_surface
+            .setFrame(top_rect(hist_h, 0.0, 0.0, w, hist_h));
+        self.chat_ui
+            .history_label
+            .setFrame(top_rect(hist_h, 14.0, 10.0, 56.0, 18.0));
+        self.chat_ui.conv_popup.setFrame(top_rect(
+            hist_h,
+            72.0,
+            6.0,
+            (w - 216.0).max(110.0),
+            25.0,
+        ));
+        self.chat_ui
+            .new_conv_btn
+            .setFrame(top_rect(hist_h, w - 136.0, 7.0, 64.0, 24.0));
         self.chat_ui
             .clear_hist_btn
-            .setFrame(top_rect(34.0, w - 84.0, 4.0, 72.0, 24.0));
+            .setFrame(top_rect(hist_h, w - 66.0, 7.0, 54.0, 24.0));
         self.chat_ui
             .history_bottom_line
-            .setFrame(top_rect(34.0, 0.0, 33.0, w, 1.0));
+            .setFrame(top_rect(hist_h, 0.0, hist_h - 1.0, w, 1.0));
 
         let composer_h = self
             .pane_layout
             .clamped()
             .chat_input_height
-            .min((body_h - hist_offset - 100.0).max(68.0));
-        let transcript_h = (body_h - hist_offset - composer_h).max(100.0);
+            .min((body_h - hist_offset - 110.0).max(68.0));
+        let transcript_h = (body_h - hist_offset - composer_h).max(110.0);
         self.chat_ui.transcript_scroll.setFrame(top_rect(
             body_h,
-            4.0,
+            0.0,
             hist_offset,
-            w - 8.0,
+            w,
             transcript_h,
         ));
         let composer_top = hist_offset + transcript_h;
@@ -3113,14 +3300,14 @@ impl AppController {
         ));
         self.chat_ui.input_scroll.setFrame(top_rect(
             body_h,
-            4.0,
+            6.0,
             composer_top + 6.0,
-            w - 84.0,
+            w - 88.0,
             (composer_h - 12.0).max(40.0),
         ));
         self.chat_ui
             .input_placeholder
-            .setFrame(top_rect(body_h, 18.0, composer_top + 15.0, 200.0, 20.0));
+            .setFrame(top_rect(body_h, 20.0, composer_top + 15.0, 240.0, 20.0));
         self.chat_ui.send_btn.setFrame(top_rect(
             body_h,
             w - 74.0,
@@ -3128,6 +3315,433 @@ impl AppController {
             62.0,
             28.0,
         ));
+
+        self.render_chat_transcript();
+    }
+
+    fn relayout_settings_view(&self, w: f64, body_h: f64) {
+        let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
+        self.settings_ui.root.setFrame(body_frame);
+        self.settings_ui
+            .top_divider
+            .setFrame(top_rect(body_h, 12.0, 0.0, w - 24.0, 1.0));
+        let sidebar_w = 114.0;
+        self.settings_ui
+            .sidebar_divider
+            .setFrame(top_rect(body_h, sidebar_w, 1.0, 1.0, body_h - 1.0));
+        self.settings_ui
+            .nav_translate_btn
+            .setFrame(top_rect(body_h, 10.0, 14.0, sidebar_w - 20.0, 32.0));
+        self.settings_ui
+            .nav_chat_btn
+            .setFrame(top_rect(body_h, 10.0, 50.0, sidebar_w - 20.0, 32.0));
+        self.settings_ui
+            .nav_shortcuts_btn
+            .setFrame(top_rect(body_h, 10.0, 86.0, sidebar_w - 20.0, 32.0));
+        self.settings_ui
+            .nav_general_btn
+            .setFrame(top_rect(body_h, 10.0, 122.0, sidebar_w - 20.0, 32.0));
+
+        let content_x = sidebar_w + 18.0;
+        let content_w = (w - content_x - 18.0).max(280.0);
+        let sec_h = (body_h - 36.0).max(260.0);
+        let sec_frame = top_rect(body_h, content_x, 8.0, content_w, sec_h);
+
+        self.settings_ui.sec_translate.setFrame(sec_frame);
+        self.settings_ui.sec_chat.setFrame(sec_frame);
+        self.settings_ui.sec_shortcuts.setFrame(sec_frame);
+        self.settings_ui.sec_general.setFrame(sec_frame);
+        self.settings_ui.settings_status_label.setFrame(top_rect(
+            body_h,
+            content_x,
+            body_h - 26.0,
+            content_w,
+            20.0,
+        ));
+
+        let lbl_w = 72.0;
+        let field_x = 78.0;
+        let field_w = (content_w - field_x).max(160.0);
+        let row_step = 38.0;
+
+        // ── 1. AI 翻译分区（按所选接入方式动态排布，底部留出宽敞多行提示词编辑框） ──
+        let ai_backend = self.selected_ai_trans_backend();
+        let ai_is_gguf = ai_backend == AiBackendKind::CandleGguf;
+        let ai_needs_key = ai_backend == AiBackendKind::OpenAiCompatible;
+
+        self.settings_ui.t_head.setFrame(top_rect(
+            sec_h,
+            0.0,
+            4.0,
+            (content_w - 116.0).max(160.0),
+            20.0,
+        ));
+        self.settings_ui.ai_enabled_chk.setFrame(top_rect(
+            sec_h,
+            (content_w - 108.0).max(160.0),
+            3.0,
+            108.0,
+            22.0,
+        ));
+
+        let mut y = 36.0;
+        self.settings_ui
+            .t_lbl_backend
+            .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+        if ai_is_gguf {
+            self.settings_ui.btn_ai_def_url.setHidden(true);
+            self.settings_ui
+                .ai_backend_popup
+                .setFrame(top_rect(sec_h, field_x, y, field_w, 26.0));
+        } else {
+            self.settings_ui.btn_ai_def_url.setHidden(false);
+            self.settings_ui.ai_backend_popup.setFrame(top_rect(
+                sec_h,
+                field_x,
+                y,
+                (field_w - 74.0).max(120.0),
+                26.0,
+            ));
+            self.settings_ui
+                .btn_ai_def_url
+                .setFrame(top_rect(sec_h, content_w - 68.0, y, 68.0, 25.0));
+        }
+        y += row_step;
+
+        // HTTP 模式：显示接口地址 + 模型名称；云端 API 额外显示 API 密钥
+        self.settings_ui.t_lbl_url.setHidden(ai_is_gguf);
+        self.settings_ui.ai_base_url_field.setHidden(ai_is_gguf);
+        if !ai_is_gguf {
+            self.settings_ui
+                .t_lbl_url
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            self.settings_ui
+                .ai_base_url_field
+                .setFrame(top_rect(sec_h, field_x, y, field_w, 25.0));
+            y += row_step;
+        }
+
+        self.settings_ui.t_lbl_key.setHidden(!ai_needs_key);
+        self.settings_ui.ai_key_field.setHidden(!ai_needs_key);
+        self.settings_ui
+            .ai_key_status_label
+            .setHidden(!ai_needs_key);
+        self.settings_ui.btn_ai_clr_key.setHidden(!ai_needs_key);
+        if ai_needs_key {
+            self.settings_ui
+                .t_lbl_key
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            self.settings_ui.ai_key_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                y,
+                (field_w - 118.0).max(100.0),
+                25.0,
+            ));
+            self.settings_ui.ai_key_status_label.setFrame(top_rect(
+                sec_h,
+                content_w - 114.0,
+                y + 4.0,
+                50.0,
+                18.0,
+            ));
+            self.settings_ui
+                .btn_ai_clr_key
+                .setFrame(top_rect(sec_h, content_w - 58.0, y, 58.0, 25.0));
+            y += row_step;
+        }
+
+        self.settings_ui.t_lbl_model.setHidden(ai_is_gguf);
+        self.settings_ui.ai_model_field.setHidden(ai_is_gguf);
+        self.settings_ui.btn_ai_discover.setHidden(ai_is_gguf);
+        self.settings_ui.ai_discovered_popup.setHidden(ai_is_gguf);
+        if !ai_is_gguf {
+            self.settings_ui
+                .t_lbl_model
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            self.settings_ui.ai_model_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                y,
+                (field_w - 148.0).max(100.0),
+                25.0,
+            ));
+            self.settings_ui
+                .btn_ai_discover
+                .setFrame(top_rect(sec_h, content_w - 142.0, y, 68.0, 25.0));
+            self.settings_ui
+                .ai_discovered_popup
+                .setFrame(top_rect(sec_h, content_w - 70.0, y, 70.0, 25.0));
+            y += row_step;
+        }
+
+        // GGUF 模式：仅在选择直接加载 .gguf 时显示模型路径与分词词表
+        self.settings_ui.t_lbl_gguf.setHidden(!ai_is_gguf);
+        self.settings_ui.ai_gguf_field.setHidden(!ai_is_gguf);
+        self.settings_ui.btn_ai_gguf.setHidden(!ai_is_gguf);
+        self.settings_ui.t_lbl_tok.setHidden(!ai_is_gguf);
+        self.settings_ui.ai_tokenizer_field.setHidden(!ai_is_gguf);
+        self.settings_ui.btn_ai_tok.setHidden(!ai_is_gguf);
+        if ai_is_gguf {
+            self.settings_ui
+                .t_lbl_gguf
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            self.settings_ui.ai_gguf_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                y,
+                (field_w - 68.0).max(120.0),
+                25.0,
+            ));
+            self.settings_ui
+                .btn_ai_gguf
+                .setFrame(top_rect(sec_h, content_w - 62.0, y, 62.0, 25.0));
+            y += row_step;
+
+            self.settings_ui
+                .t_lbl_tok
+                .setFrame(top_rect(sec_h, 0.0, y + 3.0, lbl_w, 18.0));
+            self.settings_ui.ai_tokenizer_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                y,
+                (field_w - 68.0).max(120.0),
+                25.0,
+            ));
+            self.settings_ui
+                .btn_ai_tok
+                .setFrame(top_rect(sec_h, content_w - 62.0, y, 62.0, 25.0));
+            y += row_step;
+        }
+
+        // 多行翻译提示词大编辑框（上方标题 + 下方全宽多行滚动框）
+        y += 4.0;
+        self.settings_ui
+            .t_lbl_prompt
+            .setFrame(top_rect(sec_h, 0.0, y, content_w, 18.0));
+        y += 22.0;
+        let ai_prompt_h = (sec_h - y - 42.0).clamp(84.0, 220.0);
+        set_multiline_input_frame(
+            &self.settings_ui.ai_prompt_input,
+            top_rect(sec_h, 0.0, y, content_w, ai_prompt_h),
+        );
+        set_multiline_input_hidden(&self.settings_ui.ai_prompt_input, false);
+        y += ai_prompt_h + 10.0;
+        self.settings_ui
+            .save_ai_btn
+            .setFrame(top_rect(sec_h, 0.0, y, 104.0, 30.0));
+
+        // ── 2. AI 对话分区（按所选接入方式动态排布，底部留出宽敞多行系统提示词编辑框） ──
+        let chat_backend = self.selected_chat_backend();
+        let chat_is_gguf = chat_backend == AiBackendKind::CandleGguf;
+        let chat_needs_key = chat_backend == AiBackendKind::OpenAiCompatible;
+
+        self.settings_ui.c_head.setFrame(top_rect(
+            sec_h,
+            0.0,
+            4.0,
+            (content_w - 146.0).max(150.0),
+            20.0,
+        ));
+        self.settings_ui
+            .btn_sync_from_trans
+            .setFrame(top_rect(sec_h, content_w - 138.0, 2.0, 138.0, 25.0));
+
+        let mut cy = 36.0;
+        self.settings_ui
+            .c_lbl_backend
+            .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
+        if chat_is_gguf {
+            self.settings_ui.btn_chat_def_url.setHidden(true);
+            self.settings_ui
+                .chat_backend_popup
+                .setFrame(top_rect(sec_h, field_x, cy, field_w, 26.0));
+        } else {
+            self.settings_ui.btn_chat_def_url.setHidden(false);
+            self.settings_ui.chat_backend_popup.setFrame(top_rect(
+                sec_h,
+                field_x,
+                cy,
+                (field_w - 74.0).max(120.0),
+                26.0,
+            ));
+            self.settings_ui
+                .btn_chat_def_url
+                .setFrame(top_rect(sec_h, content_w - 68.0, cy, 68.0, 25.0));
+        }
+        cy += row_step;
+
+        self.settings_ui.c_lbl_url.setHidden(chat_is_gguf);
+        self.settings_ui.chat_base_url_field.setHidden(chat_is_gguf);
+        if !chat_is_gguf {
+            self.settings_ui
+                .c_lbl_url
+                .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
+            self.settings_ui
+                .chat_base_url_field
+                .setFrame(top_rect(sec_h, field_x, cy, field_w, 25.0));
+            cy += row_step;
+        }
+
+        self.settings_ui.c_lbl_key.setHidden(!chat_needs_key);
+        self.settings_ui.chat_key_field.setHidden(!chat_needs_key);
+        self.settings_ui
+            .chat_key_status_label
+            .setHidden(!chat_needs_key);
+        self.settings_ui.btn_chat_clr_key.setHidden(!chat_needs_key);
+        if chat_needs_key {
+            self.settings_ui
+                .c_lbl_key
+                .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
+            self.settings_ui.chat_key_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                cy,
+                (field_w - 118.0).max(100.0),
+                25.0,
+            ));
+            self.settings_ui.chat_key_status_label.setFrame(top_rect(
+                sec_h,
+                content_w - 114.0,
+                cy + 4.0,
+                50.0,
+                18.0,
+            ));
+            self.settings_ui
+                .btn_chat_clr_key
+                .setFrame(top_rect(sec_h, content_w - 58.0, cy, 58.0, 25.0));
+            cy += row_step;
+        }
+
+        self.settings_ui.c_lbl_model.setHidden(chat_is_gguf);
+        self.settings_ui.chat_model_field.setHidden(chat_is_gguf);
+        self.settings_ui.btn_chat_discover.setHidden(chat_is_gguf);
+        self.settings_ui
+            .chat_discovered_popup
+            .setHidden(chat_is_gguf);
+        if !chat_is_gguf {
+            self.settings_ui
+                .c_lbl_model
+                .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
+            self.settings_ui.chat_model_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                cy,
+                (field_w - 148.0).max(100.0),
+                25.0,
+            ));
+            self.settings_ui
+                .btn_chat_discover
+                .setFrame(top_rect(sec_h, content_w - 142.0, cy, 68.0, 25.0));
+            self.settings_ui
+                .chat_discovered_popup
+                .setFrame(top_rect(sec_h, content_w - 70.0, cy, 70.0, 25.0));
+            cy += row_step;
+        }
+
+        self.settings_ui.c_lbl_gguf.setHidden(!chat_is_gguf);
+        self.settings_ui.chat_gguf_field.setHidden(!chat_is_gguf);
+        self.settings_ui.btn_chat_gguf.setHidden(!chat_is_gguf);
+        if chat_is_gguf {
+            self.settings_ui
+                .c_lbl_gguf
+                .setFrame(top_rect(sec_h, 0.0, cy + 3.0, lbl_w, 18.0));
+            self.settings_ui.chat_gguf_field.setFrame(top_rect(
+                sec_h,
+                field_x,
+                cy,
+                (field_w - 68.0).max(120.0),
+                25.0,
+            ));
+            self.settings_ui
+                .btn_chat_gguf
+                .setFrame(top_rect(sec_h, content_w - 62.0, cy, 62.0, 25.0));
+            cy += row_step;
+        }
+
+        cy += 4.0;
+        self.settings_ui
+            .c_lbl_prompt
+            .setFrame(top_rect(sec_h, 0.0, cy, content_w, 18.0));
+        cy += 22.0;
+        let chat_prompt_h = (sec_h - cy - 42.0).clamp(88.0, 220.0);
+        set_multiline_input_frame(
+            &self.settings_ui.chat_prompt_input,
+            top_rect(sec_h, 0.0, cy, content_w, chat_prompt_h),
+        );
+        set_multiline_input_hidden(&self.settings_ui.chat_prompt_input, false);
+        cy += chat_prompt_h + 10.0;
+        self.settings_ui
+            .save_chat_btn
+            .setFrame(top_rect(sec_h, 0.0, cy, 104.0, 30.0));
+
+        // ── 3. 快捷键分区（自适应宽度） ──
+        let sc_lbl_w = 92.0;
+        let sc_field_x = 96.0;
+        let sc_field_w = (content_w - sc_field_x).max(160.0);
+        self.settings_ui.sc_head.setFrame(top_rect(
+            sec_h,
+            0.0,
+            4.0,
+            (content_w - 104.0).max(140.0),
+            20.0,
+        ));
+        self.settings_ui
+            .btn_reset_sc
+            .setFrame(top_rect(sec_h, content_w - 96.0, 2.0, 96.0, 25.0));
+
+        let sc_rows = [
+            (&self.settings_ui.sc_lbl_toggle, &self.settings_ui.sc_toggle_field),
+            (&self.settings_ui.sc_lbl_ocr, &self.settings_ui.sc_ocr_field),
+            (&self.settings_ui.sc_lbl_ai, &self.settings_ui.sc_ai_field),
+            (
+                &self.settings_ui.sc_lbl_sel_trans,
+                &self.settings_ui.sc_sel_trans_field,
+            ),
+            (
+                &self.settings_ui.sc_lbl_sel_ai,
+                &self.settings_ui.sc_sel_ai_field,
+            ),
+        ];
+        let mut sy = 40.0;
+        for (lbl, fld) in sc_rows {
+            lbl.setFrame(top_rect(sec_h, 0.0, sy + 3.0, sc_lbl_w, 18.0));
+            fld.setFrame(top_rect(sec_h, sc_field_x, sy, sc_field_w, 25.0));
+            sy += 38.0;
+        }
+        sy += 6.0;
+        self.settings_ui
+            .save_sc_btn
+            .setFrame(top_rect(sec_h, 0.0, sy, 108.0, 30.0));
+        sy += 42.0;
+        set_wrapping_label_frame(
+            &self.settings_ui.sc_hint,
+            top_rect(sec_h, 0.0, sy, content_w, (sec_h - sy).max(56.0)),
+        );
+
+        // ── 4. 通用分区（自适应宽度） ──
+        self.settings_ui
+            .gen_head
+            .setFrame(top_rect(sec_h, 0.0, 4.0, content_w, 20.0));
+        self.settings_ui
+            .gen_lbl_opacity
+            .setFrame(top_rect(sec_h, 0.0, 40.0, 120.0, 18.0));
+        self.settings_ui
+            .opacity_val_label
+            .setFrame(top_rect(sec_h, content_w - 60.0, 40.0, 60.0, 18.0));
+        self.settings_ui
+            .opacity_slider
+            .setFrame(top_rect(sec_h, 0.0, 64.0, content_w, 24.0));
+        self.settings_ui
+            .autostart_chk
+            .setFrame(top_rect(sec_h, 0.0, 104.0, 220.0, 24.0));
+        self.settings_ui
+            .ver_label
+            .setFrame(top_rect(sec_h, 0.0, 144.0, content_w, 20.0));
+        set_wrapping_label_frame(
+            &self.settings_ui.gen_hint,
+            top_rect(sec_h, 0.0, 178.0, content_w, (sec_h - 178.0).max(80.0)),
+        );
     }
 }
 
@@ -3196,5 +3810,14 @@ mod tests {
         assert_eq!(r.origin.y, 462.0);
         assert_eq!(r.size.width, 80.0);
         assert_eq!(r.size.height, 28.0);
+    }
+
+    #[test]
+    fn cleans_markdown_markers_for_chat_bubbles() {
+        let raw = "### 标题\n这是 **重点内容** 与 __下划线__。\n- 列表项";
+        assert_eq!(
+            clean_markdown_for_bubble(raw),
+            "标题\n这是 重点内容 与 下划线。\n- 列表项"
+        );
     }
 }

@@ -11,8 +11,8 @@ use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, M
 use objc2_app_kit::{
     NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage, NSPasteboard,
-    NSPasteboardTypeString, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider, NSTextField,
-    NSTextView, NSView,
+    NSPasteboardTypeString, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider,
+    NSTextAlignment, NSTextField, NSTextView, NSView,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
@@ -31,6 +31,46 @@ pub fn top_rect(parent_height: f64, x: f64, top_y: f64, width: f64, height: f64)
         NSPoint::new(x.max(0.0), y),
         NSSize::new(width.max(1.0), height.max(1.0)),
     )
+}
+
+pub struct FlippedViewIvars;
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = FlippedViewIvars]
+    #[name = "TTreeFlippedView"]
+    pub struct FlippedView;
+
+    unsafe impl NSObjectProtocol for FlippedView {}
+
+    impl FlippedView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> Bool {
+            Bool::YES
+        }
+    }
+);
+
+/// 创建以左上角为原点的容器视图（用于 AI 对话左右气泡流式滚动列表）。
+pub fn make_flipped_view(mtm: MainThreadMarker, frame: NSRect) -> Retained<FlippedView> {
+    let v = mtm.alloc::<FlippedView>().set_ivars(FlippedViewIvars);
+    unsafe { msg_send![super(v), initWithFrame: frame] }
+}
+
+/// 移除父视图内的全部子视图。
+pub fn clear_subviews(view: &NSView) {
+    loop {
+        let subviews = view.subviews();
+        if subviews.is_empty() {
+            break;
+        }
+        if let Some(first) = subviews.firstObject() {
+            first.removeFromSuperview();
+        } else {
+            break;
+        }
+    }
 }
 
 pub struct SplitHandleIvars {
@@ -589,3 +629,175 @@ pub fn copy_to_pasteboard(text: &str) -> bool {
 pub fn add_subview(parent: &NSView, child: &NSView) {
     parent.addSubview(child);
 }
+
+/// 将静态标签设置为右对齐（用于用户气泡上方“你”标签或百分比数值标签）。
+pub fn set_label_alignment_right(label: &NSTextField) {
+    label.setAlignment(NSTextAlignment::Right);
+}
+
+/// 创建自动换行的静态说明标签（用于设置页底部的多行说明文字，随宽度自适应折行）。
+pub fn make_wrapping_label(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    text: &str,
+    font_size: f64,
+    secondary: bool,
+) -> Retained<NSTextField> {
+    let label = make_label(mtm, frame, text, font_size, false, secondary);
+    unsafe {
+        let _: () = msg_send![&*label, setUsesSingleLineMode: Bool::NO];
+        let _: () = msg_send![&*label, setPreferredMaxLayoutWidth: frame.size.width];
+        if let Some(cell) = label.cell() {
+            let _: () = msg_send![&*cell, setWraps: Bool::YES];
+            let _: () = msg_send![&*cell, setScrollable: Bool::NO];
+            let _: () = msg_send![&*cell, setLineBreakMode: 0usize];
+        }
+    }
+    label
+}
+
+/// 更新自动换行标签的尺寸与 `preferredMaxLayoutWidth`。
+pub fn set_wrapping_label_frame(label: &NSTextField, frame: NSRect) {
+    label.setFrame(frame);
+    unsafe {
+        let _: () = msg_send![label, setPreferredMaxLayoutWidth: frame.size.width];
+    }
+}
+
+/// 清理 AI 回复中的常见 Markdown 标记（如 `**粗体**`、`### 标题`），让纯文本气泡干净易读。
+pub fn clean_markdown_for_bubble(raw: &str) -> String {
+    let mut lines = Vec::new();
+    for line in raw.lines() {
+        let trimmed_start = line.trim_start();
+        let without_heading = if let Some(rest) = trimmed_start.strip_prefix("#### ") {
+            rest
+        } else if let Some(rest) = trimmed_start.strip_prefix("### ") {
+            rest
+        } else if let Some(rest) = trimmed_start.strip_prefix("## ") {
+            rest
+        } else if let Some(rest) = trimmed_start.strip_prefix("# ") {
+            rest
+        } else {
+            line
+        };
+        let cleaned = without_heading.replace("**", "").replace("__", "");
+        lines.push(cleaned);
+    }
+    if raw.ends_with('\n') {
+        let mut joined = lines.join("\n");
+        joined.push('\n');
+        joined
+    } else {
+        lines.join("\n")
+    }
+}
+
+/// 创建可复制、自动换行的聊天气泡文本标签，并返回 `(标签实例, 实测文字包裹尺寸)`。
+pub fn make_wrapping_message_label(
+    mtm: MainThreadMarker,
+    text: &str,
+    max_width: f64,
+    font_size: f64,
+    is_muted: bool,
+) -> (Retained<NSTextField>, NSSize) {
+    let safe_max_w = max_width.max(80.0);
+    let label = NSTextField::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(safe_max_w, 22.0)),
+    );
+    label.setStringValue(&NSString::from_str(text));
+    label.setBezeled(false);
+    label.setDrawsBackground(false);
+    label.setEditable(false);
+    label.setSelectable(true);
+    label.setFont(Some(&NSFont::systemFontOfSize(font_size as CGFloat)));
+    let color = if is_muted {
+        pale_ink(0.36)
+    } else {
+        pale_ink(0.80)
+    };
+    label.setTextColor(Some(&color));
+
+    let measured = unsafe {
+        let _: () = msg_send![&*label, setUsesSingleLineMode: Bool::NO];
+        let _: () = msg_send![&*label, setPreferredMaxLayoutWidth: safe_max_w as CGFloat];
+        if let Some(cell) = label.cell() {
+            let _: () = msg_send![&*cell, setWraps: Bool::YES];
+            let _: () = msg_send![&*cell, setScrollable: Bool::NO];
+            // NSLineBreakByWordWrapping = 0
+            let _: () = msg_send![&*cell, setLineBreakMode: 0usize];
+            let bounds = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(safe_max_w, 20_000.0),
+            );
+            let sz: NSSize = msg_send![&*cell, cellSizeForBounds: bounds];
+            NSSize::new(
+                (sz.width.ceil() + 2.0).clamp(18.0, safe_max_w),
+                (sz.height.ceil() + 2.0).max(18.0),
+            )
+        } else {
+            NSSize::new(safe_max_w, 20.0)
+        }
+    };
+    (label, measured)
+}
+
+/// 带柔和圆角底框的多行可滚动文本输入框（用于设置页的“翻译提示词”与“系统提示词”等大段文本配置）。
+pub struct MultilineInputWidget {
+    pub surface: Retained<NSBox>,
+    pub scroll: Retained<NSScrollView>,
+    pub tv: Retained<NSTextView>,
+}
+
+/// 创建带柔和淡色圆角边框的多行可滚动编辑框。
+pub fn make_multiline_input(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    value: &str,
+    font_size: f64,
+) -> MultilineInputWidget {
+    let surface = NSBox::initWithFrame(mtm.alloc(), frame);
+    surface.setBoxType(NSBoxType::Custom);
+    surface.setBorderWidth(0.5);
+    surface.setBorderColor(&pale_ink(0.08));
+    surface.setCornerRadius(6.0);
+    surface.setFillColor(&pale_ink(0.045));
+    surface.setContentViewMargins(CGSize::new(0.0, 0.0));
+
+    let inner_frame = NSRect::new(
+        NSPoint::new(frame.origin.x + 2.0, frame.origin.y + 2.0),
+        NSSize::new(
+            (frame.size.width - 4.0).max(20.0),
+            (frame.size.height - 4.0).max(20.0),
+        ),
+    );
+    let (scroll, tv) = make_scrollable_text_view(mtm, inner_frame, true, font_size, None);
+    tv.setTextContainerInset(NSSize::new(8.0, 7.0));
+    set_text_view_string(&tv, value);
+
+    MultilineInputWidget {
+        surface,
+        scroll,
+        tv,
+    }
+}
+
+/// 更新多行编辑框的位置与宽高（自适应窗口缩放）。
+pub fn set_multiline_input_frame(widget: &MultilineInputWidget, frame: NSRect) {
+    widget.surface.setFrame(frame);
+    let inner_frame = NSRect::new(
+        NSPoint::new(frame.origin.x + 2.0, frame.origin.y + 2.0),
+        NSSize::new(
+            (frame.size.width - 4.0).max(20.0),
+            (frame.size.height - 4.0).max(20.0),
+        ),
+    );
+    widget.scroll.setFrame(inner_frame);
+}
+
+/// 隐藏或显示多行编辑框。
+pub fn set_multiline_input_hidden(widget: &MultilineInputWidget, hidden: bool) {
+    widget.surface.setHidden(hidden);
+    widget.scroll.setHidden(hidden);
+}
+
