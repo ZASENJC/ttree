@@ -11,7 +11,7 @@ pub const MAX_API_KEY_BYTES: usize = 16 * 1024;
 pub const PANEL_OPACITY_MIN: f64 = 0.35;
 pub const PANEL_OPACITY_MAX: f64 = 1.0;
 
-pub const WINDOW_MIN_WIDTH: f64 = 520.0;
+pub const WINDOW_MIN_WIDTH: f64 = 480.0;
 pub const WINDOW_MIN_HEIGHT: f64 = 340.0;
 
 /// AI 引擎后端类型：支持云端 OpenAI 兼容、本机 Ollama/LM Studio/MLX 服务、以及直接加载 GGUF。
@@ -56,15 +56,8 @@ impl AiBackendKind {
     }
 
     pub fn requires_api_key(self) -> bool {
-        matches!(self.into(), Self::OpenAiCompatible)
+        matches!(self, Self::OpenAiCompatible)
     }
-}
-
-fn serialize_empty_api_key<S>(_value: &String, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str("")
 }
 
 fn default_true() -> bool {
@@ -80,7 +73,7 @@ pub struct AiTranslationConfig {
     #[serde(default)]
     pub backend: AiBackendKind,
     pub base_url: String,
-    #[serde(default, serialize_with = "serialize_empty_api_key")]
+    #[serde(default)]
     pub api_key: String,
     #[serde(default)]
     pub has_api_key: bool,
@@ -132,7 +125,7 @@ pub struct ChatAiConfig {
     #[serde(default)]
     pub backend: AiBackendKind,
     pub base_url: String,
-    #[serde(default, serialize_with = "serialize_empty_api_key")]
+    #[serde(default)]
     pub api_key: String,
     #[serde(default)]
     pub has_api_key: bool,

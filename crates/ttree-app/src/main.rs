@@ -30,7 +30,7 @@ mod macos_app {
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
         NSEventModifierFlags, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSTextView,
         NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-        NSVisualEffectView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+        NSVisualEffectView, NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
     };
     use objc2_foundation::{
         NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize,
@@ -243,6 +243,16 @@ mod macos_app {
             window.setBackgroundColor(Some(&NSColor::clearColor()));
             window.setAlphaValue(opacity);
             window.setMinSize(NSSize::new(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT));
+
+            for btn_kind in [
+                NSWindowButton::CloseButton,
+                NSWindowButton::MiniaturizeButton,
+                NSWindowButton::ZoomButton,
+            ] {
+                if let Some(btn) = window.standardWindowButton(btn_kind) {
+                    btn.setHidden(true);
+                }
+            }
 
             let _: () = msg_send![&*window, setDelegate: Some(dispatcher)];
 

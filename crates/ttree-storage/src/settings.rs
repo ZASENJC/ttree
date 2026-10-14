@@ -55,7 +55,7 @@ impl SettingsStore {
         let chat_ai = load_chat_ai(&raw_map);
         let shortcuts = load_shortcuts(&raw_map);
         let appearance = load_appearance(&raw_map);
-        let window_size = load_window_size(&raw_map).unwrap_or((680.0, 520.0));
+        let window_size = load_window_size(&raw_map).unwrap_or((480.0, 500.0));
 
         Self {
             path,

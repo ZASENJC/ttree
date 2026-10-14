@@ -1,6 +1,7 @@
-//! `ttree-app` 应用核心控制器、事件总线与三大视图（翻译 / AI 对话 / 设置）状态机。
+//! `ttree-app` 核心控制器：复刻原版极简上下分栏排版（右上角功能区 + 上方翻译输入框 + 语言选择条 + Google/Bing 负载均衡译文框 + AI 译文框）。
 
 #![cfg(target_os = "macos")]
+#![allow(clippy::too_many_arguments)]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,19 +32,33 @@ use ttree_storage::{HistoryStore, SettingsStore};
 
 use crate::ui_helpers::{
     add_subview, append_text_view_string, copy_to_pasteboard, get_field_string,
-    get_text_view_string, make_button, make_card_box, make_checkbox, make_label, make_popup,
-    make_scrollable_text_view, make_secure_field, make_slider, make_text_field, set_field_string,
-    set_text_view_string, top_rect,
+    get_text_view_string, make_button, make_checkbox, make_divider, make_flat_button, make_label,
+    make_popup, make_scrollable_text_view, make_secure_field, make_slider, make_surface_box,
+    make_symbol_button, make_text_field, set_button_symbol, set_field_string,
+    set_flat_button_active, set_text_view_string, set_text_view_styled, top_rect,
 };
 
-const AUTO_TRANSLATE_DEBOUNCE: Duration = Duration::from_millis(420);
+const AUTO_TRANSLATE_DEBOUNCE: Duration = Duration::from_millis(650);
 const RESIZE_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+const WEB_PLACEHOLDER: &str = "译文显示在这里";
+const AI_PLACEHOLDER: &str = "AI 译文显示在这里";
+const WEB_LOADING_TEXT: &str = "翻译中…";
+const AI_LOADING_TEXT: &str = "AI 翻译中…";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabMode {
     Translate,
     Chat,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Translate,
+    Chat,
+    Shortcuts,
+    General,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +71,7 @@ pub enum ActionTag {
     TogglePin = 5,
     TrayQuit = 6,
     HideOrEscape = 7,
+    CloseSettings = 8,
 
     TranslateNow = 10,
     ClearTranslate = 11,
@@ -71,6 +87,7 @@ pub enum ActionTag {
     StopChatStream = 23,
     SelectConversation = 24,
     CopyLastReply = 25,
+    ToggleHistoryBar = 26,
 
     SaveSettings = 30,
     AiTransBackendChanged = 31,
@@ -91,6 +108,12 @@ pub enum ActionTag {
 
     ResetDefaultShortcuts = 50,
     OpacitySliderChanged = 51,
+    AutostartToggled = 52,
+
+    SettingsSecTranslate = 60,
+    SettingsSecChat = 61,
+    SettingsSecShortcuts = 62,
+    SettingsSecGeneral = 63,
 }
 
 impl ActionTag {
@@ -103,6 +126,7 @@ impl ActionTag {
             5 => Some(Self::TogglePin),
             6 => Some(Self::TrayQuit),
             7 => Some(Self::HideOrEscape),
+            8 => Some(Self::CloseSettings),
             10 => Some(Self::TranslateNow),
             11 => Some(Self::ClearTranslate),
             12 => Some(Self::SwapLanguages),
@@ -116,6 +140,7 @@ impl ActionTag {
             23 => Some(Self::StopChatStream),
             24 => Some(Self::SelectConversation),
             25 => Some(Self::CopyLastReply),
+            26 => Some(Self::ToggleHistoryBar),
             30 => Some(Self::SaveSettings),
             31 => Some(Self::AiTransBackendChanged),
             32 => Some(Self::AiTransFillDefaultUrl),
@@ -133,6 +158,11 @@ impl ActionTag {
             47 => Some(Self::ChatClearKey),
             50 => Some(Self::ResetDefaultShortcuts),
             51 => Some(Self::OpacitySliderChanged),
+            52 => Some(Self::AutostartToggled),
+            60 => Some(Self::SettingsSecTranslate),
+            61 => Some(Self::SettingsSecChat),
+            62 => Some(Self::SettingsSecShortcuts),
+            63 => Some(Self::SettingsSecGeneral),
             _ => None,
         }
     }
@@ -177,21 +207,28 @@ pub enum UiEvent {
     },
 }
 
+/// 翻译视图（原版四层上下分栏：上方原文输入框 → 语言选择条 → 谷歌/微软译文框 → AI 译文框）
 pub struct TranslateViewWidgets {
     pub root: Retained<NSView>,
+    pub source_surface: Retained<NSBox>,
+    pub input_scroll: Retained<NSScrollView>,
+    pub input_tv: Retained<NSTextView>,
+    pub input_placeholder: Retained<NSTextField>,
+    pub source_bottom_line: Retained<NSBox>,
+
+    pub lang_surface: Retained<NSBox>,
     pub source_popup: Retained<NSPopUpButton>,
     pub swap_btn: Retained<NSButton>,
     pub target_popup: Retained<NSPopUpButton>,
-    pub translate_btn: Retained<NSButton>,
-    pub clear_btn: Retained<NSButton>,
-    pub input_scroll: Retained<NSScrollView>,
-    pub input_tv: Retained<NSTextView>,
-    pub web_card: Retained<NSBox>,
+    pub status_label: Retained<NSTextField>,
+    pub lang_bottom_line: Retained<NSBox>,
+
     pub web_header_label: Retained<NSTextField>,
     pub web_copy_btn: Retained<NSButton>,
     pub web_scroll: Retained<NSScrollView>,
     pub web_tv: Retained<NSTextView>,
-    pub ai_card: Retained<NSBox>,
+    pub web_bottom_line: Retained<NSBox>,
+
     pub ai_header_label: Retained<NSTextField>,
     pub ai_copy_btn: Retained<NSButton>,
     pub ai_scroll: Retained<NSScrollView>,
@@ -200,20 +237,34 @@ pub struct TranslateViewWidgets {
 
 pub struct ChatViewWidgets {
     pub root: Retained<NSView>,
+    pub history_bar: Retained<NSView>,
     pub conv_popup: Retained<NSPopUpButton>,
-    pub new_conv_btn: Retained<NSButton>,
     pub clear_hist_btn: Retained<NSButton>,
-    pub stop_btn: Retained<NSButton>,
-    pub copy_reply_btn: Retained<NSButton>,
+    pub history_bottom_line: Retained<NSBox>,
     pub transcript_scroll: Retained<NSScrollView>,
     pub transcript_tv: Retained<NSTextView>,
+    pub composer_top_line: Retained<NSBox>,
+    pub composer_surface: Retained<NSBox>,
     pub input_scroll: Retained<NSScrollView>,
     pub input_tv: Retained<NSTextView>,
+    pub input_placeholder: Retained<NSTextField>,
     pub send_btn: Retained<NSButton>,
 }
 
 pub struct SettingsViewWidgets {
     pub root: Retained<NSView>,
+    pub top_divider: Retained<NSBox>,
+    pub sidebar_divider: Retained<NSBox>,
+    pub nav_translate_btn: Retained<NSButton>,
+    pub nav_chat_btn: Retained<NSButton>,
+    pub nav_shortcuts_btn: Retained<NSButton>,
+    pub nav_general_btn: Retained<NSButton>,
+
+    pub sec_translate: Retained<NSView>,
+    pub sec_chat: Retained<NSView>,
+    pub sec_shortcuts: Retained<NSView>,
+    pub sec_general: Retained<NSView>,
+
     pub ai_enabled_chk: Retained<NSButton>,
     pub ai_backend_popup: Retained<NSPopUpButton>,
     pub ai_base_url_field: Retained<NSTextField>,
@@ -243,6 +294,7 @@ pub struct SettingsViewWidgets {
     pub opacity_slider: Retained<NSSlider>,
     pub opacity_val_label: Retained<NSTextField>,
     pub autostart_chk: Retained<NSButton>,
+    pub settings_status_label: Retained<NSTextField>,
 }
 
 pub struct AppController {
@@ -258,18 +310,28 @@ pub struct AppController {
 
     pub window: Retained<NSWindow>,
     pub effect_view: Retained<NSVisualEffectView>,
+
+    // Top Header Bar (EngineTabs on Left, Toolbar Actions on Top-Right)
+    pub segmented_bg: Retained<NSBox>,
+    pub segmented_pill: Retained<NSBox>,
     pub tab_translate_btn: Retained<NSButton>,
     pub tab_chat_btn: Retained<NSButton>,
-    pub tab_settings_btn: Retained<NSButton>,
-    pub status_label: Retained<NSTextField>,
-    pub ocr_btn: Retained<NSButton>,
+    pub settings_title_label: Retained<NSTextField>,
+
     pub pin_btn: Retained<NSButton>,
+    pub new_chat_top_btn: Retained<NSButton>,
+    pub history_top_btn: Retained<NSButton>,
+    pub gear_btn: Retained<NSButton>,
+    pub done_settings_btn: Retained<NSButton>,
 
     pub translate_ui: TranslateViewWidgets,
     pub chat_ui: ChatViewWidgets,
     pub settings_ui: SettingsViewWidgets,
 
     pub active_tab: TabMode,
+    pub last_main_mode: TabMode,
+    pub active_settings_sec: SettingsSection,
+    pub show_chat_history_bar: bool,
     pub is_pinned: bool,
     pub pin_before_settings: bool,
     pub is_modal_open: bool,
@@ -279,6 +341,8 @@ pub struct AppController {
     pub last_observed_source: String,
     pub last_translated_source: String,
     pub pending_debounce_since: Option<Instant>,
+    pub web_has_content: bool,
+    pub ai_has_content: bool,
 
     pub chat_cancel: CancelSlot,
     pub chat_gen: u64,
@@ -311,64 +375,116 @@ impl AppController {
         let action_sel: Sel = sel!(handleControl:);
         let (win_w, win_h) = settings.window_size();
 
-        // Top Navigation Bar
-        let tab_translate_btn = make_button(
+        // ── 顶部栏：左上角 [翻译 | AI] 分段切换器，右上角图标功能区 ──
+        let segmented_bg = make_surface_box(mtm, top_rect(win_h, 12.0, 7.0, 132.0, 32.0), 9.0, 0.45);
+        let segmented_pill =
+            make_surface_box(mtm, top_rect(win_h, 15.0, 10.0, 62.0, 26.0), 7.0, 0.95);
+        let tab_translate_btn = make_flat_button(
             mtm,
-            top_rect(win_h, 14.0, 10.0, 74.0, 28.0),
-            "● 翻译",
+            top_rect(win_h, 15.0, 10.0, 62.0, 26.0),
+            "翻译",
+            13.0,
+            true,
+            false,
             ActionTag::TabTranslate as isize,
             dispatcher,
             action_sel,
         );
-        let tab_chat_btn = make_button(
+        let tab_chat_btn = make_flat_button(
             mtm,
-            top_rect(win_h, 92.0, 10.0, 86.0, 28.0),
-            "AI 对话",
+            top_rect(win_h, 79.0, 10.0, 62.0, 26.0),
+            "AI",
+            13.0,
+            true,
+            false,
             ActionTag::TabChat as isize,
             dispatcher,
             action_sel,
         );
-        let tab_settings_btn = make_button(
+        set_flat_button_active(&tab_translate_btn, true, false);
+        set_flat_button_active(&tab_chat_btn, false, false);
+
+        let settings_title_label = make_label(
             mtm,
-            top_rect(win_h, 182.0, 10.0, 72.0, 28.0),
+            top_rect(win_h, 16.0, 11.0, 120.0, 24.0),
+            "设置",
+            16.5,
+            true,
+            false,
+        );
+        settings_title_label.setHidden(true);
+
+        // 右上角功能区按钮
+        let pin_btn = make_symbol_button(
+            mtm,
+            top_rect(win_h, win_w - 78.0, 7.0, 32.0, 32.0),
+            "pin",
+            "📌",
+            "固定窗口",
+            ActionTag::TogglePin as isize,
+            dispatcher,
+            action_sel,
+        );
+        let new_chat_top_btn = make_symbol_button(
+            mtm,
+            top_rect(win_h, win_w - 112.0, 7.0, 32.0, 32.0),
+            "square.and.pencil",
+            "＋",
+            "新对话",
+            ActionTag::NewConversation as isize,
+            dispatcher,
+            action_sel,
+        );
+        new_chat_top_btn.setHidden(true);
+
+        let history_top_btn = make_symbol_button(
+            mtm,
+            top_rect(win_h, win_w - 78.0, 7.0, 32.0, 32.0),
+            "clock.arrow.circlepath",
+            "⏱",
+            "查看对话历史",
+            ActionTag::ToggleHistoryBar as isize,
+            dispatcher,
+            action_sel,
+        );
+        history_top_btn.setHidden(true);
+
+        let gear_btn = make_symbol_button(
+            mtm,
+            top_rect(win_h, win_w - 44.0, 7.0, 32.0, 32.0),
+            "gearshape",
+            "⚙",
             "设置",
             ActionTag::TabSettings as isize,
             dispatcher,
             action_sel,
         );
-        let status_label = make_label(
-            mtm,
-            top_rect(win_h, 264.0, 14.0, (win_w - 445.0).max(120.0), 20.0),
-            "纯 Rust 原生极速引擎就绪",
-            11.5,
-            false,
-            true,
-        );
-        let ocr_btn = make_button(
-            mtm,
-            top_rect(win_h, win_w - 172.0, 10.0, 86.0, 28.0),
-            "截图 OCR",
-            ActionTag::TriggerOcr as isize,
-            dispatcher,
-            action_sel,
-        );
-        let pin_btn = make_button(
-            mtm,
-            top_rect(win_h, win_w - 82.0, 10.0, 68.0, 28.0),
-            "置顶",
-            ActionTag::TogglePin as isize,
-            dispatcher,
-            action_sel,
-        );
 
+        let done_settings_btn = make_flat_button(
+            mtm,
+            top_rect(win_h, win_w - 58.0, 8.0, 46.0, 30.0),
+            "完成",
+            13.5,
+            true,
+            true,
+            ActionTag::CloseSettings as isize,
+            dispatcher,
+            action_sel,
+        );
+        done_settings_btn.setHidden(true);
+
+        add_subview(&effect_view, &segmented_bg);
+        add_subview(&effect_view, &segmented_pill);
         add_subview(&effect_view, &tab_translate_btn);
         add_subview(&effect_view, &tab_chat_btn);
-        add_subview(&effect_view, &tab_settings_btn);
-        add_subview(&effect_view, &status_label);
-        add_subview(&effect_view, &ocr_btn);
+        add_subview(&effect_view, &settings_title_label);
         add_subview(&effect_view, &pin_btn);
+        add_subview(&effect_view, &new_chat_top_btn);
+        add_subview(&effect_view, &history_top_btn);
+        add_subview(&effect_view, &gear_btn);
+        add_subview(&effect_view, &done_settings_btn);
 
-        let body_h = (win_h - 46.0).max(320.0);
+        let body_h = (win_h - 46.0).max(290.0);
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w, body_h));
 
         let translate_ui = Self::build_translate_view(mtm, body_frame, dispatcher, action_sel);
@@ -409,16 +525,23 @@ impl AppController {
             registered_hotkeys,
             window,
             effect_view,
+            segmented_bg,
+            segmented_pill,
             tab_translate_btn,
             tab_chat_btn,
-            tab_settings_btn,
-            status_label,
-            ocr_btn,
+            settings_title_label,
             pin_btn,
+            new_chat_top_btn,
+            history_top_btn,
+            gear_btn,
+            done_settings_btn,
             translate_ui,
             chat_ui,
             settings_ui,
             active_tab: TabMode::Translate,
+            last_main_mode: TabMode::Translate,
+            active_settings_sec: SettingsSection::Translate,
+            show_chat_history_bar: false,
             is_pinned: false,
             pin_before_settings: false,
             is_modal_open: false,
@@ -427,6 +550,8 @@ impl AppController {
             last_observed_source: String::new(),
             last_translated_source: String::new(),
             pending_debounce_since: None,
+            web_has_content: false,
+            ai_has_content: false,
             chat_cancel: CancelSlot::new(),
             chat_gen: 0,
             chat_streaming: false,
@@ -446,6 +571,11 @@ impl AppController {
         ctrl
     }
 
+    /// 构建原版四层上下分栏翻译面板：
+    /// 1. 上方翻译输入框 (`source_surface` + `input_tv`)
+    /// 2. 语言选择条 (`lang_surface`: `[自动检测] → [中 ⇄ 英（自适应）]`)
+    /// 3. 谷歌/微软负载均衡翻译显示框 (`web_header_label` + `web_tv`)
+    /// 4. AI 翻译显示框 (`ai_header_label` + `ai_tv`)
     fn build_translate_view(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -456,148 +586,185 @@ impl AppController {
         let h = frame.size.height;
         let root = NSView::initWithFrame(mtm.alloc(), frame);
 
+        let source_h = (h * 0.33).clamp(108.0, 210.0);
+        let lang_h = 38.0;
+        let results_top = source_h + lang_h;
+        let results_h = (h - results_top).max(160.0);
+        let web_h = (results_h * 0.47).floor();
+        let ai_top = results_top + web_h;
+        let ai_h = results_h - web_h;
+
+        // 1. 上方翻译输入框
+        let source_surface =
+            make_surface_box(mtm, top_rect(h, 0.0, 0.0, w, source_h), 0.0, 0.35);
+        let (input_scroll, input_tv) = make_scrollable_text_view(
+            mtm,
+            top_rect(h, 2.0, 2.0, w - 4.0, source_h - 4.0),
+            true,
+            16.0,
+            Some(dispatcher),
+        );
+        let input_placeholder = make_label(
+            mtm,
+            top_rect(h, 16.0, 12.0, w - 32.0, 22.0),
+            "输入文字，回车翻译",
+            16.0,
+            false,
+            true,
+        );
+        let source_bottom_line = make_divider(mtm, top_rect(h, 0.0, source_h - 1.0, w, 1.0));
+
+        // 2. 下方选择语言条
+        let lang_surface =
+            make_surface_box(mtm, top_rect(h, 0.0, source_h, w, lang_h), 0.0, 0.55);
         let src_labels: Vec<&str> = SOURCE_LANGUAGES.iter().map(|l| l.label).collect();
         let tgt_labels: Vec<&str> = TARGET_LANGUAGES.iter().map(|l| l.label).collect();
 
         let source_popup = make_popup(
             mtm,
-            top_rect(h, 14.0, 6.0, 145.0, 26.0),
+            top_rect(h, 12.0, source_h + 6.0, 116.0, 26.0),
             &src_labels,
             0,
+            false,
             ActionTag::SourceLangChanged as isize,
             dispatcher,
             action_sel,
         );
-        let swap_btn = make_button(
+        let swap_btn = make_flat_button(
             mtm,
-            top_rect(h, 163.0, 6.0, 38.0, 26.0),
-            "⇄",
+            top_rect(h, 130.0, source_h + 6.0, 24.0, 26.0),
+            "→",
+            13.0,
+            true,
+            false,
             ActionTag::SwapLanguages as isize,
             dispatcher,
             action_sel,
         );
         let target_popup = make_popup(
             mtm,
-            top_rect(h, 205.0, 6.0, 165.0, 26.0),
+            top_rect(h, 156.0, source_h + 6.0, 154.0, 26.0),
             &tgt_labels,
             0,
+            false,
             ActionTag::TargetLangChanged as isize,
             dispatcher,
             action_sel,
         );
-        let translate_btn = make_button(
+        let status_label = make_label(
             mtm,
-            top_rect(h, w - 166.0, 6.0, 92.0, 26.0),
-            "立即翻译",
-            ActionTag::TranslateNow as isize,
-            dispatcher,
-            action_sel,
-        );
-        let clear_btn = make_button(
-            mtm,
-            top_rect(h, w - 70.0, 6.0, 56.0, 26.0),
-            "清空",
-            ActionTag::ClearTranslate as isize,
-            dispatcher,
-            action_sel,
-        );
-
-        let input_h = 118.0;
-        let (input_scroll, input_tv) = make_scrollable_text_view(
-            mtm,
-            top_rect(h, 14.0, 38.0, w - 28.0, input_h),
+            top_rect(h, 314.0, source_h + 10.0, (w - 328.0).max(80.0), 18.0),
+            "",
+            11.5,
+            false,
             true,
-            14.0,
-            Some(dispatcher),
         );
+        let lang_bottom_line =
+            make_divider(mtm, top_rect(h, 0.0, source_h + lang_h - 1.0, w, 1.0));
 
-        let cards_top = 38.0 + input_h + 10.0;
-        let cards_h = (h - cards_top - 14.0).max(160.0);
-        let col_w = ((w - 38.0) / 2.0).max(200.0);
-
-        let web_card = make_card_box(mtm, top_rect(h, 14.0, cards_top, col_w, cards_h));
+        // 3. 接下方谷歌/微软负载均衡翻译显示框
         let web_header_label = make_label(
             mtm,
-            top_rect(cards_h, 10.0, 8.0, col_w - 76.0, 18.0),
-            "网页极速翻译 (Google / Bing 竞速)",
-            12.0,
+            top_rect(h, 16.0, results_top + 8.0, 240.0, 16.0),
+            "翻译  ·  GOOGLE / BING",
+            11.0,
+            true,
+            true,
+        );
+        let web_copy_btn = make_flat_button(
+            mtm,
+            top_rect(h, w - 60.0, results_top + 5.0, 48.0, 22.0),
+            "复制",
+            11.5,
             true,
             false,
-        );
-        let web_copy_btn = make_button(
-            mtm,
-            top_rect(cards_h, col_w - 64.0, 5.0, 54.0, 24.0),
-            "复制",
             ActionTag::CopyWebResult as isize,
             dispatcher,
             action_sel,
         );
+        web_copy_btn.setHidden(true);
+
         let (web_scroll, web_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(cards_h, 4.0, 32.0, col_w - 8.0, cards_h - 36.0),
+            top_rect(h, 2.0, results_top + 24.0, w - 4.0, web_h - 26.0),
             false,
-            13.5,
+            15.5,
             None,
         );
-        add_subview(&web_card, &web_header_label);
-        add_subview(&web_card, &web_copy_btn);
-        add_subview(&web_card, &web_scroll);
+        set_text_view_styled(&web_tv, WEB_PLACEHOLDER, true);
+        let web_bottom_line =
+            make_divider(mtm, top_rect(h, 0.0, results_top + web_h - 1.0, w, 1.0));
 
-        let ai_card = make_card_box(
-            mtm,
-            top_rect(h, 14.0 + col_w + 10.0, cards_top, col_w, cards_h),
-        );
+        // 4. 接下方 AI 翻译显示框
         let ai_header_label = make_label(
             mtm,
-            top_rect(cards_h, 10.0, 8.0, col_w - 76.0, 18.0),
-            "AI 翻译",
-            12.0,
+            top_rect(h, 16.0, ai_top + 8.0, 280.0, 16.0),
+            "AI",
+            11.0,
+            true,
+            true,
+        );
+        let ai_copy_btn = make_flat_button(
+            mtm,
+            top_rect(h, w - 60.0, ai_top + 5.0, 48.0, 22.0),
+            "复制",
+            11.5,
             true,
             false,
-        );
-        let ai_copy_btn = make_button(
-            mtm,
-            top_rect(cards_h, col_w - 64.0, 5.0, 54.0, 24.0),
-            "复制",
             ActionTag::CopyAiResult as isize,
             dispatcher,
             action_sel,
         );
+        ai_copy_btn.setHidden(true);
+
         let (ai_scroll, ai_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(cards_h, 4.0, 32.0, col_w - 8.0, cards_h - 36.0),
+            top_rect(h, 2.0, ai_top + 24.0, w - 4.0, ai_h - 28.0),
             false,
-            13.5,
+            15.5,
             None,
         );
-        add_subview(&ai_card, &ai_header_label);
-        add_subview(&ai_card, &ai_copy_btn);
-        add_subview(&ai_card, &ai_scroll);
+        set_text_view_styled(&ai_tv, AI_PLACEHOLDER, true);
 
+        add_subview(&root, &source_surface);
+        add_subview(&root, &input_placeholder);
+        add_subview(&root, &input_scroll);
+        add_subview(&root, &source_bottom_line);
+
+        add_subview(&root, &lang_surface);
         add_subview(&root, &source_popup);
         add_subview(&root, &swap_btn);
         add_subview(&root, &target_popup);
-        add_subview(&root, &translate_btn);
-        add_subview(&root, &clear_btn);
-        add_subview(&root, &input_scroll);
-        add_subview(&root, &web_card);
-        add_subview(&root, &ai_card);
+        add_subview(&root, &status_label);
+        add_subview(&root, &lang_bottom_line);
+
+        add_subview(&root, &web_header_label);
+        add_subview(&root, &web_copy_btn);
+        add_subview(&root, &web_scroll);
+        add_subview(&root, &web_bottom_line);
+
+        add_subview(&root, &ai_header_label);
+        add_subview(&root, &ai_copy_btn);
+        add_subview(&root, &ai_scroll);
 
         TranslateViewWidgets {
             root,
+            source_surface,
+            input_scroll,
+            input_tv,
+            input_placeholder,
+            source_bottom_line,
+            lang_surface,
             source_popup,
             swap_btn,
             target_popup,
-            translate_btn,
-            clear_btn,
-            input_scroll,
-            input_tv,
-            web_card,
+            status_label,
+            lang_bottom_line,
             web_header_label,
             web_copy_btn,
             web_scroll,
             web_tv,
-            ai_card,
+            web_bottom_line,
             ai_header_label,
             ai_copy_btn,
             ai_scroll,
@@ -615,98 +782,103 @@ impl AppController {
         let h = frame.size.height;
         let root = NSView::initWithFrame(mtm.alloc(), frame);
 
+        // 顶部折叠式历史对话选择条（点击右上角时钟按钮展开/收起）
+        let history_bar = NSView::initWithFrame(mtm.alloc(), top_rect(h, 0.0, 0.0, w, 36.0));
         let conv_popup = make_popup(
             mtm,
-            top_rect(h, 14.0, 6.0, 260.0, 26.0),
+            top_rect(36.0, 12.0, 5.0, w - 104.0, 26.0),
             &["当前对话"],
             0,
+            true,
             ActionTag::SelectConversation as isize,
             dispatcher,
             action_sel,
         );
-        let new_conv_btn = make_button(
+        let clear_hist_btn = make_flat_button(
             mtm,
-            top_rect(h, 280.0, 6.0, 82.0, 26.0),
-            "+ 新对话",
-            ActionTag::NewConversation as isize,
-            dispatcher,
-            action_sel,
-        );
-        let clear_hist_btn = make_button(
-            mtm,
-            top_rect(h, 366.0, 6.0, 82.0, 26.0),
+            top_rect(36.0, w - 84.0, 5.0, 72.0, 26.0),
             "清空历史",
+            12.0,
+            true,
+            true,
             ActionTag::ClearChatHistory as isize,
             dispatcher,
             action_sel,
         );
-        let stop_btn = make_button(
-            mtm,
-            top_rect(h, w - 166.0, 6.0, 74.0, 26.0),
-            "停止",
-            ActionTag::StopChatStream as isize,
-            dispatcher,
-            action_sel,
-        );
-        let copy_reply_btn = make_button(
-            mtm,
-            top_rect(h, w - 88.0, 6.0, 74.0, 26.0),
-            "复制回复",
-            ActionTag::CopyLastReply as isize,
-            dispatcher,
-            action_sel,
-        );
+        let history_bottom_line = make_divider(mtm, top_rect(36.0, 0.0, 35.0, w, 1.0));
+        add_subview(&history_bar, &conv_popup);
+        add_subview(&history_bar, &clear_hist_btn);
+        add_subview(&history_bar, &history_bottom_line);
+        history_bar.setHidden(true);
 
-        let input_h = 72.0;
-        let transcript_h = (h - 38.0 - input_h - 22.0).max(180.0);
+        let composer_h = 56.0;
+        let transcript_h = (h - composer_h).max(160.0);
         let (transcript_scroll, transcript_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 14.0, 38.0, w - 28.0, transcript_h),
+            top_rect(h, 4.0, 0.0, w - 8.0, transcript_h),
             false,
-            13.5,
+            14.5,
             None,
         );
-        let input_top = 38.0 + transcript_h + 8.0;
+
+        let composer_top = transcript_h;
+        let composer_top_line = make_divider(mtm, top_rect(h, 0.0, composer_top, w, 1.0));
+        let composer_surface = make_surface_box(
+            mtm,
+            top_rect(h, 0.0, composer_top + 1.0, w, composer_h - 1.0),
+            0.0,
+            0.45,
+        );
         let (input_scroll, input_tv) = make_scrollable_text_view(
             mtm,
-            top_rect(h, 14.0, input_top, w - 104.0, input_h),
+            top_rect(h, 4.0, composer_top + 6.0, w - 84.0, composer_h - 12.0),
             true,
-            13.5,
+            14.5,
             Some(dispatcher),
+        );
+        let input_placeholder = make_label(
+            mtm,
+            top_rect(h, 18.0, composer_top + 16.0, 200.0, 20.0),
+            "输入消息，回车发送",
+            14.5,
+            false,
+            true,
         );
         let send_btn = make_button(
             mtm,
-            top_rect(h, w - 84.0, input_top + 18.0, 70.0, 36.0),
+            top_rect(h, w - 74.0, composer_top + 13.0, 62.0, 30.0),
             "发送",
             ActionTag::SendChat as isize,
             dispatcher,
             action_sel,
         );
 
-        add_subview(&root, &conv_popup);
-        add_subview(&root, &new_conv_btn);
-        add_subview(&root, &clear_hist_btn);
-        add_subview(&root, &stop_btn);
-        add_subview(&root, &copy_reply_btn);
         add_subview(&root, &transcript_scroll);
+        add_subview(&root, &history_bar);
+        add_subview(&root, &composer_top_line);
+        add_subview(&root, &composer_surface);
+        add_subview(&root, &input_placeholder);
         add_subview(&root, &input_scroll);
         add_subview(&root, &send_btn);
 
         ChatViewWidgets {
             root,
+            history_bar,
             conv_popup,
-            new_conv_btn,
             clear_hist_btn,
-            stop_btn,
-            copy_reply_btn,
+            history_bottom_line,
             transcript_scroll,
             transcript_tv,
+            composer_top_line,
+            composer_surface,
             input_scroll,
             input_tv,
+            input_placeholder,
             send_btn,
         }
     }
 
+    /// 构建原版左侧分类栏 (`AI 翻译` / `AI 对话` / `快捷键` / `通用`) + 右侧纵向表单的设置面板。
     fn build_settings_view(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -717,6 +889,76 @@ impl AppController {
         let w = frame.size.width;
         let h = frame.size.height;
         let root = NSView::initWithFrame(mtm.alloc(), frame);
+
+        let top_divider = make_divider(mtm, top_rect(h, 12.0, 0.0, w - 24.0, 1.0));
+        let sidebar_w = 114.0;
+        let sidebar_divider = make_divider(mtm, top_rect(h, sidebar_w, 1.0, 1.0, h - 1.0));
+
+        let nav_translate_btn = make_flat_button(
+            mtm,
+            top_rect(h, 10.0, 12.0, sidebar_w - 20.0, 30.0),
+            "● AI 翻译",
+            13.0,
+            true,
+            true,
+            ActionTag::SettingsSecTranslate as isize,
+            dispatcher,
+            action_sel,
+        );
+        let nav_chat_btn = make_flat_button(
+            mtm,
+            top_rect(h, 10.0, 46.0, sidebar_w - 20.0, 30.0),
+            "   AI 对话",
+            13.0,
+            false,
+            false,
+            ActionTag::SettingsSecChat as isize,
+            dispatcher,
+            action_sel,
+        );
+        let nav_shortcuts_btn = make_flat_button(
+            mtm,
+            top_rect(h, 10.0, 80.0, sidebar_w - 20.0, 30.0),
+            "   快捷键",
+            13.0,
+            false,
+            false,
+            ActionTag::SettingsSecShortcuts as isize,
+            dispatcher,
+            action_sel,
+        );
+        let nav_general_btn = make_flat_button(
+            mtm,
+            top_rect(h, 10.0, 114.0, sidebar_w - 20.0, 30.0),
+            "   通用",
+            13.0,
+            false,
+            false,
+            ActionTag::SettingsSecGeneral as isize,
+            dispatcher,
+            action_sel,
+        );
+
+        add_subview(&root, &top_divider);
+        add_subview(&root, &sidebar_divider);
+        add_subview(&root, &nav_translate_btn);
+        add_subview(&root, &nav_chat_btn);
+        add_subview(&root, &nav_shortcuts_btn);
+        add_subview(&root, &nav_general_btn);
+
+        let content_x = sidebar_w + 14.0;
+        let content_w = (w - content_x - 14.0).max(310.0);
+        let sec_frame = top_rect(h, content_x, 6.0, content_w, h - 38.0);
+        let sec_h = sec_frame.size.height;
+
+        let sec_translate = NSView::initWithFrame(mtm.alloc(), sec_frame);
+        let sec_chat = NSView::initWithFrame(mtm.alloc(), sec_frame);
+        let sec_shortcuts = NSView::initWithFrame(mtm.alloc(), sec_frame);
+        let sec_general = NSView::initWithFrame(mtm.alloc(), sec_frame);
+
+        sec_chat.setHidden(true);
+        sec_shortcuts.setHidden(true);
+        sec_general.setHidden(true);
 
         let ai_cfg = settings.ai_translation_for_request();
         let chat_cfg = settings.chat_ai_for_request();
@@ -733,68 +975,80 @@ impl AppController {
             .position(|&b| b == chat_cfg.backend)
             .unwrap_or(0);
 
-        // Left Column: AI 翻译引擎 & AI 对话引擎
-        let sec1_title = make_label(
+        // ── Section 1: AI 翻译 ──
+        let t_head = make_label(
             mtm,
-            top_rect(h, 14.0, 4.0, 200.0, 18.0),
-            "一、AI 翻译引擎（独立模块）",
-            12.5,
+            top_rect(sec_h, 0.0, 6.0, 180.0, 18.0),
+            "AI 翻译（云端 / 本地服务 / GGUF）",
+            12.0,
             true,
-            false,
+            true,
         );
         let ai_enabled_chk = make_checkbox(
             mtm,
-            top_rect(h, 210.0, 3.0, 120.0, 20.0),
+            top_rect(sec_h, content_w - 110.0, 4.0, 110.0, 20.0),
             "启用 AI 翻译",
             ai_cfg.enabled,
             0,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &sec1_title);
-        add_subview(&root, &ai_enabled_chk);
+        add_subview(&sec_translate, &t_head);
+        add_subview(&sec_translate, &ai_enabled_chk);
 
-        let lbl_ai_backend = make_label(mtm, top_rect(h, 14.0, 28.0, 62.0, 18.0), "接入方式", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 32.0, 72.0, 18.0), "接入方式", 12.0, false, true),
+        );
         let ai_backend_popup = make_popup(
             mtm,
-            top_rect(h, 78.0, 25.0, 195.0, 24.0),
+            top_rect(sec_h, 74.0, 29.0, content_w - 144.0, 25.0),
             &backend_labels,
             ai_backend_idx,
+            true,
             ActionTag::AiTransBackendChanged as isize,
             dispatcher,
             action_sel,
         );
         let btn_ai_def_url = make_button(
             mtm,
-            top_rect(h, 276.0, 25.0, 62.0, 24.0),
+            top_rect(sec_h, content_w - 66.0, 29.0, 66.0, 25.0),
             "默认地址",
             ActionTag::AiTransFillDefaultUrl as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_ai_backend);
-        add_subview(&root, &ai_backend_popup);
-        add_subview(&root, &btn_ai_def_url);
+        add_subview(&sec_translate, &ai_backend_popup);
+        add_subview(&sec_translate, &btn_ai_def_url);
 
-        let lbl_ai_url = make_label(mtm, top_rect(h, 14.0, 55.0, 62.0, 18.0), "服务地址", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 64.0, 72.0, 18.0), "接口地址", 12.0, false, true),
+        );
         let ai_base_url_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 53.0, 258.0, 22.0),
+            top_rect(sec_h, 74.0, 62.0, content_w - 74.0, 23.0),
             &ai_cfg.base_url,
-            "http://127.0.0.1:11434 或 https://api.openai.com/v1",
+            "https://api.openai.com/v1 或 http://127.0.0.1:11434",
         );
-        add_subview(&root, &lbl_ai_url);
-        add_subview(&root, &ai_base_url_field);
+        add_subview(&sec_translate, &ai_base_url_field);
 
-        let lbl_ai_key = make_label(mtm, top_rect(h, 14.0, 81.0, 62.0, 18.0), "API Key", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 96.0, 72.0, 18.0), "API 密钥", 12.0, false, true),
+        );
         let ai_key_field = make_secure_field(
             mtm,
-            top_rect(h, 78.0, 79.0, 148.0, 22.0),
-            if ai_cfg.has_api_key { "已保存在配置中 (留空不改)" } else { "本地服务/GGUF 免填" },
+            top_rect(sec_h, 74.0, 94.0, content_w - 190.0, 23.0),
+            if ai_cfg.has_api_key {
+                "已保存，留空保持不变"
+            } else {
+                "sk-… (本地服务/GGUF免填)"
+            },
         );
         let ai_key_status_label = make_label(
             mtm,
-            top_rect(h, 230.0, 81.0, 52.0, 18.0),
+            top_rect(sec_h, content_w - 112.0, 96.0, 50.0, 18.0),
             if ai_cfg.has_api_key { "已保存" } else { "未设置" },
             11.0,
             false,
@@ -802,27 +1056,29 @@ impl AppController {
         );
         let btn_ai_clr_key = make_button(
             mtm,
-            top_rect(h, 282.0, 78.0, 56.0, 22.0),
+            top_rect(sec_h, content_w - 60.0, 93.0, 60.0, 24.0),
             "清除",
             ActionTag::AiTransClearKey as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_ai_key);
-        add_subview(&root, &ai_key_field);
-        add_subview(&root, &ai_key_status_label);
-        add_subview(&root, &btn_ai_clr_key);
+        add_subview(&sec_translate, &ai_key_field);
+        add_subview(&sec_translate, &ai_key_status_label);
+        add_subview(&sec_translate, &btn_ai_clr_key);
 
-        let lbl_ai_model = make_label(mtm, top_rect(h, 14.0, 107.0, 62.0, 18.0), "模型名称", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 128.0, 72.0, 18.0), "模型名称", 12.0, false, true),
+        );
         let ai_model_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 105.0, 122.0, 22.0),
+            top_rect(sec_h, 74.0, 126.0, content_w - 216.0, 23.0),
             &ai_cfg.model,
-            "如 qwen2.5:7b / gpt-4o-mini",
+            "gpt-4o-mini / qwen2.5:7b",
         );
         let btn_ai_discover = make_button(
             mtm,
-            top_rect(h, 202.0, 104.0, 64.0, 24.0),
+            top_rect(sec_h, content_w - 138.0, 125.0, 66.0, 25.0),
             "探测模型",
             ActionTag::AiTransDiscoverModels as isize,
             dispatcher,
@@ -830,127 +1086,155 @@ impl AppController {
         );
         let ai_discovered_popup = make_popup(
             mtm,
-            top_rect(h, 266.0, 104.0, 72.0, 24.0),
+            top_rect(sec_h, content_w - 70.0, 125.0, 70.0, 25.0),
             &["选择…"],
             0,
+            true,
             ActionTag::AiTransModelPopupSelected as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_ai_model);
-        add_subview(&root, &ai_model_field);
-        add_subview(&root, &btn_ai_discover);
-        add_subview(&root, &ai_discovered_popup);
+        add_subview(&sec_translate, &ai_model_field);
+        add_subview(&sec_translate, &btn_ai_discover);
+        add_subview(&sec_translate, &ai_discovered_popup);
 
-        let lbl_ai_gguf = make_label(mtm, top_rect(h, 14.0, 133.0, 62.0, 18.0), "GGUF路径", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 160.0, 72.0, 18.0), "GGUF模型", 12.0, false, true),
+        );
         let ai_gguf_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 131.0, 198.0, 22.0),
+            top_rect(sec_h, 74.0, 158.0, content_w - 138.0, 23.0),
             &ai_cfg.gguf_model_path,
-            "直接加载 .gguf 量化模型路径",
+            "本地 .gguf 模型文件路径（仅直接加载模式需填）",
         );
         let btn_ai_gguf = make_button(
             mtm,
-            top_rect(h, 278.0, 130.0, 60.0, 24.0),
+            top_rect(sec_h, content_w - 60.0, 157.0, 60.0, 25.0),
             "浏览…",
             ActionTag::AiTransBrowseGguf as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_ai_gguf);
-        add_subview(&root, &ai_gguf_field);
-        add_subview(&root, &btn_ai_gguf);
+        add_subview(&sec_translate, &ai_gguf_field);
+        add_subview(&sec_translate, &btn_ai_gguf);
 
-        let lbl_ai_tok = make_label(mtm, top_rect(h, 14.0, 159.0, 62.0, 18.0), "分词器", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 192.0, 72.0, 18.0), "分词词表", 12.0, false, true),
+        );
         let ai_tokenizer_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 157.0, 198.0, 22.0),
+            top_rect(sec_h, 74.0, 190.0, content_w - 138.0, 23.0),
             &ai_cfg.gguf_tokenizer_path,
-            "可选 tokenizer.json (留空读内嵌词表)",
+            "可选 tokenizer.json (留空自动读取 GGUF 内嵌词表)",
         );
         let btn_ai_tok = make_button(
             mtm,
-            top_rect(h, 278.0, 156.0, 60.0, 24.0),
+            top_rect(sec_h, content_w - 60.0, 189.0, 60.0, 25.0),
             "浏览…",
             ActionTag::AiTransBrowseTokenizer as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_ai_tok);
-        add_subview(&root, &ai_tokenizer_field);
-        add_subview(&root, &btn_ai_tok);
+        add_subview(&sec_translate, &ai_tokenizer_field);
+        add_subview(&sec_translate, &btn_ai_tok);
 
-        let lbl_ai_prompt = make_label(mtm, top_rect(h, 14.0, 185.0, 62.0, 18.0), "翻译指令", 11.5, false, true);
+        add_subview(
+            &sec_translate,
+            &make_label(mtm, top_rect(sec_h, 0.0, 224.0, 72.0, 18.0), "翻译提示词", 12.0, false, true),
+        );
         let ai_prompt_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 183.0, 258.0, 22.0),
+            top_rect(sec_h, 74.0, 222.0, content_w - 74.0, 23.0),
             &ai_cfg.translate_prompt,
-            "包含 {source} 与 {target} 占位符",
+            "用 {source} 和 {target} 表示源语言和目标语言",
         );
-        add_subview(&root, &lbl_ai_prompt);
-        add_subview(&root, &ai_prompt_field);
+        add_subview(&sec_translate, &ai_prompt_field);
 
-        // Section 2: AI 对话引擎（左下）
-        let sec2_title = make_label(
+        let save_ai_btn = make_button(
             mtm,
-            top_rect(h, 14.0, 216.0, 165.0, 18.0),
-            "二、AI 对话引擎",
-            12.5,
+            top_rect(sec_h, 0.0, 260.0, 96.0, 28.0),
+            "保存配置",
+            ActionTag::SaveSettings as isize,
+            dispatcher,
+            action_sel,
+        );
+        add_subview(&sec_translate, &save_ai_btn);
+
+        // ── Section 2: AI 对话 ──
+        let c_head = make_label(
+            mtm,
+            top_rect(sec_h, 0.0, 6.0, 180.0, 18.0),
+            "AI 对话（独立配置）",
+            12.0,
             true,
-            false,
+            true,
         );
         let btn_sync_from_trans = make_button(
             mtm,
-            top_rect(h, 185.0, 212.0, 152.0, 24.0),
-            "复用上方翻译模型配置",
+            top_rect(sec_h, content_w - 138.0, 3.0, 138.0, 24.0),
+            "复用 AI 翻译配置",
             ActionTag::ChatCopyFromTrans as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &sec2_title);
-        add_subview(&root, &btn_sync_from_trans);
+        add_subview(&sec_chat, &c_head);
+        add_subview(&sec_chat, &btn_sync_from_trans);
 
-        let lbl_chat_backend = make_label(mtm, top_rect(h, 14.0, 242.0, 62.0, 18.0), "接入方式", 11.5, false, true);
+        add_subview(
+            &sec_chat,
+            &make_label(mtm, top_rect(sec_h, 0.0, 36.0, 72.0, 18.0), "接入方式", 12.0, false, true),
+        );
         let chat_backend_popup = make_popup(
             mtm,
-            top_rect(h, 78.0, 239.0, 195.0, 24.0),
+            top_rect(sec_h, 74.0, 33.0, content_w - 144.0, 25.0),
             &backend_labels,
             chat_backend_idx,
+            true,
             ActionTag::ChatBackendChanged as isize,
             dispatcher,
             action_sel,
         );
         let btn_chat_def_url = make_button(
             mtm,
-            top_rect(h, 276.0, 239.0, 62.0, 24.0),
+            top_rect(sec_h, content_w - 66.0, 33.0, 66.0, 25.0),
             "默认地址",
             ActionTag::ChatFillDefaultUrl as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_chat_backend);
-        add_subview(&root, &chat_backend_popup);
-        add_subview(&root, &btn_chat_def_url);
+        add_subview(&sec_chat, &chat_backend_popup);
+        add_subview(&sec_chat, &btn_chat_def_url);
 
-        let lbl_chat_url = make_label(mtm, top_rect(h, 14.0, 269.0, 62.0, 18.0), "服务地址", 11.5, false, true);
+        add_subview(
+            &sec_chat,
+            &make_label(mtm, top_rect(sec_h, 0.0, 68.0, 72.0, 18.0), "接口地址", 12.0, false, true),
+        );
         let chat_base_url_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 267.0, 258.0, 22.0),
+            top_rect(sec_h, 74.0, 66.0, content_w - 74.0, 23.0),
             &chat_cfg.base_url,
-            "http://127.0.0.1:11434 或 https://api.openai.com/v1",
+            "https://api.openai.com/v1 或 http://127.0.0.1:11434",
         );
-        add_subview(&root, &lbl_chat_url);
-        add_subview(&root, &chat_base_url_field);
+        add_subview(&sec_chat, &chat_base_url_field);
 
-        let lbl_chat_key = make_label(mtm, top_rect(h, 14.0, 295.0, 62.0, 18.0), "API Key", 11.5, false, true);
+        add_subview(
+            &sec_chat,
+            &make_label(mtm, top_rect(sec_h, 0.0, 100.0, 72.0, 18.0), "API 密钥", 12.0, false, true),
+        );
         let chat_key_field = make_secure_field(
             mtm,
-            top_rect(h, 78.0, 293.0, 148.0, 22.0),
-            if chat_cfg.has_api_key { "已保存在配置中 (留空不改)" } else { "本地服务/GGUF 免填" },
+            top_rect(sec_h, 74.0, 98.0, content_w - 190.0, 23.0),
+            if chat_cfg.has_api_key {
+                "已保存，留空保持不变"
+            } else {
+                "sk-… (本地服务/GGUF免填)"
+            },
         );
         let chat_key_status_label = make_label(
             mtm,
-            top_rect(h, 230.0, 295.0, 52.0, 18.0),
+            top_rect(sec_h, content_w - 112.0, 100.0, 50.0, 18.0),
             if chat_cfg.has_api_key { "已保存" } else { "未设置" },
             11.0,
             false,
@@ -958,27 +1242,29 @@ impl AppController {
         );
         let btn_chat_clr_key = make_button(
             mtm,
-            top_rect(h, 282.0, 292.0, 56.0, 22.0),
+            top_rect(sec_h, content_w - 60.0, 97.0, 60.0, 24.0),
             "清除",
             ActionTag::ChatClearKey as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_chat_key);
-        add_subview(&root, &chat_key_field);
-        add_subview(&root, &chat_key_status_label);
-        add_subview(&root, &btn_chat_clr_key);
+        add_subview(&sec_chat, &chat_key_field);
+        add_subview(&sec_chat, &chat_key_status_label);
+        add_subview(&sec_chat, &btn_chat_clr_key);
 
-        let lbl_chat_model = make_label(mtm, top_rect(h, 14.0, 321.0, 62.0, 18.0), "模型名称", 11.5, false, true);
+        add_subview(
+            &sec_chat,
+            &make_label(mtm, top_rect(sec_h, 0.0, 132.0, 72.0, 18.0), "模型名称", 12.0, false, true),
+        );
         let chat_model_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 319.0, 122.0, 22.0),
+            top_rect(sec_h, 74.0, 130.0, content_w - 216.0, 23.0),
             &chat_cfg.model,
-            "如 qwen2.5:7b / gpt-4o-mini",
+            "gpt-4o-mini / qwen2.5:7b",
         );
         let btn_chat_discover = make_button(
             mtm,
-            top_rect(h, 202.0, 318.0, 64.0, 24.0),
+            top_rect(sec_h, content_w - 138.0, 129.0, 66.0, 25.0),
             "探测模型",
             ActionTag::ChatDiscoverModels as isize,
             dispatcher,
@@ -986,131 +1272,175 @@ impl AppController {
         );
         let chat_discovered_popup = make_popup(
             mtm,
-            top_rect(h, 266.0, 318.0, 72.0, 24.0),
+            top_rect(sec_h, content_w - 70.0, 129.0, 70.0, 25.0),
             &["选择…"],
             0,
+            true,
             ActionTag::ChatModelPopupSelected as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_chat_model);
-        add_subview(&root, &chat_model_field);
-        add_subview(&root, &btn_chat_discover);
-        add_subview(&root, &chat_discovered_popup);
+        add_subview(&sec_chat, &chat_model_field);
+        add_subview(&sec_chat, &btn_chat_discover);
+        add_subview(&sec_chat, &chat_discovered_popup);
 
-        let lbl_chat_gguf = make_label(mtm, top_rect(h, 14.0, 347.0, 62.0, 18.0), "GGUF路径", 11.5, false, true);
+        add_subview(
+            &sec_chat,
+            &make_label(mtm, top_rect(sec_h, 0.0, 164.0, 72.0, 18.0), "GGUF模型", 12.0, false, true),
+        );
         let chat_gguf_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 345.0, 198.0, 22.0),
+            top_rect(sec_h, 74.0, 162.0, content_w - 138.0, 23.0),
             &chat_cfg.gguf_model_path,
-            "直接加载 .gguf 量化模型路径",
+            "本地 .gguf 模型文件路径",
         );
         let btn_chat_gguf = make_button(
             mtm,
-            top_rect(h, 278.0, 344.0, 60.0, 24.0),
+            top_rect(sec_h, content_w - 60.0, 161.0, 60.0, 25.0),
             "浏览…",
             ActionTag::ChatBrowseGguf as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &lbl_chat_gguf);
-        add_subview(&root, &chat_gguf_field);
-        add_subview(&root, &btn_chat_gguf);
+        add_subview(&sec_chat, &chat_gguf_field);
+        add_subview(&sec_chat, &btn_chat_gguf);
 
-        let lbl_chat_prompt = make_label(mtm, top_rect(h, 14.0, 373.0, 62.0, 18.0), "系统提示", 11.5, false, true);
+        add_subview(
+            &sec_chat,
+            &make_label(mtm, top_rect(sec_h, 0.0, 196.0, 72.0, 18.0), "系统提示词", 12.0, false, true),
+        );
         let chat_prompt_field = make_text_field(
             mtm,
-            top_rect(h, 78.0, 371.0, 258.0, 22.0),
+            top_rect(sec_h, 74.0, 194.0, content_w - 74.0, 23.0),
             &chat_cfg.chat_prompt,
-            "可选 System Prompt",
+            "可选，会作为系统提示加在对话开头",
         );
-        add_subview(&root, &lbl_chat_prompt);
-        add_subview(&root, &chat_prompt_field);
+        add_subview(&sec_chat, &chat_prompt_field);
 
-        // Right Column: 全局快捷键 & 外观通用
-        let rx = 354.0;
-        let rw = (w - rx - 14.0).max(290.0);
-
-        let sec3_title = make_label(
+        let save_chat_btn = make_button(
             mtm,
-            top_rect(h, rx, 4.0, 180.0, 18.0),
-            "三、全局快捷键",
-            12.5,
+            top_rect(sec_h, 0.0, 232.0, 96.0, 28.0),
+            "保存配置",
+            ActionTag::SaveSettings as isize,
+            dispatcher,
+            action_sel,
+        );
+        add_subview(&sec_chat, &save_chat_btn);
+
+        // ── Section 3: 快捷键 ──
+        let sc_head = make_label(
+            mtm,
+            top_rect(sec_h, 0.0, 6.0, 160.0, 18.0),
+            "全局快捷键",
+            12.0,
             true,
-            false,
+            true,
         );
         let btn_reset_sc = make_button(
             mtm,
-            top_rect(h, rx + rw - 92.0, 2.0, 92.0, 24.0),
+            top_rect(sec_h, content_w - 92.0, 3.0, 92.0, 24.0),
             "恢复默认热键",
             ActionTag::ResetDefaultShortcuts as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &sec3_title);
-        add_subview(&root, &btn_reset_sc);
+        add_subview(&sec_shortcuts, &sc_head);
+        add_subview(&sec_shortcuts, &btn_reset_sc);
 
-        let lbl_sc1 = make_label(mtm, top_rect(h, rx, 32.0, 88.0, 18.0), "呼出翻译窗口", 11.5, false, true);
+        add_subview(
+            &sec_shortcuts,
+            &make_label(mtm, top_rect(sec_h, 0.0, 38.0, 88.0, 18.0), "呼出翻译", 12.0, false, true),
+        );
         let sc_toggle_field = make_text_field(
             mtm,
-            top_rect(h, rx + 90.0, 30.0, rw - 90.0, 22.0),
+            top_rect(sec_h, 90.0, 36.0, content_w - 90.0, 23.0),
             &sc_cfg.toggle,
-            "如 CmdOrCtrl+Shift+Space",
+            "CmdOrCtrl+Shift+Space",
         );
-        let lbl_sc2 = make_label(mtm, top_rect(h, rx, 60.0, 88.0, 18.0), "截图 OCR 翻译", 11.5, false, true);
+        add_subview(
+            &sec_shortcuts,
+            &make_label(mtm, top_rect(sec_h, 0.0, 72.0, 88.0, 18.0), "截图 OCR", 12.0, false, true),
+        );
         let sc_ocr_field = make_text_field(
             mtm,
-            top_rect(h, rx + 90.0, 58.0, rw - 90.0, 22.0),
+            top_rect(sec_h, 90.0, 70.0, content_w - 90.0, 23.0),
             &sc_cfg.ocr,
-            "如 CmdOrCtrl+Shift+S",
+            "CmdOrCtrl+Shift+S",
         );
-        let lbl_sc3 = make_label(mtm, top_rect(h, rx, 88.0, 88.0, 18.0), "呼出 AI 对话", 11.5, false, true);
+        add_subview(
+            &sec_shortcuts,
+            &make_label(mtm, top_rect(sec_h, 0.0, 106.0, 88.0, 18.0), "呼出 AI 对话", 12.0, false, true),
+        );
         let sc_ai_field = make_text_field(
             mtm,
-            top_rect(h, rx + 90.0, 86.0, rw - 90.0, 22.0),
+            top_rect(sec_h, 90.0, 104.0, content_w - 90.0, 23.0),
             &sc_cfg.ai_dialog,
-            "如 Option+Space",
+            "Option+Space",
         );
-        let lbl_sc4 = make_label(mtm, top_rect(h, rx, 116.0, 88.0, 18.0), "划词即时翻译", 11.5, false, true);
+        add_subview(
+            &sec_shortcuts,
+            &make_label(mtm, top_rect(sec_h, 0.0, 140.0, 88.0, 18.0), "划词翻译", 12.0, false, true),
+        );
         let sc_sel_trans_field = make_text_field(
             mtm,
-            top_rect(h, rx + 90.0, 114.0, rw - 90.0, 22.0),
+            top_rect(sec_h, 90.0, 138.0, content_w - 90.0, 23.0),
             &sc_cfg.selection_translate,
-            "可与呼出翻译共用同一热键",
+            "可与呼出翻译共用同一按键",
         );
-        let lbl_sc5 = make_label(mtm, top_rect(h, rx, 144.0, 88.0, 18.0), "划词发送 AI", 11.5, false, true);
+        add_subview(
+            &sec_shortcuts,
+            &make_label(mtm, top_rect(sec_h, 0.0, 174.0, 88.0, 18.0), "划词 AI 对话", 12.0, false, true),
+        );
         let sc_sel_ai_field = make_text_field(
             mtm,
-            top_rect(h, rx + 90.0, 142.0, rw - 90.0, 22.0),
+            top_rect(sec_h, 90.0, 172.0, content_w - 90.0, 23.0),
             &sc_cfg.selection_ai_dialog,
-            "可与呼出 AI 对话共用同一热键",
+            "可与呼出 AI 对话共用同一按键",
         );
-
-        add_subview(&root, &lbl_sc1);
-        add_subview(&root, &sc_toggle_field);
-        add_subview(&root, &lbl_sc2);
-        add_subview(&root, &sc_ocr_field);
-        add_subview(&root, &lbl_sc3);
-        add_subview(&root, &sc_ai_field);
-        add_subview(&root, &lbl_sc4);
-        add_subview(&root, &sc_sel_trans_field);
-        add_subview(&root, &lbl_sc5);
-        add_subview(&root, &sc_sel_ai_field);
-
-        let sec4_title = make_label(
+        let save_sc_btn = make_button(
             mtm,
-            top_rect(h, rx, 182.0, 200.0, 18.0),
-            "四、外观与系统集成",
-            12.5,
-            true,
-            false,
+            top_rect(sec_h, 0.0, 212.0, 104.0, 28.0),
+            "保存快捷键",
+            ActionTag::SaveSettings as isize,
+            dispatcher,
+            action_sel,
         );
-        add_subview(&root, &sec4_title);
+        let sc_hint = make_label(
+            mtm,
+            top_rect(sec_h, 0.0, 248.0, content_w, 54.0),
+            "每个快捷键都可单独设置或留空关闭。「呼出翻译」和「划词翻译」可共用同一个键：有选中文本时走划词，无选中文本则呼出窗口。",
+            11.0,
+            false,
+            true,
+        );
+        add_subview(&sec_shortcuts, &sc_toggle_field);
+        add_subview(&sec_shortcuts, &sc_ocr_field);
+        add_subview(&sec_shortcuts, &sc_ai_field);
+        add_subview(&sec_shortcuts, &sc_sel_trans_field);
+        add_subview(&sec_shortcuts, &sc_sel_ai_field);
+        add_subview(&sec_shortcuts, &save_sc_btn);
+        add_subview(&sec_shortcuts, &sc_hint);
 
-        let lbl_opacity = make_label(mtm, top_rect(h, rx, 210.0, 82.0, 18.0), "面板不透明度", 11.5, false, true);
+        // ── Section 4: 通用 ──
+        add_subview(
+            &sec_general,
+            &make_label(mtm, top_rect(sec_h, 0.0, 6.0, 120.0, 18.0), "通用", 12.0, true, true),
+        );
+        add_subview(
+            &sec_general,
+            &make_label(mtm, top_rect(sec_h, 0.0, 38.0, 88.0, 18.0), "面板透明度", 12.5, false, false),
+        );
+        let opacity_val_label = make_label(
+            mtm,
+            top_rect(sec_h, content_w - 52.0, 38.0, 52.0, 18.0),
+            &format!("{:.0}%", app_cfg.panel_opacity * 100.0),
+            12.0,
+            true,
+            true,
+        );
         let opacity_slider = make_slider(
             mtm,
-            top_rect(h, rx + 86.0, 208.0, rw - 136.0, 22.0),
+            top_rect(sec_h, 0.0, 62.0, content_w, 22.0),
             PANEL_OPACITY_MIN,
             PANEL_OPACITY_MAX,
             app_cfg.panel_opacity,
@@ -1118,51 +1448,64 @@ impl AppController {
             dispatcher,
             action_sel,
         );
-        let opacity_val_label = make_label(
-            mtm,
-            top_rect(h, rx + rw - 46.0, 210.0, 46.0, 18.0),
-            &format!("{:.0}%", app_cfg.panel_opacity * 100.0),
-            11.5,
-            false,
-            false,
-        );
-        add_subview(&root, &lbl_opacity);
-        add_subview(&root, &opacity_slider);
-        add_subview(&root, &opacity_val_label);
-
         let autostart_chk = make_checkbox(
             mtm,
-            top_rect(h, rx, 240.0, 220.0, 22.0),
-            "登录 macOS 时开机自动静默启动",
+            top_rect(sec_h, 0.0, 98.0, 220.0, 22.0),
+            "开机自动启动",
             ttree_platform_macos::autostart::is_enabled(),
-            0,
+            ActionTag::AutostartToggled as isize,
             dispatcher,
             action_sel,
         );
-        add_subview(&root, &autostart_chk);
-
-        let notes_label = make_label(
+        let ver_label = make_label(
             mtm,
-            top_rect(h, rx, 272.0, rw, 84.0),
-            "提示：\n• Ollama 默认端口 11434，LM Studio 默认 1234，MLX 默认 8080\n• 选择「直接加载本地 GGUF 模型」可在 Apple Silicon Metal GPU 上原生运行量化模型\n• 修改后点击下方「保存全部配置」立即生效",
-            11.0,
+            top_rect(sec_h, 0.0, 136.0, content_w, 20.0),
+            "版本：0.2.0 (100% Pure Rust Native AppKit)",
+            12.0,
             false,
             true,
         );
-        add_subview(&root, &notes_label);
-
-        let save_btn = make_button(
+        let gen_hint = make_label(
             mtm,
-            top_rect(h, rx, 364.0, rw, 34.0),
-            "💾 保存全部配置 (立即生效)",
-            ActionTag::SaveSettings as isize,
-            dispatcher,
-            action_sel,
+            top_rect(sec_h, 0.0, 166.0, content_w, 72.0),
+            "调整面板透明度可让底层桌面毛玻璃透出。\n截图 OCR 需要“屏幕录制”权限；划词翻译优先使用“辅助功能”权限，未授权时会临时用复制代替。\n所有配置直接保存在本地 JSON，不再调用 macOS 钥匙串。",
+            11.5,
+            false,
+            true,
         );
-        add_subview(&root, &save_btn);
+        add_subview(&sec_general, &opacity_val_label);
+        add_subview(&sec_general, &opacity_slider);
+        add_subview(&sec_general, &autostart_chk);
+        add_subview(&sec_general, &ver_label);
+        add_subview(&sec_general, &gen_hint);
+
+        let settings_status_label = make_label(
+            mtm,
+            top_rect(h, content_x, h - 28.0, content_w, 20.0),
+            "",
+            12.0,
+            true,
+            false,
+        );
+
+        add_subview(&root, &sec_translate);
+        add_subview(&root, &sec_chat);
+        add_subview(&root, &sec_shortcuts);
+        add_subview(&root, &sec_general);
+        add_subview(&root, &settings_status_label);
 
         SettingsViewWidgets {
             root,
+            top_divider,
+            sidebar_divider,
+            nav_translate_btn,
+            nav_chat_btn,
+            nav_shortcuts_btn,
+            nav_general_btn,
+            sec_translate,
+            sec_chat,
+            sec_shortcuts,
+            sec_general,
             ai_enabled_chk,
             ai_backend_popup,
             ai_base_url_field,
@@ -1189,11 +1532,55 @@ impl AppController {
             opacity_slider,
             opacity_val_label,
             autostart_chk,
+            settings_status_label,
         }
     }
 
     pub fn set_status(&self, msg: &str) {
-        set_field_string(&self.status_label, msg);
+        set_field_string(&self.translate_ui.status_label, msg);
+        set_field_string(&self.settings_ui.settings_status_label, msg);
+    }
+
+    pub fn switch_settings_section(&mut self, sec: SettingsSection) {
+        self.active_settings_sec = sec;
+        self.settings_ui
+            .sec_translate
+            .setHidden(sec != SettingsSection::Translate);
+        self.settings_ui
+            .sec_chat
+            .setHidden(sec != SettingsSection::Chat);
+        self.settings_ui
+            .sec_shortcuts
+            .setHidden(sec != SettingsSection::Shortcuts);
+        self.settings_ui
+            .sec_general
+            .setHidden(sec != SettingsSection::General);
+
+        let set_nav = |btn: &NSButton, label: &str, active: bool| {
+            let prefix = if active { "● " } else { "   " };
+            btn.setTitle(&NSString::from_str(&format!("{prefix}{label}")));
+            set_flat_button_active(btn, active, true);
+        };
+        set_nav(
+            &self.settings_ui.nav_translate_btn,
+            "AI 翻译",
+            sec == SettingsSection::Translate,
+        );
+        set_nav(
+            &self.settings_ui.nav_chat_btn,
+            "AI 对话",
+            sec == SettingsSection::Chat,
+        );
+        set_nav(
+            &self.settings_ui.nav_shortcuts_btn,
+            "快捷键",
+            sec == SettingsSection::Shortcuts,
+        );
+        set_nav(
+            &self.settings_ui.nav_general_btn,
+            "通用",
+            sec == SettingsSection::General,
+        );
     }
 
     pub fn switch_tab(&mut self, tab: TabMode) {
@@ -1204,17 +1591,42 @@ impl AppController {
             self.set_pinned(true);
         }
 
+        if tab != TabMode::Settings {
+            self.last_main_mode = tab;
+        }
         self.active_tab = tab;
+
         self.translate_ui.root.setHidden(tab != TabMode::Translate);
         self.chat_ui.root.setHidden(tab != TabMode::Chat);
         self.settings_ui.root.setHidden(tab != TabMode::Settings);
 
-        let t_title = if tab == TabMode::Translate { "● 翻译" } else { "翻译" };
-        let c_title = if tab == TabMode::Chat { "● AI 对话" } else { "AI 对话" };
-        let s_title = if tab == TabMode::Settings { "● 设置" } else { "设置" };
-        self.tab_translate_btn.setTitle(&NSString::from_str(t_title));
-        self.tab_chat_btn.setTitle(&NSString::from_str(c_title));
-        self.tab_settings_btn.setTitle(&NSString::from_str(s_title));
+        let in_settings = tab == TabMode::Settings;
+        self.segmented_bg.setHidden(in_settings);
+        self.segmented_pill.setHidden(in_settings);
+        self.tab_translate_btn.setHidden(in_settings);
+        self.tab_chat_btn.setHidden(in_settings);
+        self.settings_title_label.setHidden(!in_settings);
+        self.gear_btn.setHidden(in_settings);
+        self.done_settings_btn.setHidden(!in_settings);
+        self.new_chat_top_btn.setHidden(tab != TabMode::Chat);
+        self.history_top_btn.setHidden(tab != TabMode::Chat);
+
+        let (win_w, win_h) = self.last_known_size;
+        if !in_settings {
+            let pill_x = if tab == TabMode::Translate { 15.0 } else { 79.0 };
+            self.segmented_pill
+                .setFrame(top_rect(win_h, pill_x, 10.0, 62.0, 26.0));
+            set_flat_button_active(&self.tab_translate_btn, tab == TabMode::Translate, false);
+            set_flat_button_active(&self.tab_chat_btn, tab == TabMode::Chat, false);
+        }
+
+        // 调整右上角固定按钮坐标以适配当前模式的右上角图标列
+        let pin_x = match tab {
+            TabMode::Translate => win_w - 78.0,
+            TabMode::Chat => win_w - 146.0,
+            TabMode::Settings => win_w - 94.0,
+        };
+        self.pin_btn.setFrame(top_rect(win_h, pin_x, 7.0, 32.0, 32.0));
 
         match tab {
             TabMode::Translate => {
@@ -1235,8 +1647,8 @@ impl AppController {
             NSNormalWindowLevel
         };
         self.window.setLevel(level);
-        let title = if pinned { "📌 已置顶" } else { "置顶" };
-        self.pin_btn.setTitle(&NSString::from_str(title));
+        let sym = if pinned { "pin.fill" } else { "pin" };
+        set_button_symbol(&self.pin_btn, sym, "📌", pinned);
     }
 
     pub fn show_and_focus_window(&mut self) {
@@ -1271,18 +1683,18 @@ impl AppController {
     pub fn refresh_ai_header_badge(&self) {
         let cfg = self.settings.ai_translation_for_request();
         let label = if !cfg.enabled {
-            "AI 翻译 (已在设置中关闭)".to_string()
+            "AI (未开启)".to_string()
         } else {
             match cfg.backend {
-                AiBackendKind::OpenAiCompatible => format!("AI 翻译 (云端 · {})", cfg.model),
-                AiBackendKind::Ollama => format!("AI 翻译 (Ollama · {})", cfg.model),
-                AiBackendKind::LocalServer => format!("AI 翻译 (本地服务 · {})", cfg.model),
+                AiBackendKind::OpenAiCompatible => format!("AI  ·  {}", cfg.model),
+                AiBackendKind::Ollama => format!("AI  ·  OLLAMA ({})", cfg.model),
+                AiBackendKind::LocalServer => format!("AI  ·  LOCAL ({})", cfg.model),
                 AiBackendKind::CandleGguf => {
                     let name = std::path::Path::new(&cfg.gguf_model_path)
                         .file_name()
                         .and_then(|s| s.to_str())
-                        .unwrap_or("未选 .gguf");
-                    format!("AI 翻译 (GGUF · {name})")
+                        .unwrap_or("GGUF");
+                    format!("AI  ·  {name}")
                 }
             }
         };
@@ -1309,13 +1721,20 @@ impl AppController {
         let raw_text = get_text_view_string(&self.translate_ui.input_tv);
         let trimmed = raw_text.trim().to_string();
         self.pending_debounce_since = None;
+        self.translate_ui
+            .input_placeholder
+            .setHidden(!raw_text.is_empty());
 
         if trimmed.is_empty() {
             self.translate_cancel.cancel_current();
-            set_text_view_string(&self.translate_ui.web_tv, "");
-            set_text_view_string(&self.translate_ui.ai_tv, "");
+            self.web_has_content = false;
+            self.ai_has_content = false;
+            self.translate_ui.web_copy_btn.setHidden(true);
+            self.translate_ui.ai_copy_btn.setHidden(true);
+            set_text_view_styled(&self.translate_ui.web_tv, WEB_PLACEHOLDER, true);
+            set_text_view_styled(&self.translate_ui.ai_tv, AI_PLACEHOLDER, true);
             self.last_translated_source.clear();
-            self.set_status("就绪");
+            self.set_status("");
             return;
         }
 
@@ -1323,22 +1742,26 @@ impl AppController {
         self.translate_gen = self.translate_gen.wrapping_add(1);
         let gen = self.translate_gen;
         self.last_translated_source = trimmed.clone();
+        self.web_has_content = false;
+        self.ai_has_content = false;
+        self.translate_ui.web_copy_btn.setHidden(true);
+        self.translate_ui.ai_copy_btn.setHidden(true);
 
         let src_ui = self.selected_source_code();
         let tgt_ui = self.selected_target_code();
         let (resolved_src, resolved_tgt) = resolve_language_pair(&trimmed, src_ui, tgt_ui);
 
-        set_text_view_string(&self.translate_ui.web_tv, "正在极速翻译…");
+        set_text_view_styled(&self.translate_ui.web_tv, WEB_LOADING_TEXT, true);
         let ai_cfg = self.settings.ai_translation_for_request();
         self.refresh_ai_header_badge();
         if ai_cfg.enabled {
-            set_text_view_string(&self.translate_ui.ai_tv, "正在请求 AI 流式译文…");
+            set_text_view_styled(&self.translate_ui.ai_tv, AI_LOADING_TEXT, true);
         } else {
-            set_text_view_string(&self.translate_ui.ai_tv, "（AI 翻译未启用，可在「设置」中开启或接入本地 Ollama / GGUF 模型）");
+            set_text_view_styled(&self.translate_ui.ai_tv, AI_PLACEHOLDER, true);
         }
-        self.set_status(&format!("正在翻译 ({resolved_src} → {resolved_tgt})…"));
+        self.set_status("");
 
-        // 1. 并发启动极速网页翻译（Google POST + Bing 内存缓存 Token 竞速）
+        // 1. 并发启动谷歌/微软负载均衡竞速翻译
         let web_tx = self.ui_tx.clone();
         let web_text = trimmed.clone();
         let web_src = resolved_src.clone();
@@ -1352,7 +1775,7 @@ impl AppController {
             }
         });
 
-        // 2. 并发启动 AI 流式翻译（云端 / Ollama / LM Studio / 本地 GGUF）
+        // 2. 并发启动 AI 流式翻译
         if ai_cfg.enabled {
             let ai_tx = self.ui_tx.clone();
             let ai_text = trimmed;
@@ -1385,7 +1808,6 @@ impl AppController {
 
     pub fn trigger_ocr(&mut self) {
         self.hide_window();
-        self.set_status("正在框选截图区域…");
         let tx = self.ui_tx.clone();
         self.rt.spawn(async move {
             let res = tokio::task::spawn_blocking(ttree_ocr::capture_and_recognize)
@@ -1490,6 +1912,21 @@ impl AppController {
                 self.switch_tab(TabMode::Settings);
                 self.show_and_focus_window();
             }
+            ActionTag::CloseSettings => {
+                self.switch_tab(self.last_main_mode);
+            }
+            ActionTag::SettingsSecTranslate => {
+                self.switch_settings_section(SettingsSection::Translate);
+            }
+            ActionTag::SettingsSecChat => {
+                self.switch_settings_section(SettingsSection::Chat);
+            }
+            ActionTag::SettingsSecShortcuts => {
+                self.switch_settings_section(SettingsSection::Shortcuts);
+            }
+            ActionTag::SettingsSecGeneral => {
+                self.switch_settings_section(SettingsSection::General);
+            }
             ActionTag::TriggerOcr => self.trigger_ocr(),
             ActionTag::TogglePin => self.set_pinned(!self.is_pinned),
             ActionTag::TrayQuit => {
@@ -1498,7 +1935,9 @@ impl AppController {
             }
             ActionTag::HideOrEscape => {
                 if self.active_tab == TabMode::Settings {
-                    self.switch_tab(TabMode::Translate);
+                    self.switch_tab(self.last_main_mode);
+                } else if self.active_tab == TabMode::Chat && self.show_chat_history_bar {
+                    self.toggle_chat_history_bar();
                 } else {
                     self.hide_window();
                 }
@@ -1507,12 +1946,17 @@ impl AppController {
             ActionTag::ClearTranslate => {
                 self.translate_cancel.cancel_current();
                 set_text_view_string(&self.translate_ui.input_tv, "");
-                set_text_view_string(&self.translate_ui.web_tv, "");
-                set_text_view_string(&self.translate_ui.ai_tv, "");
+                self.translate_ui.input_placeholder.setHidden(false);
+                self.web_has_content = false;
+                self.ai_has_content = false;
+                self.translate_ui.web_copy_btn.setHidden(true);
+                self.translate_ui.ai_copy_btn.setHidden(true);
+                set_text_view_styled(&self.translate_ui.web_tv, WEB_PLACEHOLDER, true);
+                set_text_view_styled(&self.translate_ui.ai_tv, AI_PLACEHOLDER, true);
                 self.last_observed_source.clear();
                 self.last_translated_source.clear();
                 self.pending_debounce_since = None;
-                self.set_status("已清空");
+                self.set_status("");
             }
             ActionTag::SwapLanguages => {
                 let src_code = self.selected_source_code();
@@ -1549,15 +1993,23 @@ impl AppController {
                 }
             }
             ActionTag::CopyWebResult => {
-                let text = get_text_view_string(&self.translate_ui.web_tv);
-                if copy_to_pasteboard(&text) {
-                    self.set_status("✓ 已复制网页翻译结果");
+                if self.web_has_content {
+                    let text = get_text_view_string(&self.translate_ui.web_tv);
+                    if copy_to_pasteboard(&text) {
+                        self.translate_ui
+                            .web_copy_btn
+                            .setTitle(&NSString::from_str("已复制"));
+                    }
                 }
             }
             ActionTag::CopyAiResult => {
-                let text = get_text_view_string(&self.translate_ui.ai_tv);
-                if copy_to_pasteboard(&text) {
-                    self.set_status("✓ 已复制 AI 翻译结果");
+                if self.ai_has_content {
+                    let text = get_text_view_string(&self.translate_ui.ai_tv);
+                    if copy_to_pasteboard(&text) {
+                        self.translate_ui
+                            .ai_copy_btn
+                            .setTitle(&NSString::from_str("已复制"));
+                    }
                 }
             }
             ActionTag::SendChat => self.send_chat_from_input(),
@@ -1570,7 +2022,6 @@ impl AppController {
                 self.streaming_assistant_buffer.clear();
                 self.refresh_conversations_popup();
                 self.render_chat_transcript();
-                self.set_status("已开启新对话");
             }
             ActionTag::ClearChatHistory => {
                 self.chat_cancel.cancel_current();
@@ -1582,12 +2033,10 @@ impl AppController {
                 self.streaming_assistant_buffer.clear();
                 self.refresh_conversations_popup();
                 self.render_chat_transcript();
-                self.set_status("✓ 对话历史已清空");
             }
             ActionTag::StopChatStream => {
                 self.chat_cancel.cancel_current();
                 self.chat_streaming = false;
-                self.set_status("已停止生成");
             }
             ActionTag::SelectConversation => {
                 let idx = self.chat_ui.conv_popup.indexOfSelectedItem();
@@ -1606,10 +2055,11 @@ impl AppController {
                     .rev()
                     .find(|m| m.role == "assistant")
                 {
-                    if copy_to_pasteboard(&last.content) {
-                        self.set_status("✓ 已复制最后一条 AI 回复");
-                    }
+                    let _ = copy_to_pasteboard(&last.content);
                 }
+            }
+            ActionTag::ToggleHistoryBar => {
+                self.toggle_chat_history_bar();
             }
             ActionTag::AiTransBackendChanged => {
                 let backend = self.selected_ai_trans_backend();
@@ -1708,7 +2158,7 @@ impl AppController {
                     &self.settings_ui.chat_gguf_field,
                     &get_field_string(&self.settings_ui.ai_gguf_field),
                 );
-                self.set_status("已将翻译模型配置同步至对话引擎表单");
+                self.set_status("✓ 已同步翻译模型配置，请点击保存");
             }
             ActionTag::ChatClearKey => {
                 self.pending_clear_chat_key = true;
@@ -1725,20 +2175,41 @@ impl AppController {
                     &def.selection_translate,
                 );
                 set_field_string(&self.settings_ui.sc_sel_ai_field, &def.selection_ai_dialog);
-                self.set_status("已填入默认快捷键，点击「保存全部配置」生效");
+                self.set_status("已填入默认快捷键，请点击「保存快捷键」");
             }
             ActionTag::OpacitySliderChanged => {
                 let val = AppearanceConfig::clamp_opacity(
                     self.settings_ui.opacity_slider.doubleValue(),
                 );
                 self.window.setAlphaValue(val);
+                let _ = self.settings.save_appearance(AppearanceConfig {
+                    panel_opacity: val,
+                });
                 set_field_string(
                     &self.settings_ui.opacity_val_label,
                     &format!("{:.0}%", val * 100.0),
                 );
             }
+            ActionTag::AutostartToggled => {
+                let want = self.settings_ui.autostart_chk.state() == NSControlStateValueOn;
+                let _ = ttree_platform_macos::autostart::set_enabled(want);
+            }
             ActionTag::SaveSettings => self.save_all_settings(),
         }
+    }
+
+    fn toggle_chat_history_bar(&mut self) {
+        self.show_chat_history_bar = !self.show_chat_history_bar;
+        self.chat_ui
+            .history_bar
+            .setHidden(!self.show_chat_history_bar);
+        set_button_symbol(
+            &self.history_top_btn,
+            "clock.arrow.circlepath",
+            "⏱",
+            self.show_chat_history_bar,
+        );
+        self.relayout_chat_view(self.last_known_size.0, (self.last_known_size.1 - 46.0).max(290.0));
     }
 
     fn selected_ai_trans_backend(&self) -> AiBackendKind {
@@ -1769,7 +2240,7 @@ impl AppController {
                 get_field_string(&self.settings_ui.ai_base_url_field),
             )
         };
-        self.set_status("正在探测本机已加载模型…");
+        self.set_status("正在探测本机模型…");
         let tx = self.ui_tx.clone();
         self.rt.spawn(async move {
             let res = ttree_ai::discover_local_models(backend, &base_url).await;
@@ -1800,10 +2271,7 @@ impl AppController {
                 .and_then(|e| e.to_str())
                 .is_some_and(|ext| allowed_exts.iter().any(|a| a.eq_ignore_ascii_case(ext)));
             if !ext_ok {
-                self.set_status(&format!(
-                    "⚠️ 请选择 .{} 格式的文件",
-                    allowed_exts.join("/")
-                ));
+                self.set_status(&format!("⚠️ 请选择 .{} 文件", allowed_exts.join("/")));
                 return None;
             }
         }
@@ -1824,7 +2292,7 @@ impl AppController {
             translate_prompt: get_field_string(&self.settings_ui.ai_prompt_field),
         };
         if let Err(e) = self.settings.save_ai_translation(&ai_input) {
-            self.set_status(&format!("❌ AI 翻译配置错误: {e}"));
+            self.set_status(&format!("❌ {e}"));
             return;
         }
         self.pending_clear_ai_key = false;
@@ -1841,7 +2309,7 @@ impl AppController {
             chat_prompt: get_field_string(&self.settings_ui.chat_prompt_field),
         };
         if let Err(e) = self.settings.save_chat_ai(&chat_input) {
-            self.set_status(&format!("❌ AI 对话配置错误: {e}"));
+            self.set_status(&format!("❌ {e}"));
             return;
         }
         self.pending_clear_chat_key = false;
@@ -1867,21 +2335,9 @@ impl AppController {
                 let _ = self.settings.save_shortcuts(&sc_input);
             }
             Err(e) => {
-                self.set_status(&format!("❌ 快捷键无效: {e}"));
+                self.set_status(&format!("❌ {e}"));
                 return;
             }
-        }
-
-        let opacity =
-            AppearanceConfig::clamp_opacity(self.settings_ui.opacity_slider.doubleValue());
-        let _ = self.settings.save_appearance(AppearanceConfig {
-            panel_opacity: opacity,
-        });
-        self.window.setAlphaValue(opacity);
-
-        let want_autostart = self.settings_ui.autostart_chk.state() == NSControlStateValueOn;
-        if want_autostart != ttree_platform_macos::autostart::is_enabled() {
-            let _ = ttree_platform_macos::autostart::set_enabled(want_autostart);
         }
 
         let saved_ai = self.settings.ai_translation_for_request();
@@ -1897,7 +2353,7 @@ impl AppController {
             if saved_chat.has_api_key { "已保存" } else { "未设置" },
         );
         self.refresh_ai_header_badge();
-        self.set_status("✓ 全部配置已保存并立即生效");
+        self.set_status("✓ 已保存");
     }
 
     pub fn send_chat_from_input(&mut self) {
@@ -1907,6 +2363,7 @@ impl AppController {
             return;
         }
         set_text_view_string(&self.chat_ui.input_tv, "");
+        self.chat_ui.input_placeholder.setHidden(false);
         self.send_chat_text(trimmed);
     }
 
@@ -1919,7 +2376,6 @@ impl AppController {
         self.streaming_assistant_buffer.clear();
         self.chat_streaming = true;
         self.render_chat_transcript();
-        self.set_status("AI 正在思考并流式回复…");
 
         let cfg = self.settings.chat_ai_for_request();
         let context = recent_chat_context(&self.current_messages);
@@ -1976,30 +2432,25 @@ impl AppController {
     }
 
     pub fn render_chat_transcript(&self) {
-        let mut out = String::new();
-        if self.current_messages.is_empty() && self.streaming_assistant_buffer.is_empty() {
-            out.push_str("欢迎使用 TTREE AI 对话（支持云端 OpenAI / 本机 Ollama / LM Studio / 直接加载 .gguf 模型）。\n在下方输入框按 Enter 发送，Shift+Enter 换行。");
-        } else {
-            for msg in &self.current_messages {
-                let prefix = if msg.role == "user" {
-                    "【你】"
-                } else {
-                    "【AI】"
-                };
-                out.push_str(prefix);
-                out.push('\n');
-                out.push_str(&msg.content);
-                out.push_str("\n\n");
-            }
-            if self.chat_streaming {
-                out.push_str("【AI】\n");
-                out.push_str(&self.streaming_assistant_buffer);
-                out.push_str(" ▍");
-            }
+        if self.current_messages.is_empty() && !self.chat_streaming {
+            set_text_view_styled(&self.chat_ui.transcript_tv, "和 AI 自由对话。", true);
+            return;
         }
-        let s = NSString::from_str(&out);
-        self.chat_ui.transcript_tv.setString(&s);
-        let len = s.length();
+        let mut out = String::new();
+        for msg in &self.current_messages {
+            let prefix = if msg.role == "user" { "你" } else { "AI" };
+            out.push_str(prefix);
+            out.push('\n');
+            out.push_str(&msg.content);
+            out.push_str("\n\n");
+        }
+        if self.chat_streaming {
+            out.push_str("AI\n");
+            out.push_str(&self.streaming_assistant_buffer);
+            out.push_str(" ▍");
+        }
+        set_text_view_styled(&self.chat_ui.transcript_tv, &out, false);
+        let len = NSString::from_str(&out).length();
         self.chat_ui
             .transcript_tv
             .scrollRangeToVisible(NSRange::new(len, 0));
@@ -2013,15 +2464,19 @@ impl AppController {
                 }
                 match result {
                     Ok(translated) => {
-                        set_text_view_string(&self.translate_ui.web_tv, &translated);
-                        self.set_status("✓ 网页翻译完成");
+                        self.web_has_content = !translated.trim().is_empty();
+                        self.translate_ui
+                            .web_copy_btn
+                            .setTitle(&NSString::from_str("复制"));
+                        self.translate_ui
+                            .web_copy_btn
+                            .setHidden(!self.web_has_content);
+                        set_text_view_styled(&self.translate_ui.web_tv, &translated, false);
                     }
                     Err(err) => {
-                        set_text_view_string(
-                            &self.translate_ui.web_tv,
-                            &format!("⚠️ 网页翻译失败: {err}"),
-                        );
-                        self.set_status("⚠️ 网页翻译失败");
+                        self.web_has_content = false;
+                        self.translate_ui.web_copy_btn.setHidden(true);
+                        set_text_view_styled(&self.translate_ui.web_tv, &err, false);
                     }
                 }
             }
@@ -2029,9 +2484,13 @@ impl AppController {
                 if gen != self.translate_gen {
                     return;
                 }
-                let current = get_text_view_string(&self.translate_ui.ai_tv);
-                if current == "正在请求 AI 流式译文…" {
-                    set_text_view_string(&self.translate_ui.ai_tv, &delta);
+                if !self.ai_has_content {
+                    self.ai_has_content = true;
+                    self.translate_ui
+                        .ai_copy_btn
+                        .setTitle(&NSString::from_str("复制"));
+                    self.translate_ui.ai_copy_btn.setHidden(false);
+                    set_text_view_styled(&self.translate_ui.ai_tv, &delta, false);
                 } else {
                     append_text_view_string(&self.translate_ui.ai_tv, &delta, true);
                 }
@@ -2041,9 +2500,9 @@ impl AppController {
                     return;
                 }
                 if let Some(err) = error {
-                    set_text_view_string(&self.translate_ui.ai_tv, &format!("⚠️ {err}"));
-                } else {
-                    self.set_status("✓ 网页与 AI 翻译全部完成");
+                    self.ai_has_content = false;
+                    self.translate_ui.ai_copy_btn.setHidden(true);
+                    set_text_view_styled(&self.translate_ui.ai_tv, &err, false);
                 }
             }
             UiEvent::OcrCompleted { outcome } => match outcome {
@@ -2051,39 +2510,29 @@ impl AppController {
                     self.switch_tab(TabMode::Translate);
                     self.show_and_focus_window();
                     set_text_view_string(&self.translate_ui.input_tv, &text);
+                    self.translate_ui.input_placeholder.setHidden(true);
                     self.last_observed_source = text;
                     self.start_translation();
-                    self.set_status("✓ 截图 OCR 识别成功，正在翻译…");
                 }
-                Ok(OcrOutcome::Cancelled) => {
-                    self.set_status("已取消截图");
-                }
+                Ok(OcrOutcome::Cancelled) | Ok(OcrOutcome::Busy) => {}
                 Ok(OcrOutcome::EmptyText) => {
                     self.switch_tab(TabMode::Translate);
                     self.show_and_focus_window();
-                    set_text_view_string(
+                    set_text_view_styled(
                         &self.translate_ui.web_tv,
-                        "⚠️ 所选截图区域未识别到任何文字，请重新框选包含清晰文本的区域。",
+                        "所选截图区域未识别到文字，请重新框选。",
+                        true,
                     );
-                    self.set_status("⚠️ 截图未识别出文字");
                 }
                 Ok(OcrOutcome::PermissionDenied(msg)) => {
                     self.switch_tab(TabMode::Translate);
                     self.show_and_focus_window();
-                    set_text_view_string(&self.translate_ui.web_tv, &format!("🔒 {msg}"));
-                    self.set_status("🔒 缺少 macOS 录屏权限");
-                }
-                Ok(OcrOutcome::Busy) => {
-                    self.set_status("正在进行截图框选…");
+                    set_text_view_styled(&self.translate_ui.web_tv, &msg, false);
                 }
                 Err(err) => {
                     self.switch_tab(TabMode::Translate);
                     self.show_and_focus_window();
-                    set_text_view_string(
-                        &self.translate_ui.web_tv,
-                        &format!("❌ OCR 错误: {err}"),
-                    );
-                    self.set_status("❌ OCR 失败");
+                    set_text_view_styled(&self.translate_ui.web_tv, &err, false);
                 }
             },
             UiEvent::SelectionCapturedForTranslate {
@@ -2094,6 +2543,7 @@ impl AppController {
                     self.switch_tab(TabMode::Translate);
                     self.show_and_focus_window();
                     set_text_view_string(&self.translate_ui.input_tv, &selected);
+                    self.translate_ui.input_placeholder.setHidden(true);
                     self.last_observed_source = selected;
                     self.start_translation();
                 }
@@ -2110,9 +2560,6 @@ impl AppController {
                 Some(selected) => {
                     self.switch_tab(TabMode::Chat);
                     self.show_and_focus_window();
-                    let _ = self.history.start_new_conversation();
-                    self.active_conversation_id = None;
-                    self.current_messages.clear();
                     self.send_chat_text(selected);
                 }
                 None if fallback_toggle => {
@@ -2136,7 +2583,6 @@ impl AppController {
                 if let Some(err) = error {
                     self.current_messages
                         .push(ChatMessage::assistant(format!("⚠️ {err}")));
-                    self.set_status("⚠️ AI 回复出错");
                 } else {
                     let reply = std::mem::take(&mut self.streaming_assistant_buffer);
                     if !reply.trim().is_empty() {
@@ -2159,7 +2605,6 @@ impl AppController {
                             }
                         }
                     }
-                    self.set_status("✓ AI 回复完成");
                 }
                 self.render_chat_transcript();
             }
@@ -2182,7 +2627,7 @@ impl AppController {
                     if let Some(first) = models.first() {
                         set_field_string(field, first);
                     }
-                    self.set_status(&format!("✓ 成功探测到 {} 个本地模型", models.len()));
+                    self.set_status(&format!("✓ 发现 {} 个本地模型", models.len()));
                 }
                 Err(err) => {
                     self.set_status(&format!("⚠️ {err}"));
@@ -2192,25 +2637,35 @@ impl AppController {
     }
 
     pub fn poll_tick(&mut self) {
-        // 1. 监控输入框文本变化并执行 420ms 防抖自动翻译
-        if self.window.isVisible() && self.active_tab == TabMode::Translate {
-            let current_src = get_text_view_string(&self.translate_ui.input_tv);
-            if current_src != self.last_observed_source {
-                self.last_observed_source = current_src;
-                self.pending_debounce_since = Some(Instant::now());
-            }
-            if let Some(since) = self.pending_debounce_since {
-                if since.elapsed() >= AUTO_TRANSLATE_DEBOUNCE {
-                    self.pending_debounce_since = None;
-                    let trimmed = self.last_observed_source.trim().to_string();
-                    if trimmed != self.last_translated_source {
-                        self.start_translation();
+        if self.window.isVisible() {
+            match self.active_tab {
+                TabMode::Translate => {
+                    let current_src = get_text_view_string(&self.translate_ui.input_tv);
+                    self.translate_ui
+                        .input_placeholder
+                        .setHidden(!current_src.is_empty());
+                    if current_src != self.last_observed_source {
+                        self.last_observed_source = current_src;
+                        self.pending_debounce_since = Some(Instant::now());
+                    }
+                    if let Some(since) = self.pending_debounce_since {
+                        if since.elapsed() >= AUTO_TRANSLATE_DEBOUNCE {
+                            self.pending_debounce_since = None;
+                            let trimmed = self.last_observed_source.trim().to_string();
+                            if trimmed != self.last_translated_source {
+                                self.start_translation();
+                            }
+                        }
                     }
                 }
+                TabMode::Chat => {
+                    let chat_in = get_text_view_string(&self.chat_ui.input_tv);
+                    self.chat_ui.input_placeholder.setHidden(!chat_in.is_empty());
+                }
+                TabMode::Settings => {}
             }
         }
 
-        // 2. 窗口尺寸变更防抖持久化
         if let Some(since) = self.pending_resize_save {
             if since.elapsed() >= RESIZE_SAVE_DEBOUNCE {
                 self.pending_resize_save = None;
@@ -2240,115 +2695,195 @@ impl AppController {
         self.pending_resize_save = Some(Instant::now());
 
         self.effect_view.setFrame(bounds);
-        self.tab_translate_btn
-            .setFrame(top_rect(h, 14.0, 10.0, 74.0, 28.0));
-        self.tab_chat_btn
-            .setFrame(top_rect(h, 92.0, 10.0, 86.0, 28.0));
-        self.tab_settings_btn
-            .setFrame(top_rect(h, 182.0, 10.0, 72.0, 28.0));
-        self.status_label
-            .setFrame(top_rect(h, 264.0, 14.0, (w - 445.0).max(120.0), 20.0));
-        self.ocr_btn
-            .setFrame(top_rect(h, w - 172.0, 10.0, 86.0, 28.0));
-        self.pin_btn
-            .setFrame(top_rect(h, w - 82.0, 10.0, 68.0, 28.0));
 
-        let body_h = (h - 46.0).max(320.0);
+        // 顶栏重排
+        self.segmented_bg
+            .setFrame(top_rect(h, 12.0, 7.0, 132.0, 32.0));
+        let pill_x = if self.active_tab == TabMode::Chat {
+            79.0
+        } else {
+            15.0
+        };
+        self.segmented_pill
+            .setFrame(top_rect(h, pill_x, 10.0, 62.0, 26.0));
+        self.tab_translate_btn
+            .setFrame(top_rect(h, 15.0, 10.0, 62.0, 26.0));
+        self.tab_chat_btn
+            .setFrame(top_rect(h, 79.0, 10.0, 62.0, 26.0));
+        self.settings_title_label
+            .setFrame(top_rect(h, 16.0, 11.0, 120.0, 24.0));
+
+        let pin_x = match self.active_tab {
+            TabMode::Translate => w - 78.0,
+            TabMode::Chat => w - 146.0,
+            TabMode::Settings => w - 94.0,
+        };
+        self.pin_btn.setFrame(top_rect(h, pin_x, 7.0, 32.0, 32.0));
+        self.new_chat_top_btn
+            .setFrame(top_rect(h, w - 112.0, 7.0, 32.0, 32.0));
+        self.history_top_btn
+            .setFrame(top_rect(h, w - 78.0, 7.0, 32.0, 32.0));
+        self.gear_btn
+            .setFrame(top_rect(h, w - 44.0, 7.0, 32.0, 32.0));
+        self.done_settings_btn
+            .setFrame(top_rect(h, w - 58.0, 8.0, 46.0, 30.0));
+
+        let body_h = (h - 46.0).max(290.0);
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
 
-        // Relayout Translate view
+        // 翻译上下四层分栏重排
         self.translate_ui.root.setFrame(body_frame);
-        self.translate_ui
-            .source_popup
-            .setFrame(top_rect(body_h, 14.0, 6.0, 145.0, 26.0));
-        self.translate_ui
-            .swap_btn
-            .setFrame(top_rect(body_h, 163.0, 6.0, 38.0, 26.0));
-        self.translate_ui
-            .target_popup
-            .setFrame(top_rect(body_h, 205.0, 6.0, 165.0, 26.0));
-        self.translate_ui
-            .translate_btn
-            .setFrame(top_rect(body_h, w - 166.0, 6.0, 92.0, 26.0));
-        self.translate_ui
-            .clear_btn
-            .setFrame(top_rect(body_h, w - 70.0, 6.0, 56.0, 26.0));
+        let source_h = (body_h * 0.33).clamp(108.0, 210.0);
+        let lang_h = 38.0;
+        let results_top = source_h + lang_h;
+        let results_h = (body_h - results_top).max(160.0);
+        let web_h = (results_h * 0.47).floor();
+        let ai_top = results_top + web_h;
+        let ai_h = results_h - web_h;
 
-        let input_h = 118.0;
+        self.translate_ui
+            .source_surface
+            .setFrame(top_rect(body_h, 0.0, 0.0, w, source_h));
         self.translate_ui
             .input_scroll
-            .setFrame(top_rect(body_h, 14.0, 38.0, w - 28.0, input_h));
-        let cards_top = 38.0 + input_h + 10.0;
-        let cards_h = (body_h - cards_top - 14.0).max(160.0);
-        let col_w = ((w - 38.0) / 2.0).max(200.0);
+            .setFrame(top_rect(body_h, 2.0, 2.0, w - 4.0, source_h - 4.0));
+        self.translate_ui
+            .input_placeholder
+            .setFrame(top_rect(body_h, 16.0, 12.0, w - 32.0, 22.0));
+        self.translate_ui
+            .source_bottom_line
+            .setFrame(top_rect(body_h, 0.0, source_h - 1.0, w, 1.0));
 
         self.translate_ui
-            .web_card
-            .setFrame(top_rect(body_h, 14.0, cards_top, col_w, cards_h));
+            .lang_surface
+            .setFrame(top_rect(body_h, 0.0, source_h, w, lang_h));
+        self.translate_ui
+            .source_popup
+            .setFrame(top_rect(body_h, 12.0, source_h + 6.0, 116.0, 26.0));
+        self.translate_ui
+            .swap_btn
+            .setFrame(top_rect(body_h, 130.0, source_h + 6.0, 24.0, 26.0));
+        self.translate_ui
+            .target_popup
+            .setFrame(top_rect(body_h, 156.0, source_h + 6.0, 154.0, 26.0));
+        self.translate_ui.status_label.setFrame(top_rect(
+            body_h,
+            314.0,
+            source_h + 10.0,
+            (w - 328.0).max(80.0),
+            18.0,
+        ));
+        self.translate_ui
+            .lang_bottom_line
+            .setFrame(top_rect(body_h, 0.0, source_h + lang_h - 1.0, w, 1.0));
+
         self.translate_ui
             .web_header_label
-            .setFrame(top_rect(cards_h, 10.0, 8.0, col_w - 76.0, 18.0));
+            .setFrame(top_rect(body_h, 16.0, results_top + 8.0, 240.0, 16.0));
         self.translate_ui
             .web_copy_btn
-            .setFrame(top_rect(cards_h, col_w - 64.0, 5.0, 54.0, 24.0));
-        self.translate_ui
-            .web_scroll
-            .setFrame(top_rect(cards_h, 4.0, 32.0, col_w - 8.0, cards_h - 36.0));
-
-        self.translate_ui.ai_card.setFrame(top_rect(
+            .setFrame(top_rect(body_h, w - 60.0, results_top + 5.0, 48.0, 22.0));
+        self.translate_ui.web_scroll.setFrame(top_rect(
             body_h,
-            14.0 + col_w + 10.0,
-            cards_top,
-            col_w,
-            cards_h,
+            2.0,
+            results_top + 24.0,
+            w - 4.0,
+            web_h - 26.0,
         ));
+        self.translate_ui
+            .web_bottom_line
+            .setFrame(top_rect(body_h, 0.0, results_top + web_h - 1.0, w, 1.0));
+
         self.translate_ui
             .ai_header_label
-            .setFrame(top_rect(cards_h, 10.0, 8.0, col_w - 76.0, 18.0));
+            .setFrame(top_rect(body_h, 16.0, ai_top + 8.0, 280.0, 16.0));
         self.translate_ui
             .ai_copy_btn
-            .setFrame(top_rect(cards_h, col_w - 64.0, 5.0, 54.0, 24.0));
-        self.translate_ui
-            .ai_scroll
-            .setFrame(top_rect(cards_h, 4.0, 32.0, col_w - 8.0, cards_h - 36.0));
+            .setFrame(top_rect(body_h, w - 60.0, ai_top + 5.0, 48.0, 22.0));
+        self.translate_ui.ai_scroll.setFrame(top_rect(
+            body_h,
+            2.0,
+            ai_top + 24.0,
+            w - 4.0,
+            ai_h - 28.0,
+        ));
 
-        // Relayout Chat view
+        // 对话视图重排
+        self.relayout_chat_view(w, body_h);
+
+        // 设置视图重排
+        self.settings_ui.root.setFrame(body_frame);
+        self.settings_ui
+            .top_divider
+            .setFrame(top_rect(body_h, 12.0, 0.0, w - 24.0, 1.0));
+        let sidebar_w = 114.0;
+        self.settings_ui
+            .sidebar_divider
+            .setFrame(top_rect(body_h, sidebar_w, 1.0, 1.0, body_h - 1.0));
+        self.settings_ui
+            .nav_translate_btn
+            .setFrame(top_rect(body_h, 10.0, 12.0, sidebar_w - 20.0, 30.0));
+        self.settings_ui
+            .nav_chat_btn
+            .setFrame(top_rect(body_h, 10.0, 46.0, sidebar_w - 20.0, 30.0));
+        self.settings_ui
+            .nav_shortcuts_btn
+            .setFrame(top_rect(body_h, 10.0, 80.0, sidebar_w - 20.0, 30.0));
+        self.settings_ui
+            .nav_general_btn
+            .setFrame(top_rect(body_h, 10.0, 114.0, sidebar_w - 20.0, 30.0));
+    }
+
+    fn relayout_chat_view(&self, w: f64, body_h: f64) {
+        let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));
         self.chat_ui.root.setFrame(body_frame);
+        let hist_offset = if self.show_chat_history_bar { 36.0 } else { 0.0 };
+        self.chat_ui
+            .history_bar
+            .setFrame(top_rect(body_h, 0.0, 0.0, w, 36.0));
         self.chat_ui
             .conv_popup
-            .setFrame(top_rect(body_h, 14.0, 6.0, 260.0, 26.0));
-        self.chat_ui
-            .new_conv_btn
-            .setFrame(top_rect(body_h, 280.0, 6.0, 82.0, 26.0));
+            .setFrame(top_rect(36.0, 12.0, 5.0, w - 104.0, 26.0));
         self.chat_ui
             .clear_hist_btn
-            .setFrame(top_rect(body_h, 366.0, 6.0, 82.0, 26.0));
+            .setFrame(top_rect(36.0, w - 84.0, 5.0, 72.0, 26.0));
         self.chat_ui
-            .stop_btn
-            .setFrame(top_rect(body_h, w - 166.0, 6.0, 74.0, 26.0));
+            .history_bottom_line
+            .setFrame(top_rect(36.0, 0.0, 35.0, w, 1.0));
+
+        let composer_h = 56.0;
+        let transcript_h = (body_h - hist_offset - composer_h).max(140.0);
+        self.chat_ui.transcript_scroll.setFrame(top_rect(
+            body_h,
+            4.0,
+            hist_offset,
+            w - 8.0,
+            transcript_h,
+        ));
+        let composer_top = hist_offset + transcript_h;
         self.chat_ui
-            .copy_reply_btn
-            .setFrame(top_rect(body_h, w - 88.0, 6.0, 74.0, 26.0));
-        let chat_input_h = 72.0;
-        let transcript_h = (body_h - 38.0 - chat_input_h - 22.0).max(180.0);
-        self.chat_ui
-            .transcript_scroll
-            .setFrame(top_rect(body_h, 14.0, 38.0, w - 28.0, transcript_h));
-        let chat_input_top = 38.0 + transcript_h + 8.0;
+            .composer_top_line
+            .setFrame(top_rect(body_h, 0.0, composer_top, w, 1.0));
+        self.chat_ui.composer_surface.setFrame(top_rect(
+            body_h,
+            0.0,
+            composer_top + 1.0,
+            w,
+            composer_h - 1.0,
+        ));
         self.chat_ui.input_scroll.setFrame(top_rect(
             body_h,
-            14.0,
-            chat_input_top,
-            w - 104.0,
-            chat_input_h,
-        ));
-        self.chat_ui.send_btn.setFrame(top_rect(
-            body_h,
+            4.0,
+            composer_top + 6.0,
             w - 84.0,
-            chat_input_top + 18.0,
-            70.0,
-            36.0,
+            composer_h - 12.0,
         ));
+        self.chat_ui
+            .input_placeholder
+            .setFrame(top_rect(body_h, 18.0, composer_top + 16.0, 200.0, 20.0));
+        self.chat_ui
+            .send_btn
+            .setFrame(top_rect(body_h, w - 74.0, composer_top + 13.0, 62.0, 30.0));
     }
 }
 
@@ -2366,6 +2901,7 @@ mod tests {
             ActionTag::TogglePin,
             ActionTag::TrayQuit,
             ActionTag::HideOrEscape,
+            ActionTag::CloseSettings,
             ActionTag::TranslateNow,
             ActionTag::ClearTranslate,
             ActionTag::SwapLanguages,
@@ -2379,6 +2915,7 @@ mod tests {
             ActionTag::StopChatStream,
             ActionTag::SelectConversation,
             ActionTag::CopyLastReply,
+            ActionTag::ToggleHistoryBar,
             ActionTag::SaveSettings,
             ActionTag::AiTransBackendChanged,
             ActionTag::AiTransFillDefaultUrl,
@@ -2396,6 +2933,11 @@ mod tests {
             ActionTag::ChatClearKey,
             ActionTag::ResetDefaultShortcuts,
             ActionTag::OpacitySliderChanged,
+            ActionTag::AutostartToggled,
+            ActionTag::SettingsSecTranslate,
+            ActionTag::SettingsSecChat,
+            ActionTag::SettingsSecShortcuts,
+            ActionTag::SettingsSecGeneral,
         ];
         for tag in tags {
             assert_eq!(ActionTag::from_raw(tag as isize), Some(tag));
@@ -2412,4 +2954,3 @@ mod tests {
         assert_eq!(r.size.height, 28.0);
     }
 }
-

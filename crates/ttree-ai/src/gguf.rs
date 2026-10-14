@@ -62,7 +62,7 @@ impl GgufEmbeddedTokenizer {
         let mut token_to_id = HashMap::with_capacity(raw_tokens.len());
 
         for (idx, val) in raw_tokens.iter().enumerate() {
-            let s = val.to_string().map(|s| s.clone()).unwrap_or_default();
+            let s = val.to_string().cloned().unwrap_or_default();
             token_to_id.insert(s.clone(), idx as u32);
             id_to_token.push(s);
         }
@@ -318,9 +318,8 @@ where
         };
 
         let mut utf8_pending = Vec::new();
-        let mut pos = prompt_tokens.len();
 
-        for _ in 0..MAX_NEW_TOKENS {
+        for pos in (prompt_tokens.len()..).take(MAX_NEW_TOKENS) {
             if cancel_clone.is_cancelled() {
                 return;
             }
@@ -342,7 +341,6 @@ where
                     return;
                 }
             };
-            pos += 1;
         }
     });
 
