@@ -440,14 +440,14 @@ impl AppController {
         let win_w = pane_layout.width;
         let win_h = pane_layout.translate_window_height(ai_enabled);
 
-        // ── 顶部栏：左上角 [翻译 | AI] 分段切换器，右上角图标功能区（全淡色） ──
+        // ── 顶部栏：左上角 [翻译 | AI] 分段切换器，右上角图标功能区（全淡色，距顶边与左右边距留出舒适呼吸感） ──
         let segmented_bg =
-            make_surface_box(mtm, top_rect(win_h, 12.0, 5.0, 128.0, 28.0), 8.0, 0.35);
+            make_surface_box(mtm, top_rect(win_h, 16.0, 10.0, 128.0, 28.0), 8.0, 0.35);
         let segmented_pill =
-            make_surface_box(mtm, top_rect(win_h, 15.0, 7.0, 59.0, 24.0), 6.0, 0.70);
+            make_surface_box(mtm, top_rect(win_h, 19.0, 12.0, 59.0, 24.0), 6.0, 0.70);
         let tab_translate_btn = make_flat_button(
             mtm,
-            top_rect(win_h, 15.0, 7.0, 59.0, 24.0),
+            top_rect(win_h, 19.0, 12.0, 59.0, 24.0),
             "翻译",
             12.5,
             true,
@@ -458,7 +458,7 @@ impl AppController {
         );
         let tab_chat_btn = make_flat_button(
             mtm,
-            top_rect(win_h, 78.0, 7.0, 59.0, 24.0),
+            top_rect(win_h, 82.0, 12.0, 59.0, 24.0),
             "AI",
             12.5,
             true,
@@ -472,7 +472,7 @@ impl AppController {
 
         let settings_title_label = make_label(
             mtm,
-            top_rect(win_h, 16.0, 8.0, 120.0, 22.0),
+            top_rect(win_h, 18.0, 13.0, 120.0, 22.0),
             "设置",
             15.0,
             true,
@@ -483,7 +483,7 @@ impl AppController {
         // 右上角功能区按钮
         let pin_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 76.0, 5.0, 28.0, 28.0),
+            top_rect(win_h, win_w - 78.0, 10.0, 28.0, 28.0),
             "pin",
             "📌",
             "固定窗口",
@@ -493,7 +493,7 @@ impl AppController {
         );
         let new_chat_top_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 108.0, 5.0, 28.0, 28.0),
+            top_rect(win_h, win_w - 110.0, 10.0, 28.0, 28.0),
             "square.and.pencil",
             "＋",
             "新对话",
@@ -505,7 +505,7 @@ impl AppController {
 
         let history_top_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 76.0, 5.0, 28.0, 28.0),
+            top_rect(win_h, win_w - 78.0, 10.0, 28.0, 28.0),
             "clock.arrow.circlepath",
             "⏱",
             "展开/收起对话历史条",
@@ -518,7 +518,7 @@ impl AppController {
 
         let gear_btn = make_symbol_button(
             mtm,
-            top_rect(win_h, win_w - 42.0, 5.0, 28.0, 28.0),
+            top_rect(win_h, win_w - 44.0, 10.0, 28.0, 28.0),
             "gearshape",
             "⚙",
             "设置",
@@ -529,7 +529,7 @@ impl AppController {
 
         let done_settings_btn = make_flat_button(
             mtm,
-            top_rect(win_h, win_w - 56.0, 6.0, 44.0, 26.0),
+            top_rect(win_h, win_w - 60.0, 11.0, 44.0, 26.0),
             "完成",
             13.0,
             true,
@@ -1734,7 +1734,7 @@ impl AppController {
     pub fn update_window_min_max_constraints(&self) {
         let ai_enabled = self.settings.ai_translation_for_request().enabled;
         match self.active_tab {
-            TabMode::Translate => {
+            TabMode::Translate | TabMode::Chat => {
                 self.window.setMinSize(NSSize::new(
                     WINDOW_MIN_WIDTH,
                     PaneLayoutConfig::min_window_height(ai_enabled),
@@ -1744,12 +1744,6 @@ impl AppController {
                     PaneLayoutConfig::max_window_height(ai_enabled),
                 ));
             }
-            TabMode::Chat => {
-                self.window
-                    .setMinSize(NSSize::new(WINDOW_MIN_WIDTH.max(420.0), 360.0));
-                self.window
-                    .setMaxSize(NSSize::new(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT));
-            }
             TabMode::Settings => {
                 self.window.setMinSize(NSSize::new(480.0, 470.0));
                 self.window
@@ -1758,27 +1752,17 @@ impl AppController {
         }
     }
 
-    /// 将窗口尺寸严格同步至记忆的 `pane_layout`（顶边在屏幕上的位置保持固定不动）。
+    /// 将窗口尺寸严格同步至记忆的 `pane_layout`（翻译页与 AI 对话页宽高完全共享一致，顶边在屏幕上的位置保持固定不动）。
     pub fn sync_window_to_pane_layout(&mut self) {
         self.pane_layout = self.pane_layout.clamped();
         let ai_enabled = self.settings.ai_translation_for_request().enabled;
         self.update_window_min_max_constraints();
 
-        let target_w = match self.active_tab {
-            TabMode::Translate => self.pane_layout.width,
-            TabMode::Chat => self.pane_layout.width.max(440.0),
-            TabMode::Settings => self.pane_layout.width.max(540.0),
-        };
-        let target_h = match self.active_tab {
-            TabMode::Translate => self.pane_layout.translate_window_height(ai_enabled),
-            TabMode::Chat => self
-                .pane_layout
-                .translate_window_height(ai_enabled)
-                .max(420.0),
-            TabMode::Settings => self
-                .pane_layout
-                .translate_window_height(ai_enabled)
-                .max(490.0),
+        let shared_w = self.pane_layout.width;
+        let shared_h = self.pane_layout.translate_window_height(ai_enabled);
+        let (target_w, target_h) = match self.active_tab {
+            TabMode::Translate | TabMode::Chat => (shared_w, shared_h),
+            TabMode::Settings => (shared_w.max(480.0), shared_h.max(480.0)),
         };
 
         let frame = self.window.frame();
@@ -3055,10 +3039,10 @@ impl AppController {
         if !self.is_programmatic_resize {
             let ai_enabled = self.settings.ai_translation_for_request().enabled;
             match self.active_tab {
-                TabMode::Translate => {
+                TabMode::Translate | TabMode::Chat => {
                     self.pane_layout.apply_window_resize(w, h, ai_enabled);
                 }
-                TabMode::Chat | TabMode::Settings => {
+                TabMode::Settings => {
                     self.pane_layout.width = w;
                 }
             }
@@ -3074,37 +3058,37 @@ impl AppController {
             NSSize::new(w, h),
         ));
 
-        // 顶栏重排
+        // 顶栏重排（距顶部边缘 10px–13px，距左右边缘 16px–18px）
         self.segmented_bg
-            .setFrame(top_rect(h, 12.0, 5.0, 128.0, 28.0));
+            .setFrame(top_rect(h, 16.0, 10.0, 128.0, 28.0));
         let pill_x = if self.active_tab == TabMode::Chat {
-            78.0
+            82.0
         } else {
-            15.0
+            19.0
         };
         self.segmented_pill
-            .setFrame(top_rect(h, pill_x, 7.0, 59.0, 24.0));
+            .setFrame(top_rect(h, pill_x, 12.0, 59.0, 24.0));
         self.tab_translate_btn
-            .setFrame(top_rect(h, 15.0, 7.0, 59.0, 24.0));
+            .setFrame(top_rect(h, 19.0, 12.0, 59.0, 24.0));
         self.tab_chat_btn
-            .setFrame(top_rect(h, 78.0, 7.0, 59.0, 24.0));
+            .setFrame(top_rect(h, 82.0, 12.0, 59.0, 24.0));
         self.settings_title_label
-            .setFrame(top_rect(h, 16.0, 8.0, 120.0, 22.0));
+            .setFrame(top_rect(h, 18.0, 13.0, 120.0, 22.0));
 
         let pin_x = match self.active_tab {
-            TabMode::Translate => w - 76.0,
-            TabMode::Chat => w - 140.0,
-            TabMode::Settings => w - 92.0,
+            TabMode::Translate => w - 78.0,
+            TabMode::Chat => w - 142.0,
+            TabMode::Settings => w - 96.0,
         };
-        self.pin_btn.setFrame(top_rect(h, pin_x, 5.0, 28.0, 28.0));
+        self.pin_btn.setFrame(top_rect(h, pin_x, 10.0, 28.0, 28.0));
         self.new_chat_top_btn
-            .setFrame(top_rect(h, w - 108.0, 5.0, 28.0, 28.0));
+            .setFrame(top_rect(h, w - 110.0, 10.0, 28.0, 28.0));
         self.history_top_btn
-            .setFrame(top_rect(h, w - 76.0, 5.0, 28.0, 28.0));
+            .setFrame(top_rect(h, w - 78.0, 10.0, 28.0, 28.0));
         self.gear_btn
-            .setFrame(top_rect(h, w - 42.0, 5.0, 28.0, 28.0));
+            .setFrame(top_rect(h, w - 44.0, 10.0, 28.0, 28.0));
         self.done_settings_btn
-            .setFrame(top_rect(h, w - 56.0, 6.0, 44.0, 26.0));
+            .setFrame(top_rect(h, w - 60.0, 11.0, 44.0, 26.0));
 
         let body_h = (h - TOP_BAR_HEIGHT).max(174.0);
         let body_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, body_h));

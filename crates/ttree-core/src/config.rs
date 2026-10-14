@@ -11,7 +11,7 @@ pub const MAX_API_KEY_BYTES: usize = 16 * 1024;
 pub const PANEL_OPACITY_MIN: f64 = 0.35;
 pub const PANEL_OPACITY_MAX: f64 = 1.0;
 
-pub const TOP_BAR_HEIGHT: f64 = 38.0;
+pub const TOP_BAR_HEIGHT: f64 = 46.0;
 
 pub const WINDOW_MIN_WIDTH: f64 = 380.0;
 pub const WINDOW_MAX_WIDTH: f64 = 880.0;
@@ -232,7 +232,7 @@ pub struct AppearanceConfig {
 }
 
 fn default_panel_opacity() -> f64 {
-    0.96
+    1.0
 }
 
 impl Default for AppearanceConfig {
