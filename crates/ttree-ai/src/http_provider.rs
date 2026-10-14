@@ -30,6 +30,7 @@ fn http_client() -> &'static Client {
 pub async fn discover_local_models(
     backend: AiBackendKind,
     base_url: &str,
+    api_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let base = if base_url.trim().is_empty() {
         backend.default_base_url()
@@ -72,9 +73,11 @@ pub async fn discover_local_models(
                 format!("{base}/v1")
             };
             let url = format!("{root}/models");
-            let resp = http_client()
-                .get(&url)
-                .timeout(Duration::from_secs(3))
+            let mut req = http_client().get(&url).timeout(Duration::from_secs(3));
+            if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+                req = req.bearer_auth(key);
+            }
+            let resp = req
                 .send()
                 .await
                 .map_err(|e| format!("无法连接本地模型服务 ({url}): {e}"))?;
@@ -119,12 +122,25 @@ where
         format!("{base}/chat/completions")
     };
 
-    let payload = json!({
-        "model": model,
-        "stream": true,
-        "temperature": 0.2,
-        "messages": messages,
-    });
+    let is_hy_mt = model.to_ascii_lowercase().contains("hy-mt") || base.contains(":18082");
+    let payload = if is_hy_mt {
+        json!({
+            "model": model,
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.6,
+            "top_k": 20,
+            "repetition_penalty": 1.05,
+            "messages": messages,
+        })
+    } else {
+        json!({
+            "model": model,
+            "stream": true,
+            "temperature": 0.2,
+            "messages": messages,
+        })
+    };
 
     let mut req = http_client().post(&url).json(&payload);
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {

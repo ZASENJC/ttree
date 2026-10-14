@@ -30,18 +30,67 @@ pub fn render_translate_prompt(template: &str, source: &str, target: &str) -> St
         .replace("{target}", tgt_name)
 }
 
-/// 组装翻译消息：System 放指令，User 仅放待译原文（省去 50% 冗余 Prompt Token）。
+fn hy_mt_target_english_name(target: &str) -> &'static str {
+    match target {
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "ru" => "Russian",
+        "zh-CN" => "Chinese",
+        "zh-TW" => "Traditional Chinese",
+        _ => "English",
+    }
+}
+
+/// 组装翻译消息：
+/// - 若模型为腾讯混元专用翻译模型 `HY-MT`（或端口 18082）且使用默认提示词，自动采用 HY-MT 官方单轮 User 指令模板；
+/// - 若自定义提示词包含 `{text}` 占位符，渲染为单条 User 消息；
+/// - 其余通用大模型：System 放指令，User 仅放待译原文（省去 50% 冗余 Prompt Token）。
 pub fn build_translate_messages(
     cfg: &AiTranslationConfig,
     text: &str,
     source: &str,
     target: &str,
 ) -> Vec<ChatMessage> {
+    let trimmed_text = text.trim();
+    let tpl = cfg.translate_prompt.trim();
+
+    if tpl.contains("{text}") {
+        let rendered = render_translate_prompt(tpl, source, target).replace("{text}", trimmed_text);
+        return vec![ChatMessage::user(rendered)];
+    }
+
+    let is_hy_mt = cfg.model.to_ascii_lowercase().contains("hy-mt")
+        || cfg.gguf_model_path.to_ascii_lowercase().contains("hy-mt")
+        || cfg.base_url.contains(":18082");
+
+    let is_default_prompt = tpl.is_empty()
+        || tpl == AiTranslationConfig::default().translate_prompt
+        || tpl == "你是一个专业翻译引擎。将用户输入从 {source} 翻译成 {target}。只输出译文，不要解释、不要引号、不要附加任何说明。";
+
+    if is_hy_mt && is_default_prompt {
+        let user_prompt = match target {
+            "zh-CN" => format!(
+                "将以下文本翻译为中文，注意只需要输出翻译后的结果，不要额外解释：\n\n{trimmed_text}"
+            ),
+            "zh-TW" => format!(
+                "将以下文本翻译为繁体中文，注意只需要输出翻译后的结果，不要额外解释：\n\n{trimmed_text}"
+            ),
+            other => {
+                let tgt_en = hy_mt_target_english_name(other);
+                format!(
+                    "Translate the following segment into {tgt_en}, without additional explanation.\n\n{trimmed_text}"
+                )
+            }
+        };
+        return vec![ChatMessage::user(user_prompt)];
+    }
+
     let prompt = render_translate_prompt(&cfg.translate_prompt, source, target);
-    vec![
-        ChatMessage::system(prompt),
-        ChatMessage::user(text.trim()),
-    ]
+    vec![ChatMessage::system(prompt), ChatMessage::user(trimmed_text)]
 }
 
 /// 组装 AI 对话消息。
@@ -192,5 +241,30 @@ mod tests {
         assert_eq!(msgs[1].role, "user");
         // User 消息仅包含待译原文，不再重复拼接 system prompt
         assert_eq!(msgs[1].content, "Hello world");
+    }
+
+    #[test]
+    fn builds_hy_mt_native_single_turn_user_prompt() {
+        let cfg = AiTranslationConfig {
+            backend: AiBackendKind::LocalServer,
+            base_url: "http://127.0.0.1:18082/v1".to_string(),
+            model: "/Volumes/STU/Ai/models/HY-MT1.5-1.8B-bf16".to_string(),
+            ..AiTranslationConfig::default()
+        };
+        let to_zh = build_translate_messages(&cfg, "Hello world", "en", "zh-CN");
+        assert_eq!(to_zh.len(), 1);
+        assert_eq!(to_zh[0].role, "user");
+        assert!(to_zh[0].content.starts_with("将以下文本翻译为中文"));
+        assert!(to_zh[0].content.ends_with("Hello world"));
+
+        let to_en = build_translate_messages(&cfg, "你好世界", "zh-CN", "en");
+        assert_eq!(to_en.len(), 1);
+        assert_eq!(to_en[0].role, "user");
+        assert!(
+            to_en[0]
+                .content
+                .starts_with("Translate the following segment into English")
+        );
+        assert!(to_en[0].content.ends_with("你好世界"));
     }
 }

@@ -1876,13 +1876,20 @@ impl AppController {
 
     pub fn refresh_ai_header_badge(&self) {
         let cfg = self.settings.ai_translation_for_request();
+        let short_model = cfg
+            .model
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&cfg.model);
         let label = if !cfg.enabled {
             "AI (未开启)".to_string()
         } else {
             match cfg.backend {
-                AiBackendKind::OpenAiCompatible => format!("AI  ·  {}", cfg.model),
-                AiBackendKind::Ollama => format!("AI  ·  OLLAMA ({})", cfg.model),
-                AiBackendKind::LocalServer => format!("AI  ·  LOCAL ({})", cfg.model),
+                AiBackendKind::OpenAiCompatible => format!("AI  ·  {short_model}"),
+                AiBackendKind::Ollama => format!("AI  ·  OLLAMA ({short_model})"),
+                AiBackendKind::LocalServer => format!("AI  ·  MLX/LOCAL ({short_model})"),
                 AiBackendKind::CandleGguf => {
                     let name = std::path::Path::new(&cfg.gguf_model_path)
                         .file_name()
@@ -2442,21 +2449,36 @@ impl AppController {
     }
 
     fn discover_models(&mut self, for_chat: bool) {
-        let (backend, base_url) = if for_chat {
+        let (backend, base_url, api_key) = if for_chat {
+            let typed_key = get_field_string(&self.settings_ui.chat_key_field);
+            let key = if typed_key.trim().is_empty() {
+                self.settings.chat_ai_for_request().api_key
+            } else {
+                typed_key
+            };
             (
                 self.selected_chat_backend(),
                 get_field_string(&self.settings_ui.chat_base_url_field),
+                key,
             )
         } else {
+            let typed_key = get_field_string(&self.settings_ui.ai_key_field);
+            let key = if typed_key.trim().is_empty() {
+                self.settings.ai_translation_for_request().api_key
+            } else {
+                typed_key
+            };
             (
                 self.selected_ai_trans_backend(),
                 get_field_string(&self.settings_ui.ai_base_url_field),
+                key,
             )
         };
         self.set_status("正在探测本机模型…");
         let tx = self.ui_tx.clone();
         self.rt.spawn(async move {
-            let res = ttree_ai::discover_local_models(backend, &base_url).await;
+            let opt_key = (!api_key.trim().is_empty()).then_some(api_key.trim());
+            let res = ttree_ai::discover_local_models(backend, &base_url, opt_key).await;
             let _ = tx.send(UiEvent::ModelsDiscovered {
                 for_chat,
                 result: res,
@@ -3351,7 +3373,10 @@ impl AppController {
         // ── 1. AI 翻译分区（按所选接入方式动态排布，底部留出宽敞多行提示词编辑框） ──
         let ai_backend = self.selected_ai_trans_backend();
         let ai_is_gguf = ai_backend == AiBackendKind::CandleGguf;
-        let ai_needs_key = ai_backend == AiBackendKind::OpenAiCompatible;
+        let ai_needs_key = matches!(
+            ai_backend,
+            AiBackendKind::OpenAiCompatible | AiBackendKind::LocalServer
+        );
 
         self.settings_ui.t_head.setFrame(top_rect(
             sec_h,
@@ -3392,7 +3417,7 @@ impl AppController {
         }
         y += row_step;
 
-        // HTTP 模式：显示接口地址 + 模型名称；云端 API 额外显示 API 密钥
+        // HTTP 模式：显示接口地址 + 模型名称；云端 API 或本地 MLX/LM Studio 显示 API 密钥（可选）
         self.settings_ui.t_lbl_url.setHidden(ai_is_gguf);
         self.settings_ui.ai_base_url_field.setHidden(ai_is_gguf);
         if !ai_is_gguf {
@@ -3518,7 +3543,10 @@ impl AppController {
         // ── 2. AI 对话分区（按所选接入方式动态排布，底部留出宽敞多行系统提示词编辑框） ──
         let chat_backend = self.selected_chat_backend();
         let chat_is_gguf = chat_backend == AiBackendKind::CandleGguf;
-        let chat_needs_key = chat_backend == AiBackendKind::OpenAiCompatible;
+        let chat_needs_key = matches!(
+            chat_backend,
+            AiBackendKind::OpenAiCompatible | AiBackendKind::LocalServer
+        );
 
         self.settings_ui.c_head.setFrame(top_rect(
             sec_h,
