@@ -1879,7 +1879,7 @@ impl AppController {
 
         let src_ui = self.selected_source_code();
         let tgt_ui = self.selected_target_code();
-        let (resolved_src, resolved_tgt) = resolve_language_pair(&trimmed, src_ui, tgt_ui);
+        let (resolved_src, resolved_tgt) = resolve_language_pair(src_ui, tgt_ui, &trimmed);
 
         set_text_view_styled(&self.translate_ui.web_tv, WEB_LOADING_TEXT, true);
         let ai_cfg = self.settings.ai_translation_for_request();
