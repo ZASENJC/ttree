@@ -1,0 +1,117 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ttree-core",
+    "crates/ttree-storage",
+    "crates/ttree-platform-macos",
+    "crates/ttree-ocr",
+    "crates/ttree-translate",
+    "crates/ttree-ai",
+    "crates/ttree-app",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["ZASENJC"]
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
+futures-util = "0.3"
+url = "2"
+urlencoding = "2"
+tempfile = "3"
+dirs = "6"
+auto-launch = "0.5"
+global-hotkey = "0.8"
+core-foundation = "0.10"
+security-framework = "3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSAttributedString",
+    "NSBundle",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSGeometry",
+    "NSObject",
+    "NSProcessInfo",
+    "NSRange",
+    "NSRunLoop",
+    "NSString",
+    "NSThread",
+    "NSTimer",
+    "NSURL",
+    "NSValue",
+] }
+objc2-core-foundation = "0.3"
+objc2-core-graphics = { version = "0.3", features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGEvent",
+    "CGEventTypes",
+    "CGImage",
+    "CGRemoteOperation",
+] }
+objc2-core-image = { version = "0.3", features = ["CIContext"] }
+objc2-core-ml = { version = "0.3", features = ["MLCPUComputeDevice", "MLComputeDeviceProtocol"] }
+objc2-image-io = { version = "0.3", features = ["CGImageSource"] }
+objc2-vision = { version = "0.3", features = [
+    "objc2-core-graphics",
+    "objc2-core-ml",
+    "VNRequest",
+    "VNRecognizeTextRequest",
+    "VNObservation",
+    "VNRequestHandler",
+    "VNTypes",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSBezierPath",
+    "NSBox",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSGraphics",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSPopUpButton",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSavePanel",
+    "NSScreen",
+    "NSScrollView",
+    "NSSecureTextField",
+    "NSSegmentedControl",
+    "NSSlider",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSText",
+    "NSTextContainer",
+    "NSTextField",
+    "NSTextFieldCell",
+    "NSTextStorage",
+    "NSTextView",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }

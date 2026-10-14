@@ -1,0 +1,15 @@
+[package]
+name = "ttree-translate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ttree-core = { path = "../ttree-core" }
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+urlencoding.workspace = true
