@@ -1,9 +1,9 @@
-//! 内存缓存 + 磁盘持久化的配置管理。
+//! 内存缓存 + 本地 JSON (`settings.json`) 持久化的配置管理。
 //!
-//! 关键性能优化：
-//! - 启动时一次性加载 `settings.json` 与 Keychain 密钥到内存 `RwLock`
-//! - 翻译/对话/快捷键分发热路径直接从内存读取（0 磁盘 I/O，0 Keychain IPC）
-//! - 100% 兼容旧版 Tauri `tauri-plugin-store` 生成的扁平点号键名（如 `"openai.base_url"`）
+//! 关键设计：
+//! - 启动时一次性加载 `settings.json` 到内存 `RwLock`
+//! - 所有配置（含可选的 `api_key`）直接保存在应用配置目录 `settings.json`（权限 `0600` 仅当前用户可读写），彻底杜绝 macOS Keychain 授权密码弹窗
+//! - 翻译/对话/快捷键分发热路径直接从内存读取（0 磁盘 I/O）
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,6 @@ use ttree_core::{
     normalize_base_url, AiBackendKind, AiTranslationConfig, AppearanceConfig, ChatAiConfig,
     ShortcutConfig, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
-use ttree_platform_macos::keychain::{self, ACCOUNT_CHAT_AI_KEY, ACCOUNT_OPENAI_KEY};
 
 pub const APP_BUNDLE_ID: &str = "com.samwstu.ttree";
 pub const STORE_FILE: &str = "settings.json";
@@ -71,18 +70,30 @@ impl SettingsStore {
         }
     }
 
-    /// 供翻译请求直接读取（含内存缓存的真实 API Key，零 I/O）。
+    /// 供翻译请求直接读取（纯内存读取，零 I/O）。
     pub fn ai_translation_for_request(&self) -> AiTranslationConfig {
-        self.cache.read().expect("settings lock poisoned").ai_translate.clone()
+        self.cache
+            .read()
+            .expect("settings lock poisoned")
+            .ai_translate
+            .clone()
     }
 
-    /// 供对话请求直接读取（含内存缓存的真实 API Key，零 I/O）。
+    /// 供对话请求直接读取（纯内存读取，零 I/O）。
     pub fn chat_ai_for_request(&self) -> ChatAiConfig {
-        self.cache.read().expect("settings lock poisoned").chat_ai.clone()
+        self.cache
+            .read()
+            .expect("settings lock poisoned")
+            .chat_ai
+            .clone()
     }
 
     pub fn shortcuts(&self) -> ShortcutConfig {
-        self.cache.read().expect("settings lock poisoned").shortcuts.clone()
+        self.cache
+            .read()
+            .expect("settings lock poisoned")
+            .shortcuts
+            .clone()
     }
 
     pub fn appearance(&self) -> AppearanceConfig {
@@ -99,27 +110,23 @@ impl SettingsStore {
         validate_field_len("Tokenizer 路径", &input.gguf_tokenizer_path, MAX_PATH_BYTES)?;
         validate_field_len("翻译提示词", &input.translate_prompt, MAX_PROMPT_BYTES)?;
 
-        let base_url = if input.backend == AiBackendKind::CandleGguf && input.base_url.trim().is_empty() {
-            String::new()
-        } else {
-            normalize_base_url(&input.base_url)?
-        };
+        let base_url =
+            if input.backend == AiBackendKind::CandleGguf && input.base_url.trim().is_empty() {
+                String::new()
+            } else {
+                normalize_base_url(&input.base_url)?
+            };
 
         let mut guard = self.cache.write().expect("settings lock poisoned");
-        let resolved_key = update_secret_if_needed(
-            ACCOUNT_OPENAI_KEY,
-            &base_url,
-            &guard.ai_translate.api_key,
-            &input.api_key,
-            input.clear_api_key,
-        )?;
+        let resolved_key =
+            resolve_api_key(&guard.ai_translate.api_key, &input.api_key, input.clear_api_key)?;
 
         let updated = AiTranslationConfig {
             enabled: input.enabled,
             backend: input.backend,
             base_url: base_url.clone(),
             has_api_key: !resolved_key.is_empty(),
-            api_key: resolved_key,
+            api_key: resolved_key.clone(),
             clear_api_key: false,
             model: input.model.trim().to_string(),
             gguf_model_path: input.gguf_model_path.trim().to_string(),
@@ -127,13 +134,25 @@ impl SettingsStore {
             translate_prompt: input.translate_prompt.clone(),
         };
 
-        guard.raw_map.insert("openai.enabled".into(), Value::Bool(updated.enabled));
+        guard
+            .raw_map
+            .insert("openai.enabled".into(), Value::Bool(updated.enabled));
         guard.raw_map.insert(
             "openai.backend".into(),
-            serde_json::to_value(updated.backend).unwrap_or(Value::String("open_ai_compatible".into())),
+            serde_json::to_value(updated.backend)
+                .unwrap_or(Value::String("open_ai_compatible".into())),
         );
-        guard.raw_map.insert("openai.base_url".into(), Value::String(updated.base_url.clone()));
-        guard.raw_map.insert("openai.model".into(), Value::String(updated.model.clone()));
+        guard.raw_map.insert(
+            "openai.base_url".into(),
+            Value::String(updated.base_url.clone()),
+        );
+        guard.raw_map.insert(
+            "openai.api_key".into(),
+            Value::String(resolved_key),
+        );
+        guard
+            .raw_map
+            .insert("openai.model".into(), Value::String(updated.model.clone()));
         guard.raw_map.insert(
             "openai.gguf_model_path".into(),
             Value::String(updated.gguf_model_path.clone()),
@@ -146,7 +165,6 @@ impl SettingsStore {
             "openai.translate_prompt".into(),
             Value::String(updated.translate_prompt.clone()),
         );
-        guard.raw_map.remove("openai.api_key");
 
         write_json_map(&self.path, &guard.raw_map)?;
         guard.ai_translate = updated;
@@ -159,26 +177,22 @@ impl SettingsStore {
         validate_field_len("Tokenizer 路径", &input.gguf_tokenizer_path, MAX_PATH_BYTES)?;
         validate_field_len("AI 对话提示词", &input.chat_prompt, MAX_PROMPT_BYTES)?;
 
-        let base_url = if input.backend == AiBackendKind::CandleGguf && input.base_url.trim().is_empty() {
-            String::new()
-        } else {
-            normalize_base_url(&input.base_url)?
-        };
+        let base_url =
+            if input.backend == AiBackendKind::CandleGguf && input.base_url.trim().is_empty() {
+                String::new()
+            } else {
+                normalize_base_url(&input.base_url)?
+            };
 
         let mut guard = self.cache.write().expect("settings lock poisoned");
-        let resolved_key = update_secret_if_needed(
-            ACCOUNT_CHAT_AI_KEY,
-            &base_url,
-            &guard.chat_ai.api_key,
-            &input.api_key,
-            input.clear_api_key,
-        )?;
+        let resolved_key =
+            resolve_api_key(&guard.chat_ai.api_key, &input.api_key, input.clear_api_key)?;
 
         let updated = ChatAiConfig {
             backend: input.backend,
             base_url: base_url.clone(),
             has_api_key: !resolved_key.is_empty(),
-            api_key: resolved_key,
+            api_key: resolved_key.clone(),
             clear_api_key: false,
             model: input.model.trim().to_string(),
             gguf_model_path: input.gguf_model_path.trim().to_string(),
@@ -188,10 +202,21 @@ impl SettingsStore {
 
         guard.raw_map.insert(
             "chat_ai.backend".into(),
-            serde_json::to_value(updated.backend).unwrap_or(Value::String("open_ai_compatible".into())),
+            serde_json::to_value(updated.backend)
+                .unwrap_or(Value::String("open_ai_compatible".into())),
         );
-        guard.raw_map.insert("chat_ai.base_url".into(), Value::String(updated.base_url.clone()));
-        guard.raw_map.insert("chat_ai.model".into(), Value::String(updated.model.clone()));
+        guard.raw_map.insert(
+            "chat_ai.base_url".into(),
+            Value::String(updated.base_url.clone()),
+        );
+        guard.raw_map.insert(
+            "chat_ai.api_key".into(),
+            Value::String(resolved_key),
+        );
+        guard.raw_map.insert(
+            "chat_ai.model".into(),
+            Value::String(updated.model.clone()),
+        );
         guard.raw_map.insert(
             "chat_ai.gguf_model_path".into(),
             Value::String(updated.gguf_model_path.clone()),
@@ -204,7 +229,6 @@ impl SettingsStore {
             "chat_ai.chat_prompt".into(),
             Value::String(updated.chat_prompt.clone()),
         );
-        guard.raw_map.remove("chat_ai.api_key");
 
         write_json_map(&self.path, &guard.raw_map)?;
         guard.chat_ai = updated;
@@ -213,9 +237,16 @@ impl SettingsStore {
 
     pub fn save_shortcuts(&self, cfg: &ShortcutConfig) -> Result<(), String> {
         let mut guard = self.cache.write().expect("settings lock poisoned");
-        guard.raw_map.insert("shortcut.toggle".into(), Value::String(cfg.toggle.clone()));
-        guard.raw_map.insert("shortcut.ocr".into(), Value::String(cfg.ocr.clone()));
-        guard.raw_map.insert("shortcut.ai_dialog".into(), Value::String(cfg.ai_dialog.clone()));
+        guard
+            .raw_map
+            .insert("shortcut.toggle".into(), Value::String(cfg.toggle.clone()));
+        guard
+            .raw_map
+            .insert("shortcut.ocr".into(), Value::String(cfg.ocr.clone()));
+        guard.raw_map.insert(
+            "shortcut.ai_dialog".into(),
+            Value::String(cfg.ai_dialog.clone()),
+        );
         guard.raw_map.insert(
             "shortcut.selection_translate".into(),
             Value::String(cfg.selection_translate.clone()),
@@ -234,9 +265,10 @@ impl SettingsStore {
             panel_opacity: AppearanceConfig::clamp_opacity(cfg.panel_opacity),
         };
         let mut guard = self.cache.write().expect("settings lock poisoned");
-        guard
-            .raw_map
-            .insert("appearance.panel_opacity".into(), Value::from(clamped.panel_opacity));
+        guard.raw_map.insert(
+            "appearance.panel_opacity".into(),
+            Value::from(clamped.panel_opacity),
+        );
         write_json_map(&self.path, &guard.raw_map)?;
         guard.appearance = clamped;
         Ok(())
@@ -257,26 +289,13 @@ impl SettingsStore {
     }
 }
 
-fn update_secret_if_needed(
-    account: &str,
-    endpoint: &str,
-    existing: &str,
-    new_key: &str,
-    clear: bool,
-) -> Result<String, String> {
+fn resolve_api_key(existing: &str, new_key: &str, clear: bool) -> Result<String, String> {
     let trimmed = new_key.trim();
     validate_field_len("API Key", trimmed, MAX_API_KEY_BYTES)?;
     if clear {
-        let _ = keychain::delete_secret(account);
         return Ok(String::new());
     }
     if !trimmed.is_empty() {
-        let bind_url = if endpoint.is_empty() {
-            "local://gguf"
-        } else {
-            endpoint
-        };
-        let _ = keychain::set_bound_secret(account, bind_url, trimmed);
         return Ok(trimmed.to_string());
     }
     Ok(existing.to_string())
@@ -294,7 +313,14 @@ fn write_json_map(path: &Path, map: &Map<String, Value>) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
     }
     let bytes = serde_json::to_vec_pretty(map).map_err(|e| format!("序列化配置失败: {e}"))?;
-    fs::write(path, bytes).map_err(|e| format!("写入配置文件失败: {e}"))
+    fs::write(path, bytes).map_err(|e| format!("写入配置文件失败: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 fn load_ai_translation(map: &Map<String, Value>) -> AiTranslationConfig {
@@ -313,6 +339,10 @@ fn load_ai_translation(map: &Map<String, Value>) -> AiTranslationConfig {
             cfg.base_url = norm;
         }
     }
+    if let Some(key) = map.get("openai.api_key").and_then(Value::as_str) {
+        cfg.api_key = key.trim().to_string();
+        cfg.has_api_key = !cfg.api_key.is_empty();
+    }
     if let Some(m) = map.get("openai.model").and_then(Value::as_str) {
         if !m.trim().is_empty() {
             cfg.model = m.trim().to_string();
@@ -328,10 +358,6 @@ fn load_ai_translation(map: &Map<String, Value>) -> AiTranslationConfig {
         if !prompt.trim().is_empty() {
             cfg.translate_prompt = prompt.to_string();
         }
-    }
-    if let Ok(Some(record)) = keychain::get_secret_record(ACCOUNT_OPENAI_KEY) {
-        cfg.api_key = record.value().to_string();
-        cfg.has_api_key = !cfg.api_key.is_empty();
     }
     cfg
 }
@@ -349,6 +375,10 @@ fn load_chat_ai(map: &Map<String, Value>) -> ChatAiConfig {
             cfg.base_url = norm;
         }
     }
+    if let Some(key) = map.get("chat_ai.api_key").and_then(Value::as_str) {
+        cfg.api_key = key.trim().to_string();
+        cfg.has_api_key = !cfg.api_key.is_empty();
+    }
     if let Some(m) = map.get("chat_ai.model").and_then(Value::as_str) {
         if !m.trim().is_empty() {
             cfg.model = m.trim().to_string();
@@ -362,10 +392,6 @@ fn load_chat_ai(map: &Map<String, Value>) -> ChatAiConfig {
     }
     if let Some(prompt) = map.get("chat_ai.chat_prompt").and_then(Value::as_str) {
         cfg.chat_prompt = prompt.to_string();
-    }
-    if let Ok(Some(record)) = keychain::get_secret_record(ACCOUNT_CHAT_AI_KEY) {
-        cfg.api_key = record.value().to_string();
-        cfg.has_api_key = !cfg.api_key.is_empty();
     }
     cfg
 }
@@ -423,20 +449,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persists_and_reloads_settings_via_memory_cache() {
+    fn persists_and_reloads_settings_and_api_key_in_json() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = SettingsStore::open_at(tmp.path().to_path_buf());
 
         let mut cfg = store.ai_translation_for_request();
-        cfg.backend = AiBackendKind::Ollama;
-        cfg.base_url = "http://127.0.0.1:11434".to_string();
-        cfg.model = "qwen2.5:3b".to_string();
+        cfg.backend = AiBackendKind::OpenAiCompatible;
+        cfg.base_url = "https://api.openai.com/v1".to_string();
+        cfg.api_key = "sk-test-json-123".to_string();
+        cfg.model = "gpt-4o-mini".to_string();
         store.save_ai_translation(&cfg).unwrap();
 
         let reloaded = SettingsStore::open_at(tmp.path().to_path_buf());
         let loaded_cfg = reloaded.ai_translation_for_request();
-        assert_eq!(loaded_cfg.backend, AiBackendKind::Ollama);
-        assert_eq!(loaded_cfg.base_url, "http://127.0.0.1:11434");
-        assert_eq!(loaded_cfg.model, "qwen2.5:3b");
+        assert_eq!(loaded_cfg.backend, AiBackendKind::OpenAiCompatible);
+        assert_eq!(loaded_cfg.base_url, "https://api.openai.com/v1");
+        assert_eq!(loaded_cfg.api_key, "sk-test-json-123");
+        assert!(loaded_cfg.has_api_key);
+        assert_eq!(loaded_cfg.model, "gpt-4o-mini");
     }
 }

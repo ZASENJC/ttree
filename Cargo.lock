@@ -3172,9 +3172,6 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-graphics",
  "objc2-foundation",
- "security-framework",
- "serde",
- "serde_json",
  "ttree-core",
 ]
 
@@ -3187,7 +3184,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ttree-core",
- "ttree-platform-macos",
 ]
 
 [[package]]

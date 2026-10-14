@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 ttree-core = { path = "../ttree-core" }
-ttree-platform-macos = { path = "../ttree-platform-macos" }
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

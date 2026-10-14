@@ -790,7 +790,7 @@ impl AppController {
         let ai_key_field = make_secure_field(
             mtm,
             top_rect(h, 78.0, 79.0, 148.0, 22.0),
-            if ai_cfg.has_api_key { "已存钥匙串 (留空不改)" } else { "本地服务/GGUF 免填" },
+            if ai_cfg.has_api_key { "已保存在配置中 (留空不改)" } else { "本地服务/GGUF 免填" },
         );
         let ai_key_status_label = make_label(
             mtm,
@@ -946,7 +946,7 @@ impl AppController {
         let chat_key_field = make_secure_field(
             mtm,
             top_rect(h, 78.0, 293.0, 148.0, 22.0),
-            if chat_cfg.has_api_key { "已存钥匙串 (留空不改)" } else { "本地服务/GGUF 免填" },
+            if chat_cfg.has_api_key { "已保存在配置中 (留空不改)" } else { "本地服务/GGUF 免填" },
         );
         let chat_key_status_label = make_label(
             mtm,
