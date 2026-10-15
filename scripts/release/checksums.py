@@ -12,7 +12,7 @@ def digest(path):
 
 def write(directory, name):
     paths = sorted(p for p in directory.iterdir()
-                   if p.is_file() and p.name != name and not p.name.endswith(".sha256"))
+                   if p.is_file() and p.name not in (name, "SHA256SUMS.sig") and not p.name.endswith(".sha256"))
     if not paths:
         raise ValueError("no assets to checksum")
     (directory / name).write_text("".join(f"{digest(p)}  {p.name}\n" for p in paths))

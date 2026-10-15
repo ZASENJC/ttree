@@ -33,11 +33,14 @@ git push origin vX.Y.Z
 | `TTREE_X.Y.Z_universal.dmg` | Mac 安装包，包含 arm64 + x86_64 |
 | `TTREE_universal.app.tar.gz` | 同一个签名 App 的更新归档 |
 | `TTREE_universal.app.tar.gz.sig` | 更新归档 minisign 签名 |
+| `SHA256SUMS.sig` | 双平台更新清单的 minisign 签名（Tauri base64 格式） |
 | `latest.json` | 旧更新客户端兼容清单，保留原公钥及平台键 |
 | `TTREE_X.Y.Z_windows_x64.zip` | Windows 便携包，内含 `TTREE/TTREE.exe` 与许可/说明 |
-| `SHA256SUMS` | 全部五项附件的 SHA-256 |
+| `SHA256SUMS` | 安装包与兼容更新附件的 SHA-256（签名自身不计入） |
 
-当前纯 Rust UI 未实现自动更新界面，用户从 Release 下载手动替换。保留旧更新附件协议不代表新 UI 已实现更新功能。
+Mac 和 Windows 均可在「设置 → 通用」检查正式版、下载更新，再点击「安装并重启」。检查与下载不退出应用，安装才退出并替换原位置；目录不可写时会提示错误。Mac 从 DMG 运行时需先拖入应用程序文件夹。安装失败会尝试恢复旧版本；配置、历史和模型目录保持不变。
+
+新客户端先使用内置原公钥验证 `SHA256SUMS.sig`，再校验下载包 SHA-256。Mac 还验证固定证书与 designated requirement。发布 job 在双平台构建完成后，用既有加密更新私钥和固定版本的独立 signer 签署 `SHA256SUMS`；公开前再次下载校验签名。旧 `latest.json`、Mac 归档签名保持兼容。缺少新清单签名的历史版本不能通过应用内安装，仍可手动下载。
 
 ## 两层 Mac 签名
 

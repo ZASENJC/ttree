@@ -69,6 +69,24 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 assets.verify(directory, "1.0.0")
 
+    def test_update_signature_is_required_before_both_publication_checks(self):
+        workflow = (ROOT / ".github/workflows/build.yml").read_text()
+        self.assertLess(workflow.index("python3 scripts/release/checksums.py dist/release --write SHA256SUMS"),
+                        workflow.index("run: scripts/release/sign-checksums.sh dist/release"))
+        publish = (ROOT / "scripts/release/publish.sh").read_text()
+        for directory in ("$RELEASE_DIR", "$DOWNLOADED"):
+            self.assertIn(f'scripts/release/verify-checksums-signature.sh "{directory}"', publish)
+        self.assertLess(publish.index('verify-checksums-signature.sh "$DOWNLOADED"'),
+                        publish.index('--draft=false'))
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "app.zip").write_bytes(b"original")
+            (directory / "SHA256SUMS.sig").write_text("stale signature")
+            checksums.write(directory, "SHA256SUMS")
+            self.assertNotIn("SHA256SUMS.sig", (directory / "SHA256SUMS").read_text())
+            (directory / "SHA256SUMS.sig").write_text("new signature")
+            checksums.check(directory, "SHA256SUMS")
+
     def test_workspace_and_workflow_use_current_source(self):
         self.assertTrue((ROOT / "apps/macos/src/main.rs").exists())
         self.assertTrue((ROOT / "apps/windows/src/main.rs").exists())

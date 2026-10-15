@@ -9,6 +9,7 @@
 | 语言、提示词输入、布局数据、消息校验 | `crates/ttree-core` | 两端 |
 | 免费翻译、分流、回退 | `crates/ttree-translate` | 两端 |
 | 流式 AI、HY-MT、本地服务 | `crates/ttree-ai` | 两端；Candle/Metal 实现限 Mac |
+| 版本检查、更新下载、校验与安装 | `crates/ttree-updater` | 两端；安装器按平台隔离 |
 | 配置和历史 | `crates/ttree-storage` | 两端；保持旧格式 |
 | 快捷键、自启和划词入口 | `crates/ttree-platform` | 两端，系统划词实现分目录 |
 | OCR 公共处理/结果类型 | `crates/ttree-ocr/src` | 两端 |
@@ -30,6 +31,9 @@ Windows 需要 Rust stable MSVC、Visual Studio C++ Build Tools 和 Windows SDK�
 cargo run -p ttree-macos -- --show
 cargo run -p ttree-windows -- --show
 
+# Mac 签名 App 的原生截图 / Vision 验证（应用未运行时）
+open -n /Applications/TTREE.app --args --ocr
+
 # 编译和单元测试（workspace 成员在非对应平台使用空入口）
 cargo check --workspace --locked
 cargo test --workspace --locked
@@ -41,7 +45,7 @@ bash scripts/tests/run-release-tests.sh
 cargo check -p ttree-windows --target x86_64-pc-windows-msvc --locked
 ```
 
-不需要 Node 前端工具链。Mac 发布阶段使用固定版本的 Tauri 独立 signer，仅用于兼容旧客户端的更新附件签名。
+不需要 Node 前端工具链。发布阶段使用固定版本的 Tauri 独立 signer，用于兼容旧客户端的更新附件签名及双平台更新清单签名。
 
 ## 验证边界
 
@@ -60,3 +64,5 @@ README 图片放 `docs/images/`，只能提交确认可公开的界面。API Key
 单色 Logo 源文件为 `assets/icons/icon.svg`。Mac 安装 librsvg 后运行 `python3 scripts/branding/generate-icons.py`，统一生成 PNG、ICO、ICNS。Windows 可生成 PNG/ICO；发布前仍须在 Mac 更新 ICNS。Windows build.rs 将图标及版本编译进 EXE，窗口读取带底板的应用图标；托盘读取无底板的浅色/深色字形，并跟随系统任务栏主题。Mac 菜单栏使用透明字形与 NSImage template 自动适配明暗。
 
 README 产品图源文件为 `docs/design/product.html`，按 1600 × 1080 CSS 像素渲染，导出 `docs/images/product.png`（当前为 2x）。这是基于现有布局的界面示意，不是实机截图；不要用它作为交互验收证据。
+
+应用内安装原生冒烟由 `updater-smoke` opt-in 验证构建执行：`--updater-smoke-install SIGNED_RELEASE_DIR vX.Y.Z`。入口仅在验证构建中存在，使用正式公钥和签名清单，安装器与发行版相同。Windows CI 验证实际 EXE 替换、新 GUI 进程、便携目录文件保留及 helper 清理；不以假程序启动代替。

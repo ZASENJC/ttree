@@ -119,6 +119,9 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -133,10 +136,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --workspace --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build opt-in updater verification executable without signing material
+        if: github.event_name != 'pull_request' && github.repository == 'ZASENJC/ttree'
+        run: |
+          cargo build --locked --release -p ttree-windows --features updater-smoke --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force target/updater-probe | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/ttree-windows.exe target/updater-probe/TTREE.exe
       - name: Build and validate portable ZIP
         run: ./scripts/windows/package.ps1
       - name: Launch packaged Windows app
         run: ./scripts/windows/smoke.ps1 -Exe target/package/windows/TTREE/TTREE.exe -Output target/windows-smoke
+      - name: Sign local upgrade fixture after compilation
+        if: github.event_name != 'pull_request' && github.repository == 'ZASENJC/ttree'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bash scripts/release/validate-secrets.sh updater
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force target/updater-source | Out-Null
+          Copy-Item dist/windows/*.zip target/updater-source/
+          python scripts/release/checksums.py target/updater-source --write SHA256SUMS
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TAURI_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY
+          $env:TAURI_PRIVATE_KEY_PASSWORD = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          Copy-Item target/updater-source/SHA256SUMS target/updater-checksums.txt
+          npx --yes --package @tauri-apps/cli@2.8.4 tauri signer sign target/updater-checksums.txt | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target/updater-checksums.txt.sig target/updater-source/SHA256SUMS.sig
+          Remove-Item target/updater-checksums.txt, target/updater-checksums.txt.sig
+      - name: Verify real Windows upgrade and restart
+        if: github.event_name != 'pull_request' && github.repository == 'ZASENJC/ttree'
+        run: ./scripts/windows/upgrade-smoke.ps1 -ProbeExe target/updater-probe/TTREE.exe -ReleaseDirectory target/updater-source -ExpectedExe target/package/windows/TTREE/TTREE.exe -Version '${{ needs.metadata.outputs.app_version }}' -Output target/windows-smoke
       - name: Record Windows checksums
         run: python scripts/release/checksums.py dist/windows --write windows.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -173,6 +205,9 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-${{ github.run_id }}-${{ github.run_attempt }}
@@ -192,5 +227,10 @@ jobs:
           python3 scripts/release/verify-assets.py dist/release "$APP_VERSION"
           rm dist/release/macos.sha256 dist/release/windows.sha256
           python3 scripts/release/checksums.py dist/release --write SHA256SUMS
+      - name: Sign cross-platform update checksums
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: scripts/release/sign-checksums.sh dist/release
       - name: Generate release notes and publish verified draft
         run: scripts/release/publish.sh

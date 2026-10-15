@@ -84,4 +84,4 @@ docs/            开发、发布说明与图片
 
 推送到 `main`，自动构建两个平台并发布预发布版；推送匹配工作区版本的 `vX.Y.Z` 标签，验证后发布正式版。其他分支与 PR 只验证。[查看发布流程](docs/releasing.md) · [查看构建状态](https://github.com/ZASENJC/ttree/actions/workflows/build.yml)。
 
-<sub>免费翻译依赖非官方端点，可用性取决于服务。离线模型需单独下载，并满足对应硬件与模型许可条件。配置与对话历史保存在本机；当前 API Key 随本机 JSON 配置保存，请勿分享配置文件。纯 Rust 版本目前通过下载 Release 手动升级；发布保留旧版更新客户端所需的签名附件。macOS 包声明最低系统版本为 11.0；Windows 提供 x64 构建。MIT 开源，第三方图标许可见 assets/licenses。</sub>
+<sub>免费翻译依赖非官方端点，可用性取决于服务。离线模型需单独下载，并满足对应硬件与模型许可条件。配置与对话历史保存在本机；当前 API Key 随本机 JSON 配置保存，请勿分享配置文件。可在「设置 → 通用」检查正式版、下载更新并安装重启；也可从 Release 手动升级。macOS 包声明最低系统版本为 11.0；Windows 提供 x64 构建。MIT 开源，第三方图标许可见 assets/licenses。</sub>

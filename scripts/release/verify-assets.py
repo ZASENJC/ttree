@@ -8,7 +8,7 @@ import zipfile
 def verify(directory, version):
     required = {f"TTREE_{version}_universal.dmg", "TTREE_universal.app.tar.gz",
                 "TTREE_universal.app.tar.gz.sig", "latest.json", f"TTREE_{version}_windows_x64.zip"}
-    allowed = required | {"macos.sha256", "windows.sha256", "SHA256SUMS"}
+    allowed = required | {"macos.sha256", "windows.sha256", "SHA256SUMS", "SHA256SUMS.sig"}
     actual = {p.name for p in directory.iterdir()}
     if not required <= actual or actual - allowed:
         raise ValueError(f"unexpected release files: missing={required-actual}, extra={actual-allowed}")

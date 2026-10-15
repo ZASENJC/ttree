@@ -8,6 +8,14 @@ mod ui_helpers;
 
 #[cfg(target_os = "macos")]
 fn main() {
+    #[cfg(feature = "updater-smoke")]
+    if let Some(result) = ttree_updater::smoke_from_args() {
+        if let Err(error) = result {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     app::run();
 }
 #[cfg(not(target_os = "macos"))]

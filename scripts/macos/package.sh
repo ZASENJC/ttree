@@ -75,7 +75,7 @@ fi
 "$ROOT_DIR/scripts/macos/sign-app.sh" "$APP_PATH" "$SIGNING_KEYCHAIN"
 security lock-keychain "$SIGNING_KEYCHAIN"
 mkdir -p "$RELEASE_DIR"
-tar -czf "$WORK_DIR/TTREE_universal.app.tar.gz" -C "$APP_DIR" TTREE.app
+COPYFILE_DISABLE=1 tar -czf "$WORK_DIR/TTREE_universal.app.tar.gz" -C "$APP_DIR" TTREE.app
 TAURI_SIGNING_PRIVATE_KEY="$UPDATER_KEY" TAURI_SIGNING_PRIVATE_KEY_PATH="$UPDATER_PATH" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$UPDATER_PASSWORD" "$ROOT_DIR/scripts/release/validate-secrets.sh" updater
 # Only the pinned standalone signer receives updater credentials (no frontend build).

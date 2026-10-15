@@ -24,6 +24,7 @@ use crate::state::{ActionTag, AppController, TabMode, UiEvent};
 
 struct GlobalUiContext {
     ctrl: AppController,
+    startup_ocr_at: Option<std::time::Instant>,
     ui_rx: UnboundedReceiver<UiEvent>,
     _status_item: Retained<NSStatusItem>,
 }
@@ -80,6 +81,10 @@ define_class!(
                 }
                 while let Ok(ui_ev) = ctx.ui_rx.try_recv() {
                     ctx.ctrl.handle_ui_event(ui_ev);
+                }
+                if ctx.startup_ocr_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                    ctx.startup_ocr_at = None;
+                    ctx.ctrl.trigger_ocr();
                 }
                 ctx.ctrl.poll_tick();
             });
@@ -184,6 +189,9 @@ pub fn run() {
     UI_CTX.with(|cell| {
         *cell.borrow_mut() = Some(GlobalUiContext {
             ctrl,
+            startup_ocr_at: std::env::args()
+                .any(|arg| arg == "--ocr")
+                .then(|| std::time::Instant::now() + std::time::Duration::from_millis(800)),
             ui_rx,
             _status_item: status_item,
         });

@@ -19,6 +19,7 @@ cleanup() {
 trap cleanup EXIT
 python3 scripts/release/verify-assets.py "$RELEASE_DIR" "$APP_VERSION"
 python3 scripts/release/checksums.py "$RELEASE_DIR" --check SHA256SUMS
+scripts/release/verify-checksums-signature.sh "$RELEASE_DIR"
 if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
   echo "Release $RELEASE_TAG already exists; refusing to replace it" >&2
   exit 1
@@ -47,6 +48,7 @@ mkdir -p "$DOWNLOADED"
 gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$DOWNLOADED"
 python3 scripts/release/verify-assets.py "$DOWNLOADED" "$APP_VERSION"
 python3 scripts/release/checksums.py "$DOWNLOADED" --check SHA256SUMS
+scripts/release/verify-checksums-signature.sh "$DOWNLOADED"
 VERIFY_MACOS_CONTAINERS=0 scripts/release/verify-macos-assets.sh "$DOWNLOADED" "$RELEASE_TAG" "$GITHUB_REPOSITORY" "$APP_VERSION"
 if [[ "$PRERELEASE" == true ]]; then
   gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

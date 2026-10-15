@@ -127,6 +127,7 @@ pub enum ActionTag {
     SettingsSecChat = 61,
     SettingsSecShortcuts = 62,
     SettingsSecGeneral = 63,
+    UpdateApp = 64,
 
     HyMtQuantChanged = 70,
     HyMtCheckCompatibility = 71,
@@ -185,6 +186,7 @@ impl ActionTag {
             61 => Some(Self::SettingsSecChat),
             62 => Some(Self::SettingsSecShortcuts),
             63 => Some(Self::SettingsSecGeneral),
+            64 => Some(Self::UpdateApp),
             70 => Some(Self::HyMtQuantChanged),
             71 => Some(Self::HyMtCheckCompatibility),
             72 => Some(Self::HyMtDownloadAndRun),
@@ -391,6 +393,8 @@ pub struct SettingsViewWidgets {
     pub opacity_val_label: Retained<NSTextField>,
     pub autostart_chk: Retained<NSButton>,
     pub ocr_strip_newlines_chk: Retained<NSButton>,
+    pub update_button: Retained<NSButton>,
+    pub update_status: Retained<NSTextField>,
     pub ver_label: Retained<NSTextField>,
     pub gen_hint: Retained<NSTextField>,
 
@@ -398,6 +402,8 @@ pub struct SettingsViewWidgets {
 }
 
 pub struct AppController {
+    updater: ttree_updater::Updater,
+    update_view: ttree_updater::View,
     pub mtm: MainThreadMarker,
     pub rt: TokioHandle,
     pub ui_tx: UnboundedSender<UiEvent>,
@@ -633,6 +639,8 @@ impl AppController {
         };
 
         let mut ctrl = Self {
+            updater: Default::default(),
+            update_view: Default::default(),
             mtm,
             rt,
             ui_tx,
@@ -1737,6 +1745,26 @@ impl AppController {
             dispatcher,
             action_sel,
         );
+        let update_button = make_flat_button(
+            mtm,
+            dummy,
+            "检查更新",
+            12.0,
+            false,
+            false,
+            ActionTag::UpdateApp as isize,
+            dispatcher,
+            action_sel,
+        );
+        let update_status = make_wrapping_label(
+            mtm,
+            dummy,
+            &ttree_updater::View::default().status,
+            11.5,
+            true,
+        );
+        add_subview(&sec_general, &update_button);
+        add_subview(&sec_general, &update_status);
         let ver_label = make_label(
             mtm,
             dummy,
@@ -1866,6 +1894,8 @@ impl AppController {
             opacity_val_label,
             autostart_chk,
             ocr_strip_newlines_chk,
+            update_button,
+            update_status,
             ver_label,
             gen_hint,
             settings_status_label,
@@ -2204,11 +2234,35 @@ impl AppController {
 
     pub fn trigger_ocr(&mut self) {
         self.hide_window();
+        #[cfg(feature = "updater-smoke")]
+        let evidence = {
+            let args: Vec<_> = std::env::args_os().collect();
+            args.windows(2)
+                .find(|pair| pair[0] == "--ocr-evidence")
+                .map(|pair| {
+                    let path = std::path::PathBuf::from(&pair[1]);
+                    let _ = std::fs::write(
+                        &path,
+                        format!(
+                            "preflight={}\n",
+                            ttree_ocr::screenshot::has_screen_capture_permission()
+                        ),
+                    );
+                    path
+                })
+        };
         let tx = self.ui_tx.clone();
         self.rt.spawn(async move {
             let res = tokio::task::spawn_blocking(ttree_ocr::capture_and_recognize)
                 .await
                 .unwrap_or_else(|e| Err(format!("OCR 线程异常: {e}")));
+            #[cfg(feature = "updater-smoke")]
+            if let Some(path) = evidence {
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+                    let _ = writeln!(file, "{res:?}");
+                }
+            }
             let _ = tx.send(UiEvent::OcrCompleted { outcome: res });
         });
     }
@@ -2322,6 +2376,9 @@ impl AppController {
             }
             ActionTag::SettingsSecShortcuts => {
                 self.switch_settings_section(SettingsSection::Shortcuts);
+            }
+            ActionTag::UpdateApp => {
+                self.updater.activate(&self.rt);
             }
             ActionTag::SettingsSecGeneral => {
                 self.switch_settings_section(SettingsSection::General);
@@ -3471,6 +3528,22 @@ impl AppController {
     }
 
     pub fn poll_tick(&mut self) {
+        let view = self.updater.view();
+        if view.exit_for_install {
+            ttree_ai::hy_mt_manager::stop_server();
+            NSApplication::sharedApplication(self.mtm).terminate(None);
+            return;
+        }
+        if view != self.update_view {
+            self.settings_ui
+                .update_button
+                .setTitle(&NSString::from_str(view.button));
+            self.settings_ui.update_button.setEnabled(!view.busy);
+            self.settings_ui
+                .update_status
+                .setStringValue(&NSString::from_str(&view.status));
+            self.update_view = view;
+        }
         if self.window.isVisible() {
             match self.active_tab {
                 TabMode::Translate => {
@@ -4450,9 +4523,16 @@ impl AppController {
         self.settings_ui
             .ver_label
             .setFrame(top_rect(sec_h, 0.0, 174.0, content_w, 20.0));
+        self.settings_ui
+            .update_button
+            .setFrame(top_rect(sec_h, 0.0, 204.0, 130.0, 30.0));
+        set_wrapping_label_frame(
+            &self.settings_ui.update_status,
+            top_rect(sec_h, 0.0, 242.0, content_w, 58.0),
+        );
         set_wrapping_label_frame(
             &self.settings_ui.gen_hint,
-            top_rect(sec_h, 0.0, 206.0, content_w, (sec_h - 206.0).max(80.0)),
+            top_rect(sec_h, 0.0, 308.0, content_w, (sec_h - 308.0).max(80.0)),
         );
     }
 }
@@ -4509,6 +4589,7 @@ mod tests {
             ActionTag::SettingsSecChat,
             ActionTag::SettingsSecShortcuts,
             ActionTag::SettingsSecGeneral,
+            ActionTag::UpdateApp,
             ActionTag::HyMtQuantChanged,
             ActionTag::HyMtCheckCompatibility,
             ActionTag::HyMtDownloadAndRun,

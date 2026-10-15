@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+updater-smoke = ["ttree-updater/smoke"]
+
 [[bin]]
 name = "ttree"
 path = "src/main.rs"
@@ -15,6 +18,7 @@ ttree-storage = { path = "../../crates/ttree-storage" }
 ttree-platform = { path = "../../crates/ttree-platform" }
 ttree-ocr = { path = "../../crates/ttree-ocr" }
 ttree-translate = { path = "../../crates/ttree-translate" }
+ttree-updater = { path = "../../crates/ttree-updater" }
 ttree-ai = { path = "../../crates/ttree-ai" }
 anyhow.workspace = true
 global-hotkey.workspace = true

@@ -208,6 +208,7 @@ const ID_EDIT_HK_SEL_CHAT: usize = 421;
 const ID_BTN_HK_RESET: usize = 422;
 const ID_CMB_OPACITY: usize = 423;
 const ID_CHK_OCR_NEWLINE: usize = 424;
+const ID_BTN_UPDATE: usize = 428;
 const ID_CHK_AUTOSTART: usize = 425;
 const ID_BTN_SAVE_SETTINGS: usize = 426;
 const ID_BTN_HYMT_DELETE: usize = 427;
@@ -371,6 +372,7 @@ extern "system" {
     fn DestroyWindow(hWnd: HWND) -> BOOL;
     fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
     fn IsWindowVisible(hWnd: HWND) -> BOOL;
+    fn EnableWindow(hWnd: HWND, enable: BOOL) -> BOOL;
     fn SetForegroundWindow(hWnd: HWND) -> BOOL;
     fn SetFocus(hWnd: HWND) -> HWND;
     fn SetWindowPos(
@@ -510,6 +512,10 @@ unsafe fn copy_text_to_clipboard(hwnd: HWND, text: &str) {
 }
 
 struct Win32AppState {
+    updater: ttree_updater::Updater,
+    update_view: ttree_updater::View,
+    btn_update: HWND,
+    lbl_update: HWND,
     rt: TokioHandle,
     ui_tx: UnboundedSender<UiEvent>,
     ui_rx: UnboundedReceiver<UiEvent>,
@@ -897,6 +903,10 @@ pub fn run() {
             cmb_opacity: ptr::null_mut(),
             chk_ocr_newline: ptr::null_mut(),
             chk_autostart: ptr::null_mut(),
+            updater: Default::default(),
+            update_view: Default::default(),
+            btn_update: ptr::null_mut(),
+            lbl_update: ptr::null_mut(),
             btn_save_settings: ptr::null_mut(),
             lbl_settings_status: ptr::null_mut(),
         };
@@ -1497,6 +1507,22 @@ impl Win32AppState {
             ID_CHK_AUTOSTART,
             false,
         );
+        self.btn_update = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "检查更新",
+            BS_PUSHBUTTON,
+            ID_BTN_UPDATE,
+            false,
+        );
+        self.lbl_update = self.create_ctrl(
+            hinst,
+            "STATIC",
+            &ttree_updater::View::default().status,
+            0,
+            0,
+            false,
+        );
         self.btn_save_settings = self.create_ctrl(
             hinst,
             "BUTTON",
@@ -1644,6 +1670,8 @@ impl Win32AppState {
             self.cmb_opacity,
             self.chk_ocr_newline,
             self.chk_autostart,
+            self.btn_update,
+            self.lbl_update,
         ]
     }
 
@@ -1986,6 +2014,8 @@ impl Win32AppState {
                 self.cmb_opacity,
                 self.chk_ocr_newline,
                 self.chk_autostart,
+                self.btn_update,
+                self.lbl_update,
             ],
         };
         for c in self
@@ -2016,9 +2046,9 @@ impl Win32AppState {
             ID_SETTINGS_KEYS => 82 + row_h * 5 + 32 + 90,
             _ => {
                 if wide {
-                    360
+                    490
                 } else {
-                    400
+                    530
                 }
             }
         };
@@ -2248,7 +2278,7 @@ impl Win32AppState {
             }
             _ => {
                 let opacity_h = if wide { 84 } else { 112 };
-                bg.card(BoxRect::new(x, top, fw, opacity_h + 156), p);
+                bg.card(BoxRect::new(x, top, fw, opacity_h + 286), p);
                 form_row(self.lbl_opacity, self.cmb_opacity, top + 18, 32, &mut bg);
                 for (i, (c, description)) in [
                     (self.chk_ocr_newline, "合并识别文本中的段落换行"),
@@ -2268,6 +2298,17 @@ impl Win32AppState {
                         true,
                     );
                 }
+                let update_y = top + opacity_h + 168;
+                place(self.btn_update, x + inset, update_y, 140, 32);
+                place(
+                    self.lbl_update,
+                    x + inset,
+                    update_y + 42,
+                    fw - inset * 2,
+                    64,
+                );
+                show(self.btn_update);
+                show(self.lbl_update);
             }
         }
         scene(self.settings_view, bg);
@@ -3203,6 +3244,18 @@ impl Win32AppState {
     }
 
     unsafe fn poll_tick(&mut self) {
+        let view = self.updater.view();
+        if view.exit_for_install {
+            ttree_ai::hy_mt_manager::stop_server();
+            DestroyWindow(self.hwnd);
+            return;
+        }
+        if view != self.update_view {
+            set_hwnd_text(self.btn_update, view.button);
+            set_hwnd_text(self.lbl_update, &view.status);
+            EnableWindow(self.btn_update, (!view.busy) as BOOL);
+            self.update_view = view;
+        }
         while let Ok(hk_ev) = GlobalHotKeyEvent::receiver().try_recv() {
             if hk_ev.state == HotKeyState::Pressed {
                 if let Some(action) = self.parsed_shortcuts.action_for_id(hk_ev.id) {
@@ -3475,6 +3528,9 @@ unsafe extern "system" fn main_wnd_proc(
 
 unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
     match id {
+        ID_BTN_UPDATE if code == BN_CLICKED => {
+            st.updater.activate(&st.rt);
+        }
         ID_BTN_TAB_TRANS if code == BN_CLICKED => st.switch_tab(TabMode::Translate),
         ID_BTN_TAB_CHAT if code == BN_CLICKED => st.switch_tab(TabMode::Chat),
         ID_BTN_TAB_SETTINGS if code == BN_CLICKED => st.switch_tab(TabMode::Settings),
