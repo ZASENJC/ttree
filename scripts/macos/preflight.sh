@@ -15,7 +15,11 @@ trap cleanup EXIT
 KEYCHAIN="$("$ROOT_DIR/scripts/macos/import-certificate.sh")"
 APP_PATH="$WORK_DIR/TTREE.app"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
-printf 'int main(void) { return 0; }\n' | xcrun clang -x c -o "$APP_PATH/Contents/MacOS/ttree" -
+printf 'int main(void) { return 0; }\n' |
+  env -u MACOS_COMMUNITY_CERTIFICATE -u MACOS_COMMUNITY_CERTIFICATE_PASSWORD \
+    -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u TAURI_SIGNING_PRIVATE_KEY_PATH \
+    -u TAURI_PRIVATE_KEY -u TAURI_PRIVATE_KEY_PASSWORD -u TAURI_PRIVATE_KEY_PATH \
+    xcrun clang -x c -o "$APP_PATH/Contents/MacOS/ttree" -
 cp "$ROOT_DIR/assets/icons/status-template.png" "$APP_PATH/Contents/Resources/glyph.png"
 cat > "$APP_PATH/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

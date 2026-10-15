@@ -52,7 +52,7 @@ CI 复用已有四项 Secrets：
 
 旧仓库内其他身份/指纹 Secrets 不作为可信预期来源。公钥位于 `scripts/release/updater.pub`，从原发布配置原样迁移，不生成新密钥。
 
-编译步骤没有上述 Secret 环境变量；编译完成后临时导入固定证书，签署 App，随后仅独立 signer 接收更新私钥。退出时删除临时签名 Keychain。
+编译前先在临时小型 bundle 上预检证书、私钥与指定要求；预检编译器同样不接收签名材料。编译步骤没有上述 Secret 环境变量；编译完成后临时导入固定证书，签署 App，随后仅独立 signer 接收更新私钥。退出时删除临时签名 Keychain。
 
 发布硬门禁包含 deep/strict 验证、Authority、Info.plist、封印资源、指定要求；并解开 tar.gz、挂载 DMG 验证容器内的 App。签名失败、ad-hoc 或证书变化都阻止发布。Mac 包非 Apple 公证，首次安装需“隐私与安全性 → 仍要打开”，随后录屏授权并重启应用。
 
