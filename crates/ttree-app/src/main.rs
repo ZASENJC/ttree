@@ -1,4 +1,4 @@
-//! `ttree` —— 100% 纯 Rust 原生 macOS AI 翻译与 OCR 桌面端入口。
+//! `ttree` —— 100% 纯 Rust 原生跨平台 (macOS AppKit / Windows Win32+DWM) AI 翻译与 OCR 桌面端入口。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -7,14 +7,22 @@ mod state;
 #[cfg(target_os = "macos")]
 mod ui_helpers;
 
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("TTREE 纯 Rust 原生 AppKit 客户端仅支持 macOS 运行。");
-}
+#[cfg(target_os = "windows")]
+mod windows_app;
 
 #[cfg(target_os = "macos")]
 fn main() {
     macos_app::run();
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    windows_app::run();
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn main() {
+    eprintln!("TTREE 纯 Rust 原生客户端目前仅支持 macOS 与 Windows 运行。");
 }
 
 #[cfg(target_os = "macos")]

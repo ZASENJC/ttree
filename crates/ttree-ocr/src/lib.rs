@@ -6,12 +6,19 @@
 //! 3. `image.rs` 自动采样截图边缘背景色填充 Padding（替代旧版硬编码纯白底，彻底修复深色模式单行小图识别失败）；
 //! 4. `vision.rs` 移除主路径上的 `PreferBackgroundProcessing(true)` 后台降级标志，确保菜单栏配件应用极速响应。
 
+pub mod postprocess;
+pub mod preprocess;
 pub mod screenshot;
 
 #[cfg(target_os = "macos")]
 pub mod image;
 #[cfg(target_os = "macos")]
 pub mod vision;
+
+#[cfg(target_os = "windows")]
+pub mod windows_capture;
+#[cfg(target_os = "windows")]
+pub mod windows_ocr;
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,11 +53,14 @@ pub enum OcrOutcome {
     EmptyText,
     /// 上一次截图框选仍在进行中。
     Busy,
-    /// macOS 屏幕录制权限未授予或已失效。
+    /// 屏幕录制权限未授予，或系统缺少 OCR 语言包。
     PermissionDenied(String),
 }
 
-/// 完整执行一次「macOS 原生交互式框选 (`screencapture -i -x -r`) + Apple Vision OCR」。
+/// 完整执行一次「原生交互式自由框选 + 原生离线 OCR 识别」。
+/// - macOS：调用 `/usr/sbin/screencapture -i -x -r` + Apple Vision OCR
+/// - Windows：调用 Per-Monitor DPI v2 原生全屏框选 + 双通道增强多语言 `Windows.Media.Ocr`
+#[cfg(target_os = "macos")]
 pub fn capture_and_recognize() -> Result<OcrOutcome, String> {
     let Some(_guard) = BusyGuard::try_acquire() else {
         return Ok(OcrOutcome::Busy);
@@ -65,12 +75,37 @@ pub fn capture_and_recognize() -> Result<OcrOutcome, String> {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn capture_and_recognize() -> Result<OcrOutcome, String> {
+    let Some(_guard) = BusyGuard::try_acquire() else {
+        return Ok(OcrOutcome::Busy);
+    };
+
+    match windows_capture::capture_interactive_region()? {
+        windows_capture::WindowsCaptureResult::Captured(raw_img) => {
+            windows_ocr::recognize_raw_bgra(raw_img)
+        }
+        windows_capture::WindowsCaptureResult::Cancelled => Ok(OcrOutcome::Cancelled),
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+pub fn capture_and_recognize() -> Result<OcrOutcome, String> {
+    Err("当前平台暂不支持截图 OCR".to_string())
+}
+
 #[cfg(target_os = "macos")]
 pub fn recognize_file(path: &str) -> Result<OcrOutcome, String> {
     vision::recognize_file(path)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn recognize_file(path: &str) -> Result<OcrOutcome, String> {
+    windows_ocr::recognize_file(path)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn recognize_file(_path: &str) -> Result<OcrOutcome, String> {
     Err("当前平台暂不支持 OCR".to_string())
 }
+

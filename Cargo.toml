@@ -114,3 +114,13 @@ objc2-app-kit = { version = "0.3", features = [
     "objc2-core-foundation",
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Security_Cryptography",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }

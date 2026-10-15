@@ -6,25 +6,36 @@
 //! 3. 优先启用 Apple Silicon `Device::new_metal(0)` GPU 加速，并在内存中常驻缓存已加载的模型权重，二次翻译 0 加载延迟；
 //! 4. 每生成一个 Token 即刻回调 UI 并检查 `CancelToken`，支持随时毫秒级打断。
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::fs::File;
+#[cfg(target_os = "macos")]
 use std::io::BufReader;
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(target_os = "macos")]
 use candle_core::quantized::gguf_file::{self, Value as GgufValue};
+#[cfg(target_os = "macos")]
 use candle_core::{Device, Tensor};
+#[cfg(target_os = "macos")]
 use candle_transformers::models::{quantized_llama, quantized_qwen2, quantized_qwen3};
 use ttree_core::{CancelToken, ChatMessage};
 
+#[cfg(target_os = "macos")]
 const MAX_NEW_TOKENS: usize = 512;
 
+#[cfg(target_os = "macos")]
 enum QuantizedArch {
     Qwen2(quantized_qwen2::ModelWeights),
     Qwen3(quantized_qwen3::ModelWeights),
     Llama(quantized_llama::ModelWeights),
 }
 
+#[cfg(target_os = "macos")]
 impl QuantizedArch {
     fn clear_kv_cache(&mut self) {
         match self {
@@ -44,6 +55,7 @@ impl QuantizedArch {
 }
 
 /// 从 GGUF 内嵌的 `tokenizer.ggml.tokens` 词表构建的轻量分词/解码器。
+#[cfg(target_os = "macos")]
 pub struct GgufEmbeddedTokenizer {
     id_to_token: Vec<String>,
     token_to_id: HashMap<String, u32>,
@@ -51,6 +63,7 @@ pub struct GgufEmbeddedTokenizer {
     bos_token: Option<u32>,
 }
 
+#[cfg(target_os = "macos")]
 impl GgufEmbeddedTokenizer {
     pub fn from_gguf_metadata(md: &HashMap<String, GgufValue>) -> Result<Self, String> {
         let raw_tokens = md
@@ -184,6 +197,7 @@ impl GgufEmbeddedTokenizer {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct CachedSession {
     model_path: String,
     device: Device,
@@ -191,16 +205,18 @@ struct CachedSession {
     tokenizer: GgufEmbeddedTokenizer,
 }
 
+#[cfg(target_os = "macos")]
 static GGUF_SESSION: OnceLock<Mutex<Option<CachedSession>>> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
 fn select_device() -> Device {
-    #[cfg(target_os = "macos")]
     if let Ok(metal) = Device::new_metal(0) {
         return metal;
     }
     Device::Cpu
 }
 
+#[cfg(target_os = "macos")]
 fn load_session(model_path: &str) -> Result<CachedSession, String> {
     let path = Path::new(model_path);
     if !path.is_file() {
@@ -261,6 +277,7 @@ pub fn format_chatml_prompt(messages: &[ChatMessage]) -> String {
     prompt
 }
 
+#[cfg(target_os = "macos")]
 pub async fn stream_gguf_inference<F>(
     gguf_model_path: &str,
     _gguf_tokenizer_path: &str,
@@ -355,7 +372,22 @@ where
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
+pub async fn stream_gguf_inference<F>(
+    _gguf_model_path: &str,
+    _gguf_tokenizer_path: &str,
+    _messages: &[ChatMessage],
+    _cancel: &CancelToken,
+    _on_delta: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) + Send,
+{
+    Err("Candle Metal GGUF 直载仅限 macOS；Windows 请选择「内置 HY-MT1.5-1.8B」或「LocalServer / Ollama」后端。".to_string())
+}
+
 /// 执行一步前向推理并采用 Argmax 贪心采样（翻译任务使用 temperature=0 最准确稳定）。
+#[cfg(target_os = "macos")]
 fn run_step(
     arch: &mut QuantizedArch,
     device: &Device,

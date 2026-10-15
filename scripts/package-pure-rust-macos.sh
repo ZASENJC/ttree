@@ -30,8 +30,8 @@ mkdir -p "$MACOS_BIN_DIR" "$RESOURCES_DIR"
 cp "$TARGET_DIR/release/ttree" "$MACOS_BIN_DIR/ttree"
 chmod +x "$MACOS_BIN_DIR/ttree"
 
-if [[ -f "$ROOT_DIR/src-tauri/icons/icon.icns" ]]; then
-  cp "$ROOT_DIR/src-tauri/icons/icon.icns" "$RESOURCES_DIR/icon.icns"
+if [[ -f "$ROOT_DIR/assets/icons/icon.icns" ]]; then
+  cp "$ROOT_DIR/assets/icons/icon.icns" "$RESOURCES_DIR/icon.icns"
 fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<EOF

@@ -273,6 +273,10 @@ pub fn resolve_existing_llama_server() -> Option<PathBuf> {
     if is_executable_file(&managed) {
         return Some(managed);
     }
+    let managed_nested = runtime_dir().join("build").join("bin").join(bin_name);
+    if is_executable_file(&managed_nested) {
+        return Some(managed_nested);
+    }
 
     // 2. 应用包内置同级目录（若打包时附带）
     if let Ok(exe) = std::env::current_exe() {
@@ -417,6 +421,15 @@ fn detect_cpu_brand() -> String {
             }
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(id) = std::env::var("PROCESSOR_IDENTIFIER") {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
     format!("{} CPU", std::env::consts::ARCH)
 }
 
@@ -438,6 +451,31 @@ fn detect_total_ram_gb() -> f64 {
         if let Ok(out) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
             if let Ok(bytes) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
                 return (bytes as f64) / (1024.0 * 1024.0 * 1024.0);
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lpBuffer: *mut MemoryStatusEx) -> i32;
+        }
+        unsafe {
+            let mut status: MemoryStatusEx = std::mem::zeroed();
+            status.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+            if GlobalMemoryStatusEx(&mut status) != 0 && status.total_phys > 0 {
+                return (status.total_phys as f64) / (1024.0 * 1024.0 * 1024.0);
             }
         }
     }
@@ -474,6 +512,36 @@ fn detect_free_disk_gb(path: &Path) -> f64 {
                         return (avail_kb as f64) / (1024.0 * 1024.0);
                     }
                 }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                lpDirectoryName: *const u16,
+                lpFreeBytesAvailableToCaller: *mut u64,
+                lpTotalNumberOfBytes: *mut u64,
+                lpTotalNumberOfFreeBytes: *mut u64,
+            ) -> i32;
+        }
+        let wide: Vec<u16> = check_dir
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut avail: u64 = 0;
+        unsafe {
+            if GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut avail,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+                && avail > 0
+            {
+                return (avail as f64) / (1024.0 * 1024.0 * 1024.0);
             }
         }
     }
@@ -882,10 +950,16 @@ pub async fn ensure_server_running(
     let root = local_llm_root_dir();
     let _ = fs::create_dir_all(&root);
     let log_path = root.join("llama-server.log");
-    let log_file = File::create(&log_path).unwrap_or_else(|_| File::open("/dev/null").unwrap());
-    let log_err = log_file
-        .try_clone()
-        .unwrap_or_else(|_| File::open("/dev/null").unwrap());
+    let (stdout_cfg, stderr_cfg) = match File::create(&log_path) {
+        Ok(f) => {
+            let err_stdio = f
+                .try_clone()
+                .map(Stdio::from)
+                .unwrap_or_else(|_| Stdio::null());
+            (Stdio::from(f), err_stdio)
+        }
+        Err(_) => (Stdio::null(), Stdio::null()),
+    };
 
     let mut cmd = Command::new(&server_bin);
     cmd.arg("-m")
@@ -908,9 +982,10 @@ pub async fn ensure_server_running(
         .arg("1.05")
         .arg("--no-webui")
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+        .stdout(stdout_cfg)
+        .stderr(stderr_cfg);
 
+    #[cfg(unix)]
     if let Some(bin_dir) = server_bin.parent() {
         #[cfg(target_os = "macos")]
         cmd.env("DYLD_LIBRARY_PATH", bin_dir);

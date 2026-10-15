@@ -23,6 +23,3 @@ tempfile.workspace = true
 candle-core = { version = "0.11.0", features = ["metal", "accelerate"] }
 candle-transformers = { version = "0.11.0", features = ["metal", "accelerate"] }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-core = { version = "0.11.0" }
-candle-transformers = { version = "0.11.0" }
