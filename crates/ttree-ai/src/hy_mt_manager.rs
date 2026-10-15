@@ -129,6 +129,7 @@ struct RunningHyMtServer {
     quant: HyMtQuant,
     port: u16,
     base_url: String,
+    epoch: u64,
 }
 
 static RUNNING_SERVER: OnceLock<Mutex<Option<RunningHyMtServer>>> = OnceLock::new();
@@ -153,6 +154,159 @@ fn custom_models_dir_slot() -> &'static Mutex<Option<PathBuf>> {
             .map(PathBuf::from);
         Mutex::new(loaded)
     })
+}
+
+const STOPPED_MESSAGE: &str = "内置模型服务已停止，请在设置中点击「启动服务」后再试";
+const STOPPED_MARKER: &str = "service-stopped";
+
+struct ServiceControl {
+    stopped: bool,
+    epoch: u64,
+    cancel: CancelToken,
+}
+#[derive(Clone)]
+struct ServiceLease {
+    epoch: u64,
+    cancel: CancelToken,
+}
+impl ServiceControl {
+    fn load(root: &Path) -> Self {
+        Self {
+            stopped: root.join(STOPPED_MARKER).exists(),
+            epoch: 0,
+            cancel: CancelToken::new(0),
+        }
+    }
+    fn lease(&self) -> Result<ServiceLease, String> {
+        if self.stopped {
+            return Err(STOPPED_MESSAGE.into());
+        }
+        Ok(ServiceLease {
+            epoch: self.epoch,
+            cancel: self.cancel.clone(),
+        })
+    }
+    fn stop(&mut self, root: &Path) -> Result<(), String> {
+        self.stopped = true;
+        self.cancel.cancel();
+        fs::create_dir_all(root)
+            .and_then(|_| fs::write(root.join(STOPPED_MARKER), b"stopped"))
+            .map_err(|e| format!("服务已停止，但保存停止状态失败：{e}"))
+    }
+    fn resume(&mut self, root: &Path, user: &CancelToken) -> Result<ServiceLease, String> {
+        if user.is_cancelled() {
+            return Err("启动已取消".into());
+        }
+        let marker = root.join(STOPPED_MARKER);
+        match fs::remove_file(marker) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("无法恢复服务状态：{e}")),
+        }
+        self.cancel.cancel();
+        self.epoch = self.epoch.wrapping_add(1);
+        self.cancel = CancelToken::new(self.epoch);
+        self.stopped = false;
+        self.lease()
+    }
+    fn validate(&self, lease: &ServiceLease) -> Result<(), String> {
+        if self.stopped || lease.epoch != self.epoch || lease.cancel.is_cancelled() {
+            Err(STOPPED_MESSAGE.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+fn service_control() -> &'static Mutex<ServiceControl> {
+    static CONTROL: OnceLock<Mutex<ServiceControl>> = OnceLock::new();
+    CONTROL.get_or_init(|| Mutex::new(ServiceControl::load(&local_llm_root_dir())))
+}
+pub fn is_service_stopped() -> bool {
+    service_control()
+        .lock()
+        .expect("service control poisoned")
+        .stopped
+}
+/// A user stop is persistent and invalidates startup/download work before killing
+/// the child. Internal process cleanup continues to use stop_server().
+pub fn stop_service() -> Result<(), String> {
+    let result = service_control()
+        .lock()
+        .expect("service control poisoned")
+        .stop(&local_llm_root_dir());
+    stop_server();
+    result
+}
+async fn with_service_lease<T>(
+    lease: &ServiceLease,
+    future: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {biased;_ = lease.cancel.cancelled()=>Err(STOPPED_MESSAGE.into()),result=future=>result}
+}
+
+/// Only exact built-in model names are removable in user-selected directories.
+/// Never recursively remove a custom model directory or a system/PATH runtime.
+fn remove_service_files(root: &Path, model_dirs: &[PathBuf]) -> Result<(), String> {
+    for dir in model_dirs {
+        for quant in HyMtQuant::ALL {
+            for name in [
+                quant.file_name().to_string(),
+                format!("{}.part", quant.file_name()),
+            ] {
+                let path = dir.join(name);
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("删除模型文件失败（{}）：{e}", path.display())),
+                }
+            }
+        }
+        // Remove an empty managed models folder, while preserving other files.
+        if dir == &root.join("models") {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+    let runtime = root.join("runtime");
+    match fs::symlink_metadata(&runtime) {
+        Ok(meta) => {
+            if meta.is_symlink() {
+                #[cfg(windows)]
+                fs::remove_dir(&runtime).map_err(|e| format!("删除运行时链接失败：{e}"))?;
+                #[cfg(not(windows))]
+                fs::remove_file(&runtime).map_err(|e| format!("删除运行时链接失败：{e}"))?;
+            } else {
+                fs::remove_dir_all(&runtime).map_err(|e| format!("删除托管运行时失败：{e}"))?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("无法检查托管运行时目录：{e}")),
+    }
+    for name in ["models-dir.txt", "llama-server.log"] {
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("删除服务缓存失败：{e}")),
+        }
+    }
+    Ok(())
+}
+/// Pause immediately, then wait for all filesystem/startup work to unwind before
+/// deleting the app-owned service. Model-independent settings/history are retained.
+pub async fn remove_service() -> Result<(), String> {
+    stop_service()?;
+    let _operation = startup_lock().lock().await;
+    stop_server();
+    let root = local_llm_root_dir();
+    let mut dirs = vec![root.join("models")];
+    let custom = models_dir();
+    if !dirs.contains(&custom) {
+        dirs.push(custom);
+    }
+    remove_service_files(&root, &dirs)?;
+    *custom_models_dir_slot()
+        .lock()
+        .map_err(|_| "模型目录状态不可用".to_string())? = None;
+    Ok(())
 }
 
 fn download_http_client() -> &'static Client {
@@ -352,6 +506,15 @@ pub fn stop_server() {
     if let Some(mut srv) = guard.take() {
         let _ = srv.child.kill();
         let _ = srv.child.wait();
+    }
+}
+fn stop_server_epoch(epoch: u64) {
+    let mut guard = server_slot().lock().expect("server lock poisoned");
+    if guard.as_ref().is_some_and(|server| server.epoch == epoch) {
+        if let Some(mut server) = guard.take() {
+            let _ = server.child.kill();
+            let _ = server.child.wait();
+        }
     }
 }
 
@@ -892,15 +1055,29 @@ pub async fn download_and_start<F>(
 where
     F: FnMut(HyMtDownloadProgress) + Send,
 {
-    let _server_bin = ensure_llama_server_runtime(cancel, &mut on_progress).await?;
-    let _model_path = download_model_quant(quant, cancel, &mut on_progress).await?;
-    on_progress(HyMtDownloadProgress {
-        stage: format!("正在启动 HY-MT1.5-1.8B ({}) 本地推理服务", quant.code()),
-        downloaded_bytes: 1,
-        total_bytes: 1,
-        speed_mbps: 0.0,
-    });
-    ensure_server_running(quant, cancel).await
+    if cancel.is_cancelled() {
+        return Err("启动已取消".into());
+    }
+    let _operation = startup_lock().lock().await;
+    let lease = service_control()
+        .lock()
+        .expect("service control poisoned")
+        .resume(&local_llm_root_dir(), cancel)?;
+    with_service_lease(&lease, async {
+        let _server_bin = ensure_llama_server_runtime(cancel, &mut on_progress).await?;
+        if cancel.is_cancelled() {
+            return Err("下载已取消".into());
+        }
+        let _model_path = download_model_quant(quant, cancel, &mut on_progress).await?;
+        on_progress(HyMtDownloadProgress {
+            stage: format!("正在启动 HY-MT1.5-1.8B ({}) 本地推理服务", quant.code()),
+            downloaded_bytes: 1,
+            total_bytes: 1,
+            speed_mbps: 0.0,
+        });
+        ensure_server_running_locked(quant, cancel, &lease).await
+    })
+    .await
 }
 
 /// 确保指定精度的 `llama-server` 守护进程正在运行，返回其 OpenAI 兼容 `base_url`（如 `http://127.0.0.1:28190/v1`）。
@@ -908,6 +1085,33 @@ pub async fn ensure_server_running(
     quant: HyMtQuant,
     cancel: &CancelToken,
 ) -> Result<String, String> {
+    if cancel.is_cancelled() {
+        return Err("启动已取消".into());
+    }
+    let lease = service_control()
+        .lock()
+        .expect("service control poisoned")
+        .lease()?;
+    let _operation = startup_lock().lock().await;
+    service_control()
+        .lock()
+        .expect("service control poisoned")
+        .validate(&lease)?;
+    with_service_lease(&lease, ensure_server_running_locked(quant, cancel, &lease)).await
+}
+
+async fn ensure_server_running_locked(
+    quant: HyMtQuant,
+    cancel: &CancelToken,
+    lease: &ServiceLease,
+) -> Result<String, String> {
+    if cancel.is_cancelled() {
+        return Err("启动已取消".into());
+    }
+    service_control()
+        .lock()
+        .expect("service control poisoned")
+        .validate(lease)?;
     // 快路径：检查是否已在运行相同精度
     {
         let mut guard = server_slot().lock().expect("server lock poisoned");
@@ -917,8 +1121,6 @@ pub async fn ensure_server_running(
             }
         }
     }
-
-    let _guard = startup_lock().lock().await;
 
     // 二次检查
     {
@@ -1000,20 +1202,25 @@ pub async fn ensure_server_running(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("启动 llama-server 失败 ({}): {e}", server_bin.display()))?;
-
     let base_url = format!("http://127.0.0.1:{port}/v1");
     let health_url = format!("http://127.0.0.1:{port}/health");
-
     {
-        let mut slot = server_slot().lock().expect("server lock poisoned");
-        *slot = Some(RunningHyMtServer {
+        // Stop and spawn use the same control lock: a late startup cannot publish
+        // a new child after the user has stopped/deleted the service.
+        let control = service_control().lock().expect("service control poisoned");
+        control.validate(lease)?;
+        if cancel.is_cancelled() {
+            return Err("启动已取消".into());
+        }
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("启动 llama-server 失败 ({}): {e}", server_bin.display()))?;
+        *server_slot().lock().expect("server lock poisoned") = Some(RunningHyMtServer {
             child,
             quant,
             port,
             base_url: base_url.clone(),
+            epoch: lease.epoch,
         });
     }
 
@@ -1021,7 +1228,7 @@ pub async fn ensure_server_running(
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         if cancel.is_cancelled() {
-            stop_server();
+            stop_server_epoch(lease.epoch);
             return Err("启动已取消".to_string());
         }
 
@@ -1058,7 +1265,7 @@ pub async fn ensure_server_running(
         }
 
         if Instant::now() >= deadline {
-            stop_server();
+            stop_server_epoch(lease.epoch);
             return Err("等待内置 HY-MT1.5 模型加载超时（45s）".to_string());
         }
 
@@ -1069,6 +1276,90 @@ pub async fn ensure_server_running(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_stop_blocks_old_leases_and_survives_reload_until_explicit_start() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = ServiceControl::load(root.path());
+        let first = state.lease().unwrap();
+        state.stop(root.path()).unwrap();
+        assert!(state.lease().err().unwrap().contains("已停止"));
+        assert!(state.validate(&first).is_err());
+        let mut reloaded = ServiceControl::load(root.path());
+        assert!(reloaded.lease().is_err());
+        let cancelled = CancelToken::new(1);
+        cancelled.cancel();
+        assert!(reloaded.resume(root.path(), &cancelled).is_err());
+        assert!(root.path().join(STOPPED_MARKER).exists());
+        let fresh = reloaded.resume(root.path(), &CancelToken::new(2)).unwrap();
+        assert!(reloaded.validate(&fresh).is_ok());
+        assert!(!root.path().join(STOPPED_MARKER).exists());
+        assert!(state.validate(&first).is_err());
+    }
+    #[test]
+    fn cleanup_removes_all_builtin_quants_parts_and_runtime_but_preserves_other_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app");
+        let custom = temp.path().join("custom");
+        fs::create_dir_all(root.join("models")).unwrap();
+        fs::create_dir_all(root.join("runtime/deps")).unwrap();
+        fs::create_dir_all(&custom).unwrap();
+        for dir in [root.join("models"), custom.clone()] {
+            for q in HyMtQuant::ALL {
+                fs::write(dir.join(q.file_name()), b"GGUF").unwrap();
+                fs::write(dir.join(format!("{}.part", q.file_name())), b"partial").unwrap();
+            }
+        }
+        fs::write(custom.join("other-model.gguf"), b"keep").unwrap();
+        fs::write(custom.join("keep.txt"), b"keep").unwrap();
+        fs::write(root.join("models/keep.txt"), b"keep").unwrap();
+        fs::write(root.join("runtime/deps/backend.dll"), b"runtime").unwrap();
+        fs::write(root.join("runtime/llama-runtime.zip"), b"cache").unwrap();
+        fs::write(root.join("models-dir.txt"), b"custom").unwrap();
+        fs::write(root.join("llama-server.log"), b"log").unwrap();
+        fs::write(root.join(STOPPED_MARKER), b"stopped").unwrap();
+        fs::write(root.join("unrelated.json"), b"keep").unwrap();
+        remove_service_files(&root, &[root.join("models"), custom.clone()]).unwrap();
+        assert!(!root.join("runtime").exists());
+        assert!(!root.join("models-dir.txt").exists());
+        assert!(root.join(STOPPED_MARKER).exists());
+        assert!(root.join("unrelated.json").exists());
+        assert!(root.join("models/keep.txt").exists());
+        assert_eq!(fs::read_dir(&custom).unwrap().count(), 2);
+        remove_service_files(&root, &[root.join("models"), custom]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_stop_interrupts_active_service_work() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = ServiceControl::load(root.path());
+        let lease = state.lease().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let job = tokio::spawn(async move {
+            with_service_lease(&lease, async {
+                let _ = tx.send(());
+                std::future::pending::<Result<(), String>>().await
+            })
+            .await
+        });
+        rx.await.unwrap();
+        state.stop(root.path()).unwrap();
+        assert!(job.await.unwrap().err().unwrap().contains("已停止"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_does_not_follow_a_runtime_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("runtime")).unwrap();
+        remove_service_files(&root, &[]).unwrap();
+        assert!(outside.join("keep").exists());
+        assert!(!root.join("runtime").exists());
+    }
 
     #[test]
     fn compatibility_report_detects_system_resources() {

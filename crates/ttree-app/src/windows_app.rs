@@ -10,11 +10,16 @@
 #![cfg(target_os = "windows")]
 #![allow(non_snake_case, clippy::too_many_arguments)]
 
+mod dialogs;
+mod ui;
+
+use crate::windows_design::{BoxRect, TranslationLayout, SIDEBAR, TOOLBAR};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use ui::*;
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -26,8 +31,8 @@ use ttree_core::{
     normalize_ocr_newlines, recent_chat_context, resolve_language_pair, AiBackendKind,
     AiTranslationConfig, AppearanceConfig, CancelSlot, ChatAiConfig, ChatMessage, Conversation,
     HyMtQuant, PaneLayoutConfig, ShortcutConfig, ADAPTIVE_TARGET, PANEL_OPACITY_MAX,
-    PANEL_OPACITY_MIN, SOURCE_LANGUAGES, TARGET_LANGUAGES, TOP_BAR_HEIGHT, WINDOW_MAX_HEIGHT,
-    WINDOW_MAX_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    PANEL_OPACITY_MIN, SOURCE_LANGUAGES, TARGET_LANGUAGES, WINDOW_MAX_HEIGHT, WINDOW_MAX_WIDTH,
+    WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 use ttree_ocr::OcrOutcome;
 use ttree_platform_macos::autostart;
@@ -50,8 +55,6 @@ type LRESULT = isize;
 type BOOL = i32;
 
 const WS_OVERLAPPED: u32 = 0x00000000;
-const WS_CAPTION: u32 = 0x00C00000;
-const WS_SYSMENU: u32 = 0x00080000;
 const WS_THICKFRAME: u32 = 0x00040000;
 const WS_CLIPCHILDREN: u32 = 0x02000000;
 const WS_CHILD: u32 = 0x40000000;
@@ -109,7 +112,6 @@ const BST_CHECKED: usize = 1;
 const BST_UNCHECKED: usize = 0;
 
 const EM_SETSEL: u32 = 0x00B1;
-const EM_SCROLLCARET: u32 = 0x00B7;
 
 const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
@@ -207,6 +209,7 @@ const ID_CMB_OPACITY: usize = 423;
 const ID_CHK_OCR_NEWLINE: usize = 424;
 const ID_CHK_AUTOSTART: usize = 425;
 const ID_BTN_SAVE_SETTINGS: usize = 426;
+const ID_BTN_HYMT_DELETE: usize = 427;
 
 const ID_TRAY_TRANSLATE: usize = 901;
 const ID_TRAY_OCR: usize = 902;
@@ -244,8 +247,18 @@ enum UiEvent {
     },
     OcrDone(Result<OcrOutcome, String>),
     ModelsDiscovered(Result<Vec<String>, String>),
-    HyMtProgress(HyMtDownloadProgress),
-    HyMtReady(Result<String, String>),
+    HyMtProgress {
+        seq: u64,
+        progress: HyMtDownloadProgress,
+    },
+    HyMtReady {
+        seq: u64,
+        result: Result<String, String>,
+    },
+    HyMtRemoved {
+        seq: u64,
+        result: Result<(), String>,
+    },
     HyMtCompatReady(HyMtCompatibilityReport),
 }
 
@@ -368,7 +381,6 @@ extern "system" {
         cy: i32,
         uFlags: u32,
     ) -> BOOL;
-    fn MoveWindow(hWnd: HWND, X: i32, Y: i32, nWidth: i32, nHeight: i32, bRepaint: BOOL) -> BOOL;
     fn GetClientRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
     fn SetLayeredWindowAttributes(hWnd: HWND, crKey: u32, bAlpha: u8, dwFlags: u32) -> BOOL;
     fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *const c_void) -> usize;
@@ -511,6 +523,18 @@ struct Win32AppState {
     font_bold: HFONT,
     brush_bg: HBRUSH,
     brush_surface: HBRUSH,
+    brush_field: HBRUSH,
+    dpi: u32,
+    settings_section: usize,
+    settings_return_size: Option<(i32, i32)>,
+    settings_view: HWND,
+    settings_nav: [HWND; 4],
+    btn_done: HWND,
+    btn_close: HWND,
+    btn_history: HWND,
+    history_visible: bool,
+    chat_bubbles: Vec<HWND>,
+    settings_labels: Vec<HWND>,
 
     active_tab: TabMode,
     pinned: bool,
@@ -538,6 +562,11 @@ struct Win32AppState {
     streaming_reply: String,
 
     hymt_cancel: CancelSlot,
+    hymt_downloading: bool,
+    hymt_removing: bool,
+    hymt_seq: u64,
+    ignored_ai_seq: Option<u64>,
+    hymt_cancel_requested: bool,
 
     pending_auto_translate: Option<Instant>,
     pending_resize_save: Option<(Instant, f64, f64)>,
@@ -582,6 +611,7 @@ struct Win32AppState {
     btn_hymt_check: HWND,
     btn_hymt_run: HWND,
     btn_hymt_stop: HWND,
+    btn_hymt_delete: HWND,
     lbl_hymt_status: HWND,
     lbl_ai_url: HWND,
     edit_ai_url: HWND,
@@ -653,8 +683,10 @@ pub fn run() {
     unsafe {
         let hinstance = GetModuleHandleW(ptr::null());
         let class_name = wide_null("TTreePureRustWin32MainClass");
-        let bg_brush = CreateSolidBrush(rgb(24, 26, 32));
-        let surface_brush = CreateSolidBrush(rgb(34, 37, 46));
+        let colors = palette();
+        let bg_brush = CreateSolidBrush(colors.bg);
+        let surface_brush = CreateSolidBrush(colors.surface);
+        let field_brush = CreateSolidBrush(colors.field);
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -672,50 +704,30 @@ pub fn run() {
         };
         RegisterClassExW(&wc);
 
-        let font_face = wide_null("Microsoft YaHei UI");
-        let font_regular = CreateFontW(
-            -14,
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            5,
-            0,
-            font_face.as_ptr(),
-        );
-        let font_bold = CreateFontW(
-            -14,
-            0,
-            0,
-            0,
-            600,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            5,
-            0,
-            font_face.as_ptr(),
-        );
+        let dpi = GetDpiForSystem().max(96);
+        let font_regular = font(13, 400, dpi);
+        let font_bold = font(13, 600, dpi);
+        configure(dpi, font_regular, font_bold);
+
+        let viewport_class = wide_null("TTreeNativeViewport");
+        let viewport_wc = WNDCLASSEXW {
+            lpfnWndProc: viewport_proc,
+            hbrBackground: ptr::null_mut(),
+            lpszClassName: viewport_class.as_ptr(),
+            ..wc
+        };
+        RegisterClassExW(&viewport_wc);
 
         let title = wide_null("TTREE");
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_COMPOSITED,
             class_name.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
+            WS_OVERLAPPED | WS_THICKFRAME | WS_CLIPCHILDREN,
             260,
             180,
-            win_w,
-            win_h,
+            scale(win_w),
+            scale(win_h),
             ptr::null_mut(),
             ptr::null_mut(),
             hinstance,
@@ -725,8 +737,17 @@ pub fn run() {
             panic!("创建 Windows 主窗口失败");
         }
 
-        // 启用 Win11 原生深色标题栏、圆角与云母材质
-        let dark_mode: u32 = 1;
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | 4 | 0x20,
+        );
+        // Match the system palette, retaining DWM corners and backdrop where available.
+        let dark_mode: u32 = colors.dark() as u32;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -773,6 +794,18 @@ pub fn run() {
             font_bold,
             brush_bg: bg_brush,
             brush_surface: surface_brush,
+            brush_field: field_brush,
+            dpi,
+            settings_section: ID_SETTINGS_TRANS,
+            settings_return_size: None,
+            settings_view: ptr::null_mut(),
+            settings_nav: [ptr::null_mut(); 4],
+            btn_done: ptr::null_mut(),
+            btn_close: ptr::null_mut(),
+            btn_history: ptr::null_mut(),
+            history_visible: true,
+            chat_bubbles: Vec::new(),
+            settings_labels: Vec::new(),
             active_tab: TabMode::Translate,
             pinned: false,
             pin_before_settings: false,
@@ -795,6 +828,11 @@ pub fn run() {
             current_messages,
             streaming_reply: String::new(),
             hymt_cancel: CancelSlot::new(),
+            hymt_downloading: false,
+            hymt_removing: false,
+            hymt_seq: 0,
+            ignored_ai_seq: None,
+            hymt_cancel_requested: false,
             pending_auto_translate: None,
             pending_resize_save: None,
             btn_tab_trans: ptr::null_mut(),
@@ -830,6 +868,7 @@ pub fn run() {
             btn_hymt_check: ptr::null_mut(),
             btn_hymt_run: ptr::null_mut(),
             btn_hymt_stop: ptr::null_mut(),
+            btn_hymt_delete: ptr::null_mut(),
             lbl_hymt_status: ptr::null_mut(),
             lbl_ai_url: ptr::null_mut(),
             edit_ai_url: ptr::null_mut(),
@@ -862,6 +901,7 @@ pub fn run() {
         };
 
         app_state.build_child_controls(hinstance);
+        SendMessageW(hwnd, 0x0127, (1 << 16) | 1, 0); // UIS_SET | UISF_HIDEFOCUS; keyboard navigation restores it.
         let sc = app_state.settings.shortcuts();
         let _ = app_state.apply_shortcuts(&sc);
         app_state.populate_settings_fields();
@@ -871,22 +911,37 @@ pub fn run() {
         install_tray_icon(hwnd);
         SetTimer(hwnd, TIMER_ID_POLL, 25, ptr::null());
 
-        if std::env::args().any(|a| a == "--show") {
-            app_state.show_and_focus();
-        }
-
         WIN_CTX.with(|cell| {
             *cell.borrow_mut() = Some(app_state);
         });
+        if std::env::args().any(|a| a == "--show") {
+            with_state(|st| st.show_and_focus());
+        }
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            // Let text-input subclasses handle Return before dialog navigation consumes it.
+            if (msg.message == WM_KEYDOWN || msg.message == WM_CHAR)
+                && (msg.wParam == 0x0d || msg.wParam == 0x1b)
+                || IsDialogMessageW(hwnd, &mut msg) == 0
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
 
+        cleanup();
         remove_tray_icon(hwnd);
         hy_mt_manager::stop_server();
+        WIN_CTX.with(|cell| {
+            if let Some(st) = cell.borrow_mut().take() {
+                DeleteObject(st.font_regular);
+                DeleteObject(st.font_bold);
+                DeleteObject(st.brush_bg);
+                DeleteObject(st.brush_surface);
+                DeleteObject(st.brush_field);
+            }
+        });
     }
 }
 
@@ -954,13 +1009,22 @@ impl Win32AppState {
         id: usize,
         bold: bool,
     ) -> HWND {
+        let style = if class == "BUTTON" && style != BS_AUTOCHECKBOX {
+            BS_OWNERDRAW
+        } else if class == "COMBOBOX" {
+            style | CBS_OWNERDRAWFIXED
+        } else if class == "EDIT" {
+            style & !WS_BORDER
+        } else {
+            style
+        };
         let cls = wide_null(class);
         let txt = wide_null(title);
         let ctrl = CreateWindowExW(
             0,
             cls.as_ptr(),
             txt.as_ptr(),
-            WS_CHILD | style,
+            WS_CHILD | WS_CLIPSIBLINGS | style | if class == "STATIC" { 0 } else { WS_TABSTOP },
             0,
             0,
             10,
@@ -976,21 +1040,46 @@ impl Win32AppState {
             self.font_regular
         };
         SendMessageW(ctrl, WM_SETFONT, font as WPARAM, 1);
+        init_control(ctrl, class, id);
         ctrl
     }
 
     unsafe fn build_child_controls(&mut self, hinst: HINSTANCE) {
         // 1. 顶部导航栏
-        self.btn_tab_trans =
-            self.create_ctrl(hinst, "BUTTON", "● 翻译", BS_PUSHBUTTON, ID_BTN_TAB_TRANS, true);
+        self.btn_tab_trans = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "翻译",
+            BS_PUSHBUTTON,
+            ID_BTN_TAB_TRANS,
+            true,
+        );
         self.btn_tab_chat =
-            self.create_ctrl(hinst, "BUTTON", "AI 对话", BS_PUSHBUTTON, ID_BTN_TAB_CHAT, false);
-        self.btn_ocr =
-            self.create_ctrl(hinst, "BUTTON", "截图 OCR", BS_PUSHBUTTON, ID_BTN_OCR, false);
-        self.btn_pin =
-            self.create_ctrl(hinst, "BUTTON", "置顶: 关", BS_PUSHBUTTON, ID_BTN_PIN, false);
-        self.btn_tab_settings =
-            self.create_ctrl(hinst, "BUTTON", "设置", BS_PUSHBUTTON, ID_BTN_TAB_SETTINGS, false);
+            self.create_ctrl(hinst, "BUTTON", "AI", BS_PUSHBUTTON, ID_BTN_TAB_CHAT, false);
+        self.btn_ocr = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "截图 OCR",
+            BS_PUSHBUTTON,
+            ID_BTN_OCR,
+            false,
+        );
+        self.btn_pin = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "固定窗口",
+            BS_PUSHBUTTON,
+            ID_BTN_PIN,
+            false,
+        );
+        self.btn_tab_settings = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "设置",
+            BS_PUSHBUTTON,
+            ID_BTN_TAB_SETTINGS,
+            false,
+        );
 
         // 2. 翻译面板控件
         self.edit_source = self.create_ctrl(
@@ -1032,15 +1121,33 @@ impl Win32AppState {
         }
         SendMessageW(self.cmb_target_lang, CB_SETCURSEL, 0, 0);
 
-        self.btn_trans_now =
-            self.create_ctrl(hinst, "BUTTON", "翻译", BS_PUSHBUTTON, ID_BTN_TRANS_NOW, true);
-        self.btn_clear_trans =
-            self.create_ctrl(hinst, "BUTTON", "清空", BS_PUSHBUTTON, ID_BTN_CLEAR_TRANS, false);
+        self.btn_trans_now = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "翻译",
+            BS_PUSHBUTTON,
+            ID_BTN_TRANS_NOW,
+            true,
+        );
+        self.btn_clear_trans = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "清空",
+            BS_PUSHBUTTON,
+            ID_BTN_CLEAR_TRANS,
+            false,
+        );
 
         self.lbl_web_header =
-            self.create_ctrl(hinst, "STATIC", "Google / Bing 极速译文", 0, 0, true);
-        self.btn_copy_web =
-            self.create_ctrl(hinst, "BUTTON", "复制", BS_PUSHBUTTON, ID_BTN_COPY_WEB, false);
+            self.create_ctrl(hinst, "STATIC", "翻译  ·  GOOGLE / BING", 0, 0, true);
+        self.btn_copy_web = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "复制",
+            BS_PUSHBUTTON,
+            ID_BTN_COPY_WEB,
+            false,
+        );
         self.edit_web_result = self.create_ctrl(
             hinst,
             "EDIT",
@@ -1050,9 +1157,15 @@ impl Win32AppState {
             false,
         );
 
-        self.lbl_ai_header = self.create_ctrl(hinst, "STATIC", "AI 深度译文", 0, 0, true);
-        self.btn_copy_ai =
-            self.create_ctrl(hinst, "BUTTON", "复制", BS_PUSHBUTTON, ID_BTN_COPY_AI, false);
+        self.lbl_ai_header = self.create_ctrl(hinst, "STATIC", "AI", 0, 0, true);
+        self.btn_copy_ai = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "复制",
+            BS_PUSHBUTTON,
+            ID_BTN_COPY_AI,
+            false,
+        );
         self.edit_ai_result = self.create_ctrl(
             hinst,
             "EDIT",
@@ -1071,17 +1184,35 @@ impl Win32AppState {
             ID_CMB_CHAT_CONV,
             false,
         );
-        self.btn_chat_new =
-            self.create_ctrl(hinst, "BUTTON", "+ 新对话", BS_PUSHBUTTON, ID_BTN_CHAT_NEW, false);
-        self.btn_chat_copy =
-            self.create_ctrl(hinst, "BUTTON", "复制回复", BS_PUSHBUTTON, ID_BTN_CHAT_COPY, false);
-        self.btn_chat_clear =
-            self.create_ctrl(hinst, "BUTTON", "清空历史", BS_PUSHBUTTON, ID_BTN_CHAT_CLEAR, false);
+        self.btn_chat_new = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "+ 新对话",
+            BS_PUSHBUTTON,
+            ID_BTN_CHAT_NEW,
+            false,
+        );
+        self.btn_chat_copy = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "复制回复",
+            BS_PUSHBUTTON,
+            ID_BTN_CHAT_COPY,
+            false,
+        );
+        self.btn_chat_clear = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "清空历史",
+            BS_PUSHBUTTON,
+            ID_BTN_CHAT_CLEAR,
+            false,
+        );
         self.edit_chat_history = self.create_ctrl(
             hinst,
-            "EDIT",
+            "TTreeNativeViewport",
             "",
-            WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            WS_VSCROLL | WS_CLIPCHILDREN,
             ID_EDIT_CHAT_HISTORY,
             false,
         );
@@ -1093,21 +1224,33 @@ impl Win32AppState {
             ID_EDIT_CHAT_INPUT,
             false,
         );
-        self.btn_chat_send =
-            self.create_ctrl(hinst, "BUTTON", "发送", BS_PUSHBUTTON, ID_BTN_CHAT_SEND, true);
-        self.btn_chat_stop =
-            self.create_ctrl(hinst, "BUTTON", "停止", BS_PUSHBUTTON, ID_BTN_CHAT_STOP, false);
+        self.btn_chat_send = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "发送",
+            BS_PUSHBUTTON,
+            ID_BTN_CHAT_SEND,
+            true,
+        );
+        self.btn_chat_stop = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "停止",
+            BS_PUSHBUTTON,
+            ID_BTN_CHAT_STOP,
+            false,
+        );
 
         // 4. 设置面板控件
         self.chk_ai_enabled = self.create_ctrl(
             hinst,
             "BUTTON",
-            "启用 AI 深度翻译分栏",
+            "启用 AI 翻译",
             BS_AUTOCHECKBOX,
             ID_CHK_AI_ENABLED,
             true,
         );
-        self.lbl_ai_backend = self.create_ctrl(hinst, "STATIC", "AI 翻译后端:", 0, 0, false);
+        self.lbl_ai_backend = self.create_ctrl(hinst, "STATIC", "接入方式", 0, 0, false);
         self.cmb_ai_backend = self.create_ctrl(
             hinst,
             "COMBOBOX",
@@ -1121,8 +1264,7 @@ impl Win32AppState {
             SendMessageW(self.cmb_ai_backend, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
         }
 
-        self.lbl_hymt_quant =
-            self.create_ctrl(hinst, "STATIC", "混元 HY-MT1.5 精度:", 0, 0, false);
+        self.lbl_hymt_quant = self.create_ctrl(hinst, "STATIC", "模型精度", 0, 0, false);
         self.cmb_hymt_quant = self.create_ctrl(
             hinst,
             "COMBOBOX",
@@ -1135,22 +1277,48 @@ impl Win32AppState {
             let w = wide_null(q.label());
             SendMessageW(self.cmb_hymt_quant, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
         }
-        self.btn_hymt_check =
-            self.create_ctrl(hinst, "BUTTON", "硬件检测", BS_PUSHBUTTON, ID_BTN_HYMT_CHECK, false);
+        self.btn_hymt_check = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "硬件检测",
+            BS_PUSHBUTTON,
+            ID_BTN_HYMT_CHECK,
+            false,
+        );
         self.btn_hymt_run = self.create_ctrl(
             hinst,
             "BUTTON",
-            "一键下载并运行",
+            "下载并运行",
             BS_PUSHBUTTON,
             ID_BTN_HYMT_RUN,
             true,
         );
-        self.btn_hymt_stop =
-            self.create_ctrl(hinst, "BUTTON", "停止服务", BS_PUSHBUTTON, ID_BTN_HYMT_STOP, false);
-        self.lbl_hymt_status =
-            self.create_ctrl(hinst, "STATIC", "内置 HY-MT1.5-1.8B 就绪状态: 待检测", 0, 0, false);
+        self.btn_hymt_stop = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "停止服务",
+            BS_PUSHBUTTON,
+            ID_BTN_HYMT_STOP,
+            false,
+        );
+        self.btn_hymt_delete = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "删除服务",
+            BS_PUSHBUTTON,
+            ID_BTN_HYMT_DELETE,
+            false,
+        );
+        self.lbl_hymt_status = self.create_ctrl(
+            hinst,
+            "STATIC",
+            "内置 HY-MT1.5-1.8B 就绪状态: 待检测",
+            0,
+            0,
+            false,
+        );
 
-        self.lbl_ai_url = self.create_ctrl(hinst, "STATIC", "翻译接口 URL:", 0, 0, false);
+        self.lbl_ai_url = self.create_ctrl(hinst, "STATIC", "接口地址", 0, 0, false);
         self.edit_ai_url = self.create_ctrl(
             hinst,
             "EDIT",
@@ -1159,7 +1327,7 @@ impl Win32AppState {
             ID_EDIT_AI_URL,
             false,
         );
-        self.lbl_ai_key = self.create_ctrl(hinst, "STATIC", "翻译 API Key:", 0, 0, false);
+        self.lbl_ai_key = self.create_ctrl(hinst, "STATIC", "API Key", 0, 0, false);
         self.edit_ai_key = self.create_ctrl(
             hinst,
             "EDIT",
@@ -1168,7 +1336,7 @@ impl Win32AppState {
             ID_EDIT_AI_KEY,
             false,
         );
-        self.lbl_ai_model = self.create_ctrl(hinst, "STATIC", "翻译模型名称:", 0, 0, false);
+        self.lbl_ai_model = self.create_ctrl(hinst, "STATIC", "模型名称", 0, 0, false);
         self.edit_ai_model = self.create_ctrl(
             hinst,
             "EDIT",
@@ -1185,18 +1353,17 @@ impl Win32AppState {
             ID_BTN_AI_DISCOVER,
             false,
         );
-        self.lbl_ai_prompt = self.create_ctrl(hinst, "STATIC", "翻译提示词:", 0, 0, false);
+        self.lbl_ai_prompt = self.create_ctrl(hinst, "STATIC", "翻译提示词", 0, 0, false);
         self.edit_ai_prompt = self.create_ctrl(
             hinst,
             "EDIT",
             "",
-            WS_BORDER | ES_AUTOHSCROLL,
+            WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
             ID_EDIT_AI_PROMPT,
             false,
         );
 
-        self.lbl_chat_cfg =
-            self.create_ctrl(hinst, "STATIC", "AI 对话后端 / URL / Key / 模型:", 0, 0, true);
+        self.lbl_chat_cfg = self.create_ctrl(hinst, "STATIC", "AI 对话", 0, 0, true);
         self.cmb_chat_backend = self.create_ctrl(
             hinst,
             "COMBOBOX",
@@ -1242,14 +1409,7 @@ impl Win32AppState {
             false,
         );
 
-        self.lbl_hk_header = self.create_ctrl(
-            hinst,
-            "STATIC",
-            "全局热键 (呼出 / OCR / 对话 / 划词翻译 / 划词对话):",
-            0,
-            0,
-            true,
-        );
+        self.lbl_hk_header = self.create_ctrl(hinst, "STATIC", "快捷键", 0, 0, true);
         self.edit_hk_toggle = self.create_ctrl(
             hinst,
             "EDIT",
@@ -1299,7 +1459,7 @@ impl Win32AppState {
             false,
         );
 
-        self.lbl_opacity = self.create_ctrl(hinst, "STATIC", "窗口不透明度:", 0, 0, false);
+        self.lbl_opacity = self.create_ctrl(hinst, "STATIC", "窗口不透明度", 0, 0, false);
         self.cmb_opacity = self.create_ctrl(
             hinst,
             "COMBOBOX",
@@ -1338,55 +1498,108 @@ impl Win32AppState {
             true,
         );
         self.lbl_settings_status = self.create_ctrl(hinst, "STATIC", "", 0, 0, false);
+        small_label(self.lbl_web_header);
+        small_label(self.lbl_ai_header);
+        self.settings_view = self.create_ctrl(
+            hinst,
+            "TTreeNativeViewport",
+            "",
+            WS_VSCROLL | WS_CLIPCHILDREN,
+            ID_SETTINGS_VIEW,
+            false,
+        );
+        for (i, (id, title)) in [
+            (ID_SETTINGS_TRANS, "AI 翻译"),
+            (ID_SETTINGS_CHAT, "AI 对话"),
+            (ID_SETTINGS_KEYS, "快捷键"),
+            (ID_SETTINGS_GENERAL, "通用"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.settings_nav[i] =
+                self.create_ctrl(hinst, "BUTTON", title, BS_PUSHBUTTON, id, false);
+        }
+        self.btn_done = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "完成",
+            BS_PUSHBUTTON,
+            ID_SETTINGS_DONE,
+            false,
+        );
+        self.btn_close =
+            self.create_ctrl(hinst, "BUTTON", "隐藏窗口", BS_PUSHBUTTON, ID_CLOSE, false);
+        self.btn_history = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "历史对话",
+            BS_PUSHBUTTON,
+            ID_HISTORY_TOGGLE,
+            false,
+        );
+        for c in self.settings_controls() {
+            SetParent(c, self.settings_view);
+        }
+        for title in [
+            "接入方式",
+            "接口地址",
+            "API Key",
+            "模型名称",
+            "呼出翻译",
+            "截图 OCR",
+            "AI 对话",
+            "划词翻译",
+            "划词对话",
+        ] {
+            let label = self.create_ctrl(hinst, "STATIC", title, 0, 0, false);
+            SetParent(label, self.settings_view);
+            self.settings_labels.push(label);
+        }
+        cue(self.edit_ai_url, "https://api.openai.com/v1");
+        cue(self.edit_chat_url, "https://api.openai.com/v1");
+        cue(self.edit_ai_key, "输入 API Key");
+        cue(self.edit_chat_key, "输入 API Key");
+        for c in self
+            .settings_controls()
+            .into_iter()
+            .chain(self.settings_labels.iter().copied())
+        {
+            control_background(c, 3);
+        }
+        for c in [
+            self.edit_ai_url,
+            self.edit_ai_key,
+            self.edit_ai_model,
+            self.edit_ai_prompt,
+            self.edit_chat_url,
+            self.edit_chat_key,
+            self.edit_chat_model,
+            self.edit_hk_toggle,
+            self.edit_hk_ocr,
+            self.edit_hk_chat,
+            self.edit_hk_sel_trans,
+            self.edit_hk_sel_chat,
+        ] {
+            control_background(c, 2);
+        }
+        install_tooltips(
+            self.hwnd,
+            &[
+                (self.btn_ocr, "截图翻译"),
+                (self.btn_pin, "固定 / 取消固定窗口"),
+                (self.btn_tab_settings, "偏好设置"),
+                (self.btn_close, "隐藏窗口"),
+                (self.btn_chat_new, "新建对话"),
+                (self.btn_history, "展开 / 收起历史对话"),
+            ],
+        );
+        cue(self.edit_ai_model, "模型名称");
+        cue(self.edit_chat_model, "模型名称");
     }
 
-    unsafe fn relayout_children(&self) {
-        let mut rc = RECT {
-            left: 0,
-            top: 0,
-            right: 480,
-            bottom: 520,
-        };
-        GetClientRect(self.hwnd, &mut rc);
-        let cw = (rc.right - rc.left).max(360);
-        let ch = (rc.bottom - rc.top).max(300);
-        let pad = 12;
-        let inner_w = cw - pad * 2;
-
-        // 顶部栏布局
-        let top_y = 8;
-        let btn_h = 28;
-        MoveWindow(self.btn_tab_trans, pad, top_y, 76, btn_h, 1);
-        MoveWindow(self.btn_tab_chat, pad + 82, top_y, 76, btn_h, 1);
-        MoveWindow(self.btn_ocr, cw - pad - 232, top_y, 82, btn_h, 1);
-        MoveWindow(self.btn_pin, cw - pad - 144, top_y, 76, btn_h, 1);
-        MoveWindow(self.btn_tab_settings, cw - pad - 62, top_y, 62, btn_h, 1);
-
-        let trans_ctrls = [
-            self.edit_source,
-            self.cmb_source_lang,
-            self.btn_swap_lang,
-            self.cmb_target_lang,
-            self.btn_trans_now,
-            self.btn_clear_trans,
-            self.lbl_web_header,
-            self.btn_copy_web,
-            self.edit_web_result,
-            self.lbl_ai_header,
-            self.btn_copy_ai,
-            self.edit_ai_result,
-        ];
-        let chat_ctrls = [
-            self.cmb_chat_conv,
-            self.btn_chat_new,
-            self.btn_chat_copy,
-            self.btn_chat_clear,
-            self.edit_chat_history,
-            self.edit_chat_input,
-            self.btn_chat_send,
-            self.btn_chat_stop,
-        ];
-        let settings_ctrls = [
+    fn settings_controls(&self) -> Vec<HWND> {
+        vec![
             self.chk_ai_enabled,
             self.lbl_ai_backend,
             self.cmb_ai_backend,
@@ -1395,6 +1608,7 @@ impl Win32AppState {
             self.btn_hymt_check,
             self.btn_hymt_run,
             self.btn_hymt_stop,
+            self.btn_hymt_delete,
             self.lbl_hymt_status,
             self.lbl_ai_url,
             self.edit_ai_url,
@@ -1407,10 +1621,10 @@ impl Win32AppState {
             self.edit_ai_prompt,
             self.lbl_chat_cfg,
             self.cmb_chat_backend,
-            self.btn_chat_copy_trans,
             self.edit_chat_url,
             self.edit_chat_key,
             self.edit_chat_model,
+            self.btn_chat_copy_trans,
             self.lbl_hk_header,
             self.edit_hk_toggle,
             self.edit_hk_ocr,
@@ -1422,259 +1636,682 @@ impl Win32AppState {
             self.cmb_opacity,
             self.chk_ocr_newline,
             self.chk_autostart,
-            self.btn_save_settings,
-            self.lbl_settings_status,
-        ];
+        ]
+    }
 
-        for &c in &trans_ctrls {
-            ShowWindow(
-                c,
-                if self.active_tab == TabMode::Translate {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
-        }
-        for &c in &chat_ctrls {
-            ShowWindow(
-                c,
-                if self.active_tab == TabMode::Chat {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
-        }
-        for &c in &settings_ctrls {
-            ShowWindow(
-                c,
-                if self.active_tab == TabMode::Settings {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
+    unsafe fn client_size(&self) -> (i32, i32) {
+        let mut r: RECT = std::mem::zeroed();
+        GetClientRect(self.hwnd, &mut r);
+        (unscale(r.right).max(1), unscale(r.bottom).max(1))
+    }
+
+    unsafe fn translation_layout(&self) -> TranslationLayout {
+        let (w, h) = self.client_size();
+        TranslationLayout::new(
+            w,
+            h,
+            self.pane_layout.source_height as i32,
+            self.pane_layout.lang_height as i32,
+            self.pane_layout.web_height as i32,
+            self.settings.ai_translation_for_request().enabled,
+        )
+    }
+
+    unsafe fn relayout_children(&self) {
+        let _frame = LayoutFrame::new(self.hwnd, self.hwnd);
+        let (w, h) = self.client_size();
+        let p = palette();
+        selection(self.active_tab, self.settings_section, self.pinned);
+        let mut bg = Scene::default();
+        let settings = self.active_tab == TabMode::Settings;
+        let chat = self.active_tab == TabMode::Chat;
+        let show = |ctrl, show| {
+            visible(ctrl, show);
+        };
+        // Same 128px segmented navigation and quiet icon toolbar as macOS.
+        bg.surface(BoxRect::new(16, 10, 128, 28), p.surface, 8);
+        place(self.btn_tab_trans, 19, 12, 59, 24);
+        place(self.btn_tab_chat, 82, 12, 59, 24);
+        show(self.btn_tab_trans, !settings);
+        show(self.btn_tab_chat, !settings);
+        place(self.btn_ocr, w - 152, 8, 32, 32);
+        show(self.btn_ocr, !settings && !chat);
+        place(self.btn_pin, w - 116, 8, 32, 32);
+        show(self.btn_pin, !settings);
+        place(self.btn_tab_settings, w - 80, 8, 32, 32);
+        show(self.btn_tab_settings, !settings);
+        place(self.btn_chat_new, w - 188, 8, 32, 32);
+        show(self.btn_chat_new, chat);
+        place(self.btn_history, w - 152, 8, 32, 32);
+        show(self.btn_history, chat);
+        place(self.btn_close, w - 44, 8, 32, 32);
+        show(self.btn_close, true);
+        place(self.btn_done, w - 102, 11, 48, 26);
+        show(self.btn_done, settings);
+        if settings {
+            bg.surface(BoxRect::new(0, 0, 150, TOOLBAR), p.bg, 0);
+            bg.label(BoxRect::new(18, 12, 100, 24), "偏好设置", false, false);
         }
 
-        let content_top = TOP_BAR_HEIGHT as i32;
+        for c in [
+            self.edit_source,
+            self.cmb_source_lang,
+            self.btn_swap_lang,
+            self.cmb_target_lang,
+            self.btn_trans_now,
+            self.btn_clear_trans,
+            self.lbl_web_header,
+            self.btn_copy_web,
+            self.edit_web_result,
+            self.lbl_ai_header,
+            self.btn_copy_ai,
+            self.edit_ai_result,
+        ] {
+            show(c, self.active_tab == TabMode::Translate);
+        }
+        for c in [
+            self.cmb_chat_conv,
+            self.btn_chat_copy,
+            self.btn_chat_clear,
+            self.edit_chat_history,
+            self.edit_chat_input,
+            self.btn_chat_send,
+            self.btn_chat_stop,
+        ] {
+            show(c, chat);
+        }
+        if !settings {
+            for c in self
+                .settings_controls()
+                .into_iter()
+                .chain(self.settings_labels.iter().copied())
+            {
+                show(c, false);
+            }
+        }
+        for c in self.settings_nav {
+            show(c, settings);
+        }
+        show(self.settings_view, settings);
+        show(self.btn_save_settings, settings);
+        show(self.lbl_settings_status, settings);
+
         match self.active_tab {
             TabMode::Translate => {
-                let ai_enabled = self.settings.ai_translation_for_request().enabled;
-                let src_h = self.pane_layout.source_height as i32;
-                let lang_h = self.pane_layout.lang_height as i32;
-                let mut y = content_top;
-
-                MoveWindow(self.edit_source, pad, y, inner_w, src_h, 1);
-                y += src_h + 6;
-
-                let lang_y = y + (lang_h - 26).max(0) / 2;
-                let cmb_w = ((inner_w - 172) / 2).max(90);
-                MoveWindow(self.cmb_source_lang, pad, lang_y, cmb_w, 220, 1);
-                MoveWindow(self.btn_swap_lang, pad + cmb_w + 4, lang_y, 32, 26, 1);
-                MoveWindow(
-                    self.cmb_target_lang,
-                    pad + cmb_w + 40,
-                    lang_y,
-                    cmb_w,
-                    220,
-                    1,
+                let l = self.translation_layout();
+                bg.surface(l.source, p.surface, 0);
+                bg.surface(l.languages, p.surface, 0);
+                place(
+                    self.edit_source,
+                    14,
+                    l.source.y + 6,
+                    w - 28,
+                    (l.source.h - 12).max(12),
                 );
-                MoveWindow(self.btn_trans_now, cw - pad - 122, lang_y, 60, 26, 1);
-                MoveWindow(self.btn_clear_trans, cw - pad - 58, lang_y, 58, 26, 1);
-                y += lang_h + 6;
-
-                let remaining_h = (ch - y - pad).max(120);
-                let web_total_h = if ai_enabled {
-                    (self.pane_layout.web_height as i32).clamp(76, (remaining_h - 86).max(76))
-                } else {
-                    remaining_h
-                };
-
-                MoveWindow(self.lbl_web_header, pad, y, inner_w - 64, 22, 1);
-                MoveWindow(self.btn_copy_web, cw - pad - 58, y - 2, 58, 22, 1);
-                MoveWindow(
-                    self.edit_web_result,
-                    pad,
-                    y + 24,
-                    inner_w,
-                    (web_total_h - 24).max(48),
-                    1,
+                show(self.edit_source, true);
+                let ly = l.languages.y + (l.languages.h - 30) / 2;
+                let left = if w < 430 { 100 } else { 114 };
+                let target = (w - left - 94).clamp(120, 152);
+                place_combo(self.cmb_source_lang, 12, ly, left, 30, 220);
+                show(self.cmb_source_lang, true);
+                place(self.btn_swap_lang, 12 + left, ly + 2, 24, 26);
+                show(self.btn_swap_lang, true);
+                place_combo(self.cmb_target_lang, 38 + left, ly, target, 30, 220);
+                show(self.cmb_target_lang, true);
+                place(self.btn_trans_now, w - 60, ly + 2, 48, 26);
+                show(self.btn_trans_now, true);
+                show(
+                    self.btn_clear_trans,
+                    !get_hwnd_text(self.edit_source).is_empty(),
                 );
-                y += web_total_h + 8;
-
-                if ai_enabled {
-                    let ai_total_h = (ch - y - pad).max(76);
-                    ShowWindow(self.lbl_ai_header, SW_SHOW);
-                    ShowWindow(self.btn_copy_ai, SW_SHOW);
-                    ShowWindow(self.edit_ai_result, SW_SHOW);
-                    MoveWindow(self.lbl_ai_header, pad, y, inner_w - 64, 22, 1);
-                    MoveWindow(self.btn_copy_ai, cw - pad - 58, y - 2, 58, 22, 1);
-                    MoveWindow(
-                        self.edit_ai_result,
-                        pad,
-                        y + 24,
-                        inner_w,
-                        (ai_total_h - 24).max(48),
-                        1,
+                // Keep the source clear action in its own corner, never overlapping language controls.
+                if !get_hwnd_text(self.edit_source).is_empty() {
+                    place(self.btn_clear_trans, w - 58, l.source.y + 4, 44, 24);
+                    show(self.btn_clear_trans, true);
+                    place(
+                        self.edit_source,
+                        14,
+                        l.source.y + 6,
+                        w - 76,
+                        (l.source.h - 12).max(12),
                     );
-                } else {
-                    ShowWindow(self.lbl_ai_header, SW_HIDE);
-                    ShowWindow(self.btn_copy_ai, SW_HIDE);
-                    ShowWindow(self.edit_ai_result, SW_HIDE);
+                }
+                bg.grip(l.languages.y, w, p.line);
+                bg.grip(l.web.y, w, p.line);
+                place(self.lbl_web_header, 16, l.web.y + 7, w - 90, 17);
+                show(self.lbl_web_header, true);
+                place(self.btn_copy_web, w - 58, l.web.y + 4, 46, 22);
+                show(self.btn_copy_web, !self.web_result_text.is_empty());
+                place(
+                    self.edit_web_result,
+                    14,
+                    l.web.y + 25,
+                    w - 28,
+                    (l.web.h - 31).max(12),
+                );
+                show(self.edit_web_result, true);
+                for c in [self.lbl_ai_header, self.btn_copy_ai, self.edit_ai_result] {
+                    show(c, l.ai.h > 0);
+                }
+                if l.ai.h > 0 {
+                    bg.grip(l.ai.y, w, p.line);
+                    place(self.lbl_ai_header, 16, l.ai.y + 7, w - 90, 17);
+                    show(self.lbl_ai_header, true);
+                    place(self.btn_copy_ai, w - 58, l.ai.y + 4, 46, 22);
+                    show(self.btn_copy_ai, !self.ai_stream_buf.is_empty());
+                    place(
+                        self.edit_ai_result,
+                        14,
+                        l.ai.y + 25,
+                        w - 28,
+                        (l.ai.h - 31).max(12),
+                    );
+                    show(self.edit_ai_result, true);
                 }
             }
             TabMode::Chat => {
-                let mut y = content_top;
-                let cmb_w = (inner_w - 222).max(110);
-                MoveWindow(self.cmb_chat_conv, pad, y, cmb_w, 220, 1);
-                MoveWindow(self.btn_chat_new, pad + cmb_w + 6, y, 68, 26, 1);
-                MoveWindow(self.btn_chat_copy, pad + cmb_w + 78, y, 68, 26, 1);
-                MoveWindow(self.btn_chat_clear, pad + cmb_w + 150, y, 72, 26, 1);
-                y += 32;
-
-                let input_h = (self.pane_layout.chat_input_height as i32).clamp(68, 200);
-                let hist_h = (ch - y - input_h - 46).max(100);
-                MoveWindow(self.edit_chat_history, pad, y, inner_w, hist_h, 1);
-                y += hist_h + 6;
-
-                MoveWindow(self.edit_chat_input, pad, y, inner_w, input_h, 1);
-                y += input_h + 6;
-                MoveWindow(self.btn_chat_send, cw - pad - 132, y, 64, 28, 1);
-                MoveWindow(self.btn_chat_stop, cw - pad - 64, y, 64, 28, 1);
+                let hist_h = if self.history_visible { 38 } else { 0 };
+                show(self.cmb_chat_conv, self.history_visible);
+                show(self.btn_chat_clear, self.history_visible);
+                if self.history_visible {
+                    bg.surface(BoxRect::new(0, TOOLBAR, w, hist_h), p.surface, 0);
+                    bg.label(
+                        BoxRect::new(14, TOOLBAR + 10, 58, 18),
+                        "历史对话",
+                        false,
+                        true,
+                    );
+                    place_combo(self.cmb_chat_conv, 74, TOOLBAR + 4, w - 218, 30, 220);
+                    show(self.cmb_chat_conv, true);
+                    place(self.btn_chat_clear, w - 66, TOOLBAR + 6, 54, 24);
+                    show(self.btn_chat_clear, true);
+                    bg.divider(TOOLBAR + hist_h, w, p.line);
+                }
+                let input = self.pane_layout.chat_input_height as i32;
+                let input = input
+                    .clamp(68, 220)
+                    .min((h - TOOLBAR - hist_h - 80).max(68));
+                let top = h - input;
+                place(
+                    self.edit_chat_history,
+                    0,
+                    TOOLBAR + hist_h,
+                    w,
+                    (top - TOOLBAR - hist_h).max(20),
+                );
+                show(self.edit_chat_history, true);
+                bg.surface(BoxRect::new(0, top, w, input), p.surface, 0);
+                bg.grip(top, w, p.line);
+                place(self.edit_chat_input, 14, top + 8, w - 100, input - 16);
+                show(self.edit_chat_input, true);
+                place(self.btn_chat_send, w - 74, top + (input - 28) / 2, 62, 28);
+                show(self.btn_chat_send, !self.chat_streaming);
+                place(self.btn_chat_stop, w - 74, top + (input - 28) / 2, 62, 28);
+                show(self.btn_chat_stop, self.chat_streaming);
+                place(self.btn_chat_copy, w - 138, TOOLBAR + 6, 68, 24);
+                show(
+                    self.btn_chat_copy,
+                    self.history_visible && !self.current_messages.is_empty(),
+                );
             }
             TabMode::Settings => {
-                let mut y = content_top;
-                let row_h = 24;
-                let gap = 5;
-                let lbl_w = 132;
-                let field_x = pad + lbl_w;
-                let field_w = (inner_w - lbl_w).max(160);
-
-                MoveWindow(self.chk_ai_enabled, pad, y, inner_w, row_h, 1);
-                y += row_h + gap;
-
-                MoveWindow(self.lbl_ai_backend, pad, y + 3, lbl_w, row_h, 1);
-                MoveWindow(self.cmb_ai_backend, field_x, y, field_w, 200, 1);
-                y += row_h + gap;
-
-                MoveWindow(self.lbl_hymt_quant, pad, y + 3, lbl_w, row_h, 1);
-                MoveWindow(self.cmb_hymt_quant, field_x, y, field_w, 220, 1);
-                y += row_h + gap;
-
-                MoveWindow(self.btn_hymt_check, pad, y, 86, row_h, 1);
-                MoveWindow(self.btn_hymt_run, pad + 92, y, 132, row_h, 1);
-                MoveWindow(self.btn_hymt_stop, pad + 230, y, 86, row_h, 1);
-                y += row_h + 3;
-                MoveWindow(self.lbl_hymt_status, pad, y, inner_w, 20, 1);
-                y += 22;
-
-                MoveWindow(self.lbl_ai_url, pad, y + 3, lbl_w, row_h, 1);
-                MoveWindow(self.edit_ai_url, field_x, y, field_w, row_h, 1);
-                y += row_h + gap;
-
-                MoveWindow(self.lbl_ai_key, pad, y + 3, lbl_w, row_h, 1);
-                MoveWindow(self.edit_ai_key, field_x, y, field_w, row_h, 1);
-                y += row_h + gap;
-
-                MoveWindow(self.lbl_ai_model, pad, y + 3, lbl_w, row_h, 1);
-                MoveWindow(self.edit_ai_model, field_x, y, field_w - 76, row_h, 1);
-                MoveWindow(self.btn_ai_discover, cw - pad - 72, y, 72, row_h, 1);
-                y += row_h + gap;
-
-                MoveWindow(self.lbl_ai_prompt, pad, y + 3, lbl_w, row_h, 1);
-                MoveWindow(self.edit_ai_prompt, field_x, y, field_w, row_h, 1);
-                y += row_h + 8;
-
-                MoveWindow(self.lbl_chat_cfg, pad, y + 3, inner_w - 90, row_h, 1);
-                MoveWindow(self.btn_chat_copy_trans, cw - pad - 86, y, 86, row_h, 1);
-                y += row_h + 4;
-
-                let half_w = (inner_w - 6) / 2;
-                MoveWindow(self.cmb_chat_backend, pad, y, half_w, 200, 1);
-                MoveWindow(self.edit_chat_model, pad + half_w + 6, y, half_w, row_h, 1);
-                y += row_h + 4;
-                MoveWindow(self.edit_chat_url, pad, y, half_w, row_h, 1);
-                MoveWindow(self.edit_chat_key, pad + half_w + 6, y, half_w, row_h, 1);
-                y += row_h + 8;
-
-                MoveWindow(self.lbl_hk_header, pad, y + 3, inner_w - 88, row_h, 1);
-                MoveWindow(self.btn_hk_reset, cw - pad - 84, y, 84, row_h, 1);
-                y += row_h + 4;
-
-                let third_w = (inner_w - 8) / 3;
-                MoveWindow(self.edit_hk_toggle, pad, y, third_w, row_h, 1);
-                MoveWindow(self.edit_hk_ocr, pad + third_w + 4, y, third_w, row_h, 1);
-                MoveWindow(
-                    self.edit_hk_chat,
-                    pad + (third_w + 4) * 2,
-                    y,
-                    third_w,
-                    row_h,
-                    1,
+                bg.surface(BoxRect::new(0, TOOLBAR, SIDEBAR, h - TOOLBAR), p.surface, 0);
+                bg.divider(TOOLBAR, w, p.line);
+                bg.surface(BoxRect::new(SIDEBAR, TOOLBAR, 1, h - TOOLBAR), p.line, 0);
+                for (i, c) in self.settings_nav.iter().enumerate() {
+                    place(*c, 8, TOOLBAR + 18 + i as i32 * 42, SIDEBAR - 16, 34);
+                }
+                place(
+                    self.settings_view,
+                    SIDEBAR + 1,
+                    TOOLBAR + 1,
+                    w - SIDEBAR - 1,
+                    (h - TOOLBAR - 90).max(20),
                 );
-                y += row_h + 4;
-                MoveWindow(self.edit_hk_sel_trans, pad, y, half_w, row_h, 1);
-                MoveWindow(self.edit_hk_sel_chat, pad + half_w + 6, y, half_w, row_h, 1);
-                y += row_h + 8;
-
-                MoveWindow(self.lbl_opacity, pad, y + 3, 98, row_h, 1);
-                MoveWindow(self.cmb_opacity, pad + 100, y, 76, 180, 1);
-                MoveWindow(self.chk_ocr_newline, pad + 186, y, 165, row_h, 1);
-                MoveWindow(self.chk_autostart, pad + 356, y, 115, row_h, 1);
-                y += row_h + 8;
-
-                MoveWindow(self.btn_save_settings, pad, y, 96, 28, 1);
-                MoveWindow(self.lbl_settings_status, pad + 104, y + 4, inner_w - 104, 24, 1);
+                bg.surface(BoxRect::new(SIDEBAR, h - 64, w - SIDEBAR, 1), p.line, 0);
+                place(self.btn_save_settings, w - 126, h - 48, 104, 32);
+                place(
+                    self.lbl_settings_status,
+                    SIDEBAR + 22,
+                    h - 88,
+                    w - SIDEBAR - 44,
+                    20,
+                );
+                bg.label(
+                    BoxRect::new(SIDEBAR + 22, h - 43, (w - SIDEBAR - 166).max(0), 22),
+                    "保存后立即生效",
+                    true,
+                    true,
+                );
+                self.layout_settings();
             }
         }
-        InvalidateRect(self.hwnd, ptr::null(), 1);
+        scene(self.hwnd, bg);
+        InvalidateRect(self.hwnd, ptr::null(), 0);
+        for ctrl in [
+            self.btn_tab_trans,
+            self.btn_tab_chat,
+            self.btn_pin,
+            self.btn_tab_settings,
+        ]
+        .into_iter()
+        .chain(self.settings_nav)
+        {
+            InvalidateRect(ctrl, ptr::null(), 0);
+        }
+    }
+
+    unsafe fn layout_settings(&self) {
+        let _frame = LayoutFrame::new(self.hwnd, self.settings_view);
+        self.layout_settings_pass(0);
+    }
+
+    unsafe fn layout_settings_pass(&self, pass: u8) {
+        let mut r: RECT = std::mem::zeroed();
+        GetClientRect(self.settings_view, &mut r);
+        let w = unscale(r.right);
+        let h = unscale(r.bottom);
+        let p = palette();
+        let mut bg = Scene::default();
+        let section = self.settings_section;
+        let built_in = SendMessageW(self.cmb_ai_backend, CB_GETCURSEL, 0, 0) == 0;
+        let desired: Vec<HWND> = match section {
+            ID_SETTINGS_TRANS => {
+                let mut controls = vec![
+                    self.lbl_ai_backend,
+                    self.cmb_ai_backend,
+                    self.chk_ai_enabled,
+                ];
+                if built_in {
+                    controls.extend([
+                        self.lbl_hymt_quant,
+                        self.cmb_hymt_quant,
+                        self.btn_hymt_check,
+                        self.btn_hymt_run,
+                        self.btn_hymt_stop,
+                        self.btn_hymt_delete,
+                        self.lbl_hymt_status,
+                    ]);
+                } else {
+                    controls.extend([
+                        self.lbl_ai_url,
+                        self.edit_ai_url,
+                        self.lbl_ai_key,
+                        self.edit_ai_key,
+                        self.lbl_ai_model,
+                        self.edit_ai_model,
+                        self.lbl_ai_prompt,
+                        self.edit_ai_prompt,
+                    ]);
+                    let b = SendMessageW(self.cmb_ai_backend, CB_GETCURSEL, 0, 0);
+                    if b == 2 || b == 3 {
+                        controls.push(self.btn_ai_discover);
+                    }
+                }
+                controls
+            }
+            ID_SETTINGS_CHAT => [
+                vec![
+                    self.btn_chat_copy_trans,
+                    self.cmb_chat_backend,
+                    self.edit_chat_url,
+                    self.edit_chat_key,
+                    self.edit_chat_model,
+                ],
+                self.settings_labels[..4].to_vec(),
+            ]
+            .concat(),
+            ID_SETTINGS_KEYS => [
+                vec![
+                    self.edit_hk_toggle,
+                    self.edit_hk_ocr,
+                    self.edit_hk_chat,
+                    self.edit_hk_sel_trans,
+                    self.edit_hk_sel_chat,
+                    self.btn_hk_reset,
+                ],
+                self.settings_labels[4..].to_vec(),
+            ]
+            .concat(),
+            _ => vec![
+                self.lbl_opacity,
+                self.cmb_opacity,
+                self.chk_ocr_newline,
+                self.chk_autostart,
+            ],
+        };
+        for c in self
+            .settings_controls()
+            .into_iter()
+            .chain(self.settings_labels.iter().copied())
+        {
+            if !desired.contains(&c) {
+                visible(c, false);
+            }
+        }
+        let x = 18;
+        let fw = (w - 36).max(160);
+        let inset = 16;
+        let wide = fw >= 350;
+        let row_h = if wide { 46 } else { 72 };
+        let service_h = if wide { 116 } else { 142 };
+        let chat_service_h = if wide { 82 } else { 104 };
+        let content = match section {
+            ID_SETTINGS_TRANS => {
+                if built_in {
+                    82 + service_h + 16 + if wide { 256 } else { 282 } + 16
+                } else {
+                    82 + service_h + 16 + (row_h * 3 + 32) + 16 + 152 + 16
+                }
+            }
+            ID_SETTINGS_CHAT => 82 + chat_service_h + 16 + row_h * 3 + 32 + 16,
+            ID_SETTINGS_KEYS => 82 + row_h * 5 + 32 + 90,
+            _ => {
+                if wide {
+                    360
+                } else {
+                    400
+                }
+            }
+        };
+        let offset = scroll_range(self.settings_view, content, h);
+        let mut updated: RECT = std::mem::zeroed();
+        GetClientRect(self.settings_view, &mut updated);
+        // Showing/hiding the native scrollbar changes the client width. Resolve
+        // the responsive layout with that width before publishing any child moves.
+        if unscale(updated.right) != w && pass < 2 {
+            self.layout_settings_pass(pass + 1);
+            return;
+        }
+        let (title, subtitle) = match section {
+            ID_SETTINGS_TRANS => ("AI 翻译", "选择翻译服务，调整模型与提示词"),
+            ID_SETTINGS_CHAT => ("AI 对话", "独立配置你的对话服务"),
+            ID_SETTINGS_KEYS => ("快捷键", "快速呼出窗口、截图与划词操作"),
+            _ => ("通用", "让 TTREE 适合你的使用习惯"),
+        };
+        bg.heading(BoxRect::new(x, 20 - offset, fw, 28), title);
+        bg.label(BoxRect::new(x, 52 - offset, fw, 20), subtitle, true, true);
+        let show = |ctrl| {
+            visible(ctrl, true);
+        };
+        let form_row = |label_ctrl, field_ctrl, y, field_h, bg: &mut Scene| {
+            let (fx, fy, ww) = if wide {
+                (x + 126, y, fw - 142)
+            } else {
+                (x + inset, y + 23, fw - inset * 2)
+            };
+            place(
+                label_ctrl,
+                x + inset,
+                y + if wide { 5 } else { 0 },
+                if wide { 104 } else { fw - inset * 2 },
+                20,
+            );
+            show(label_ctrl);
+            let combo = field_ctrl == self.cmb_ai_backend
+                || field_ctrl == self.cmb_chat_backend
+                || field_ctrl == self.cmb_hymt_quant
+                || field_ctrl == self.cmb_opacity;
+            if combo {
+                // The combo owns one complete face at the row's exact bounds.
+                place_combo(field_ctrl, fx, fy, ww, field_h, 240);
+            } else {
+                bg.surface(BoxRect::new(fx, fy, ww, field_h), p.line, 7);
+                bg.surface(
+                    BoxRect::new(fx + 1, fy + 1, ww - 2, field_h - 2),
+                    p.field,
+                    6,
+                );
+                place(field_ctrl, fx + 7, fy + 2, ww - 14, field_h - 4);
+            }
+            show(field_ctrl);
+        };
+        let top = 82 - offset;
+        match section {
+            ID_SETTINGS_TRANS => {
+                let service_h = if wide { 116 } else { 142 };
+                bg.card(BoxRect::new(x, top, fw, service_h), p);
+                place(self.chk_ai_enabled, x + inset, top + 16, fw - inset * 2, 28);
+                show(self.chk_ai_enabled);
+                bg.surface(
+                    BoxRect::new(x + inset, top + 54, fw - inset * 2, 1),
+                    p.line,
+                    0,
+                );
+                form_row(
+                    self.lbl_ai_backend,
+                    self.cmb_ai_backend,
+                    top + 68,
+                    32,
+                    &mut bg,
+                );
+                let next = top + service_h + 16;
+                if built_in {
+                    let panel_h = if wide { 256 } else { 282 };
+                    bg.card(BoxRect::new(x, next, fw, panel_h), p);
+                    form_row(
+                        self.lbl_hymt_quant,
+                        self.cmb_hymt_quant,
+                        next + 18,
+                        32,
+                        &mut bg,
+                    );
+                    let actions = next + 18 + row_h + 8;
+                    let button_w = (fw - inset * 2 - 8) / 2;
+                    for (i, c) in [
+                        self.btn_hymt_check,
+                        self.btn_hymt_run,
+                        self.btn_hymt_stop,
+                        self.btn_hymt_delete,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        place(
+                            c,
+                            x + inset + (i % 2) as i32 * (button_w + 8),
+                            actions + (i / 2) as i32 * 40,
+                            button_w,
+                            32,
+                        );
+                        show(c);
+                    }
+                    bg.surface(
+                        BoxRect::new(x + inset, actions + 88, fw - inset * 2, 1),
+                        p.line,
+                        0,
+                    );
+                    place(
+                        self.lbl_hymt_status,
+                        x + inset,
+                        actions + 102,
+                        fw - inset * 2,
+                        64,
+                    );
+                    show(self.lbl_hymt_status);
+                } else {
+                    let connection_h = row_h * 3 + 32;
+                    bg.card(BoxRect::new(x, next, fw, connection_h), p);
+                    for (i, (label_ctrl, field_ctrl)) in [
+                        (self.lbl_ai_url, self.edit_ai_url),
+                        (self.lbl_ai_key, self.edit_ai_key),
+                        (self.lbl_ai_model, self.edit_ai_model),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        form_row(
+                            label_ctrl,
+                            field_ctrl,
+                            next + 16 + i as i32 * row_h,
+                            32,
+                            &mut bg,
+                        );
+                    }
+                    let b = SendMessageW(self.cmb_ai_backend, CB_GETCURSEL, 0, 0);
+                    if b == 2 || b == 3 {
+                        let fy = next + 16 + 2 * row_h + if wide { 0 } else { 23 };
+                        let fx = if wide { x + 126 } else { x + inset };
+                        let ww = if wide { fw - 142 } else { fw - inset * 2 };
+                        place(self.edit_ai_model, fx + 7, fy + 2, (ww - 108).max(30), 28);
+                        place(self.btn_ai_discover, x + fw - inset - 86, fy, 86, 32);
+                        show(self.btn_ai_discover);
+                    }
+                    let prompt_y = next + connection_h + 16;
+                    bg.card(BoxRect::new(x, prompt_y, fw, 152), p);
+                    place(
+                        self.lbl_ai_prompt,
+                        x + inset,
+                        prompt_y + 14,
+                        fw - inset * 2,
+                        20,
+                    );
+                    show(self.lbl_ai_prompt);
+                    bg.surface(
+                        BoxRect::new(x + inset, prompt_y + 44, fw - inset * 2, 92),
+                        p.field,
+                        7,
+                    );
+                    place(
+                        self.edit_ai_prompt,
+                        x + inset + 6,
+                        prompt_y + 47,
+                        fw - inset * 2 - 12,
+                        86,
+                    );
+                    show(self.edit_ai_prompt);
+                }
+            }
+            ID_SETTINGS_CHAT => {
+                place(self.btn_chat_copy_trans, x + fw - 110, 20 - offset, 110, 30);
+                show(self.btn_chat_copy_trans);
+                bg.card(BoxRect::new(x, top, fw, if wide { 82 } else { 104 }), p);
+                form_row(
+                    self.settings_labels[0],
+                    self.cmb_chat_backend,
+                    top + 20,
+                    32,
+                    &mut bg,
+                );
+                let next = top + if wide { 98 } else { 120 };
+                bg.card(BoxRect::new(x, next, fw, row_h * 3 + 32), p);
+                for (i, c) in [self.edit_chat_url, self.edit_chat_key, self.edit_chat_model]
+                    .into_iter()
+                    .enumerate()
+                {
+                    form_row(
+                        self.settings_labels[i + 1],
+                        c,
+                        next + 16 + i as i32 * row_h,
+                        32,
+                        &mut bg,
+                    );
+                }
+            }
+            ID_SETTINGS_KEYS => {
+                let card_h = row_h * 5 + 32;
+                bg.card(BoxRect::new(x, top, fw, card_h), p);
+                for (i, c) in [
+                    self.edit_hk_toggle,
+                    self.edit_hk_ocr,
+                    self.edit_hk_chat,
+                    self.edit_hk_sel_trans,
+                    self.edit_hk_sel_chat,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    form_row(
+                        self.settings_labels[i + 4],
+                        c,
+                        top + 16 + i as i32 * row_h,
+                        32,
+                        &mut bg,
+                    );
+                }
+                place(self.btn_hk_reset, x, top + card_h + 16, 126, 32);
+                show(self.btn_hk_reset);
+                bg.label(
+                    BoxRect::new(x, top + card_h + 58, fw, 20),
+                    "留空即可停用对应快捷键",
+                    true,
+                    true,
+                );
+            }
+            _ => {
+                let opacity_h = if wide { 84 } else { 112 };
+                bg.card(BoxRect::new(x, top, fw, opacity_h + 156), p);
+                form_row(self.lbl_opacity, self.cmb_opacity, top + 18, 32, &mut bg);
+                for (i, (c, description)) in [
+                    (self.chk_ocr_newline, "合并识别文本中的段落换行"),
+                    (self.chk_autostart, "登录 Windows 时自动启动"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let y = top + opacity_h + i as i32 * 78;
+                    bg.surface(BoxRect::new(x + inset, y, fw - inset * 2, 1), p.line, 0);
+                    place(c, x + inset, y + 15, fw - inset * 2, 26);
+                    show(c);
+                    bg.label(
+                        BoxRect::new(x + inset + 25, y + 44, fw - inset * 2 - 25, 18),
+                        description,
+                        true,
+                        true,
+                    );
+                }
+            }
+        }
+        scene(self.settings_view, bg);
+        InvalidateRect(self.settings_view, ptr::null(), 0);
     }
 
     unsafe fn switch_tab(&mut self, tab: TabMode) {
         if self.active_tab == tab {
             return;
         }
-        if self.active_tab == TabMode::Settings && tab != TabMode::Settings {
+        let leaving_settings = self.active_tab == TabMode::Settings && tab != TabMode::Settings;
+        if leaving_settings {
             self.set_pinned(self.pin_before_settings);
         } else if tab == TabMode::Settings && self.active_tab != TabMode::Settings {
             self.pin_before_settings = self.pinned;
+            self.settings_return_size = Some(self.client_size());
+            self.pending_resize_save = None;
             self.set_pinned(true);
             self.populate_settings_fields();
         }
         self.active_tab = tab;
-
-        set_hwnd_text(
-            self.btn_tab_trans,
-            if tab == TabMode::Translate {
-                "● 翻译"
-            } else {
-                "翻译"
-            },
-        );
-        set_hwnd_text(
-            self.btn_tab_chat,
-            if tab == TabMode::Chat {
-                "● AI 对话"
-            } else {
-                "AI 对话"
-            },
-        );
-        set_hwnd_text(
-            self.btn_tab_settings,
-            if tab == TabMode::Settings {
-                "● 设置"
-            } else {
-                "设置"
-            },
-        );
-
+        if tab == TabMode::Settings {
+            let (width, height) = self.client_size();
+            SetWindowPos(
+                self.hwnd,
+                ptr::null_mut(),
+                0,
+                0,
+                scale(width.max(640)),
+                scale(height.max(704)),
+                SWP_NOMOVE | SWP_NOACTIVATE | 4,
+            );
+        } else if leaving_settings {
+            if let Some((width, height)) = self.settings_return_size.take() {
+                SetWindowPos(
+                    self.hwnd,
+                    ptr::null_mut(),
+                    0,
+                    0,
+                    scale(width),
+                    scale(height),
+                    SWP_NOMOVE | SWP_NOACTIVATE | 4,
+                );
+            }
+        }
         self.relayout_children();
         match tab {
             TabMode::Translate => {
                 SetFocus(self.edit_source);
             }
             TabMode::Chat => {
+                self.render_chat_transcript();
                 SetFocus(self.edit_chat_input);
             }
             TabMode::Settings => {}
@@ -1693,7 +2330,8 @@ impl Win32AppState {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
-        set_hwnd_text(self.btn_pin, if pin { "置顶: 开" } else { "置顶: 关" });
+        selection(self.active_tab, self.settings_section, pin);
+        InvalidateRect(self.btn_pin, ptr::null(), 0);
     }
 
     unsafe fn show_and_focus(&mut self) {
@@ -1810,9 +2448,13 @@ impl Win32AppState {
         let src_for_web = resolved_src.to_string();
         let tgt_for_web = resolved_tgt.to_string();
         self.rt.spawn(async move {
-            let res =
-                ttree_translate::translate_web(&text_for_web, &src_for_web, &tgt_for_web, &web_token)
-                    .await;
+            let res = ttree_translate::translate_web(
+                &text_for_web,
+                &src_for_web,
+                &tgt_for_web,
+                &web_token,
+            )
+            .await;
             let _ = tx_web.send(UiEvent::WebTranslateDone { seq, result: res });
         });
 
@@ -1881,35 +2523,119 @@ impl Win32AppState {
         self.render_chat_transcript();
     }
 
-    unsafe fn render_chat_transcript(&self) {
-        let mut out = String::new();
-        for msg in &self.current_messages {
-            let role_label = if msg.role == "user" { "【我】" } else { "【AI】" };
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(role_label);
-            out.push('\n');
-            out.push_str(&msg.content);
-        }
+    unsafe fn render_chat_transcript(&mut self) {
+        let _frame = LayoutFrame::new(self.hwnd, self.edit_chat_history);
+        let mut r: RECT = std::mem::zeroed();
+        GetClientRect(self.edit_chat_history, &mut r);
+        let w = unscale(r.right).max(200);
+        let h = unscale(r.bottom).max(40);
+        let p = palette();
+        let mut scene_bg = Scene::default();
+        let mut messages: Vec<(bool, String)> = self
+            .current_messages
+            .iter()
+            .map(|m| (m.role == "user", m.content.clone()))
+            .collect();
         if self.chat_streaming {
-            if !out.is_empty() {
-                out.push_str("\n\n");
+            messages.push((
+                false,
+                if self.streaming_reply.is_empty() {
+                    "思考中…".into()
+                } else {
+                    self.streaming_reply.clone()
+                },
+            ));
+        }
+        let mut y = 38;
+        let mut frames = Vec::new();
+        let max_bubble_w = (w - 64).max(100);
+        for (user, content) in &messages {
+            let (text_w, text_h) =
+                measure_bubble(self.edit_chat_history, content, max_bubble_w - 28);
+            let bubble_w = (text_w + 32).min(max_bubble_w);
+            let height = text_h + 24;
+            let x = if *user { w - bubble_w - 18 } else { 18 };
+            frames.push((x, y, bubble_w, height, *user));
+            y += height + 38;
+        }
+        let follow = near_bottom(self.edit_chat_history);
+        scroll_range(self.edit_chat_history, y + 8, h);
+        if follow {
+            scroll_bottom(self.edit_chat_history);
+        }
+        let offset = scroll_pos(self.edit_chat_history);
+        while self.chat_bubbles.len() > messages.len() {
+            if let Some(c) = self.chat_bubbles.pop() {
+                forget_bubble(c);
+                DestroyWindow(c);
             }
-            out.push_str("【AI】\n");
-            if self.streaming_reply.is_empty() {
-                out.push_str("思考中…");
+        }
+        for (i, ((_, content), (x, y, width, height, user))) in
+            messages.iter().zip(frames).enumerate()
+        {
+            if i >= self.chat_bubbles.len() {
+                let ctrl = self.create_ctrl(
+                    GetModuleHandleW(ptr::null()),
+                    "EDIT",
+                    "",
+                    ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+                    700 + i,
+                    false,
+                );
+                SetParent(ctrl, self.edit_chat_history);
+                self.chat_bubbles.push(ctrl);
+            }
+            let c = self.chat_bubbles[i];
+            bubble_style(c, user);
+            if get_hwnd_text(c) != *content {
+                set_hwnd_text(c, content);
+            }
+            place(c, x + 10, y + 4 - offset, width - 20, height - 8);
+            ShowWindow(c, SW_SHOW);
+            scene_bg.surface(
+                BoxRect::new(x, y - offset, width, height),
+                if user { p.field } else { p.surface },
+                10,
+            );
+            let label_rect = BoxRect::new(x + 2, y - 23 - offset, width - 4, 18);
+            if user {
+                scene_bg.right_label(label_rect, "你");
             } else {
-                out.push_str(&self.streaming_reply);
+                scene_bg.label(label_rect, "AI", true, true);
             }
         }
-        if out.is_empty() {
-            out.push_str("在下方输入问题，开始多轮 AI 对话…");
+        if messages.is_empty() {
+            scene_bg.label(
+                BoxRect::new(24, (h / 2 - 12).max(20), w - 48, 24),
+                "输入消息，开始 AI 对话",
+                false,
+                true,
+            );
         }
-        set_hwnd_text(self.edit_chat_history, &out);
-        let len = GetWindowTextLengthW(self.edit_chat_history) as usize;
-        SendMessageW(self.edit_chat_history, EM_SETSEL, len, len as LPARAM);
-        SendMessageW(self.edit_chat_history, EM_SCROLLCARET, 0, 0);
+        scene(self.edit_chat_history, scene_bg);
+        InvalidateRect(self.edit_chat_history, ptr::null(), 0);
+        self.relayout_children();
+    }
+
+    unsafe fn layout_chat_scroll(&self, old_offset: i32) {
+        let _frame = LayoutFrame::new(self.hwnd, self.edit_chat_history);
+        let offset = scroll_pos(self.edit_chat_history);
+        let delta = old_offset - offset;
+        for c in &self.chat_bubbles {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(*c, &mut r);
+            let mut parent: RECT = std::mem::zeroed();
+            GetWindowRect(self.edit_chat_history, &mut parent);
+            place(
+                *c,
+                unscale(r.left - parent.left),
+                unscale(r.top - parent.top) + delta,
+                unscale(r.right - r.left),
+                unscale(r.bottom - r.top),
+            );
+        }
+        shift_scene(self.edit_chat_history, delta);
+        InvalidateRect(self.edit_chat_history, ptr::null(), 0);
     }
 
     unsafe fn send_chat_from_input(&mut self) {
@@ -1945,6 +2671,136 @@ impl Win32AppState {
             })
             .await;
             let _ = tx_done.send(UiEvent::ChatDone { seq, result: res });
+        });
+    }
+
+    unsafe fn start_hymt_download(&mut self) {
+        if self.hymt_removing {
+            set_hwnd_text(self.lbl_hymt_status, "正在删除服务，请稍候…");
+            return;
+        }
+        if self.hymt_downloading {
+            self.hymt_cancel_requested = true;
+            self.hymt_cancel.cancel_current();
+            set_hwnd_text(self.lbl_hymt_status, "正在取消下载，已下载进度将保留…");
+            return;
+        }
+        let q_idx = (SendMessageW(self.cmb_hymt_quant, CB_GETCURSEL, 0, 0) as usize)
+            .min(HyMtQuant::ALL.len() - 1);
+        let quant = HyMtQuant::ALL[q_idx];
+        if !hy_mt_manager::is_model_downloaded(quant) {
+            let title = format!("选择模型下载文件夹 · {}", quant.file_name());
+            match dialogs::pick_model_folder(self.hwnd, &hy_mt_manager::models_dir(), &title) {
+                Ok(Some(folder)) => {
+                    if let Err(e) = hy_mt_manager::set_custom_models_dir(folder) {
+                        set_hwnd_text(self.lbl_hymt_status, &e);
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    set_hwnd_text(self.lbl_hymt_status, "已取消选择模型下载文件夹，未开始下载");
+                    return;
+                }
+                Err(e) => {
+                    set_hwnd_text(self.lbl_hymt_status, &e);
+                    return;
+                }
+            }
+        }
+        self.hymt_downloading = true;
+        self.hymt_cancel_requested = false;
+        set_hwnd_text(self.btn_hymt_run, "取消下载");
+        set_hwnd_text(
+            self.lbl_hymt_status,
+            &format!(
+                "正在准备 {}\n保存至：{}",
+                quant.file_name(),
+                hy_mt_manager::models_dir().display()
+            ),
+        );
+        self.hymt_seq = self.hymt_seq.wrapping_add(1);
+        let seq = self.hymt_seq;
+        let token = self.hymt_cancel.next();
+        let tx_prog = self.ui_tx.clone();
+        let tx_done = self.ui_tx.clone();
+        self.rt.spawn(async move {
+            let res = hy_mt_manager::download_and_start(quant, &token, |p| {
+                let _ = tx_prog.send(UiEvent::HyMtProgress { seq, progress: p });
+            })
+            .await;
+            let _ = tx_done.send(UiEvent::HyMtReady { seq, result: res });
+        });
+    }
+
+    unsafe fn cancel_builtin_requests(&mut self) {
+        if self.settings.ai_translation_for_request().backend == AiBackendKind::BuiltInHyMt {
+            self.ai_cancel.cancel_current();
+            self.ignored_ai_seq = Some(self.translate_seq);
+            set_hwnd_text(
+                self.edit_ai_result,
+                "内置模型服务已停止，请先在设置中启动服务",
+            );
+        }
+        if self.settings.chat_ai_for_request().backend == AiBackendKind::BuiltInHyMt {
+            self.chat_cancel.cancel_current();
+            self.chat_seq = self.chat_seq.wrapping_add(1);
+            self.chat_streaming = false;
+            self.streaming_reply.clear();
+            self.render_chat_transcript();
+        }
+    }
+    unsafe fn stop_hymt_service(&mut self) {
+        if self.hymt_removing {
+            return;
+        }
+        self.hymt_cancel.cancel_current();
+        self.hymt_seq = self.hymt_seq.wrapping_add(1);
+        self.hymt_downloading = false;
+        self.hymt_cancel_requested = false;
+        self.cancel_builtin_requests();
+        let result = hy_mt_manager::stop_service();
+        self.refresh_hymt_run_title();
+        set_hwnd_text(
+            self.lbl_hymt_status,
+            &match result {
+                Ok(()) => "内置服务已停止，翻译不会自动重启。点击「启动服务」可重新运行。".into(),
+                Err(e) => e,
+            },
+        );
+    }
+    unsafe fn refresh_hymt_run_title(&self) {
+        if self.hymt_downloading {
+            return;
+        }
+        let q = (SendMessageW(self.cmb_hymt_quant, CB_GETCURSEL, 0, 0) as usize)
+            .min(HyMtQuant::ALL.len() - 1);
+        set_hwnd_text(
+            self.btn_hymt_run,
+            if hy_mt_manager::is_model_downloaded(HyMtQuant::ALL[q]) {
+                "启动服务"
+            } else {
+                "下载并运行"
+            },
+        );
+    }
+    unsafe fn delete_hymt_service(&mut self) {
+        if self.hymt_removing {
+            return;
+        }
+        if !dialogs::confirm_remove_service(self.hwnd, &hy_mt_manager::models_dir()) {
+            return;
+        }
+        self.stop_hymt_service();
+        self.hymt_removing = true;
+        let seq = self.hymt_seq;
+        set_hwnd_text(
+            self.lbl_hymt_status,
+            "正在删除内置模型、下载断点和托管依赖…",
+        );
+        let tx = self.ui_tx.clone();
+        self.rt.spawn(async move {
+            let result = hy_mt_manager::remove_service().await;
+            let _ = tx.send(UiEvent::HyMtRemoved { seq, result });
         });
     }
 
@@ -2031,10 +2887,18 @@ impl Win32AppState {
             },
             0,
         );
+        self.refresh_hymt_run_title();
+        if hy_mt_manager::is_service_stopped() && !self.hymt_downloading && !self.hymt_removing {
+            set_hwnd_text(
+                self.lbl_hymt_status,
+                "内置服务已停止。点击「启动服务」或「下载并运行」后才会恢复。",
+            );
+        }
     }
 
     unsafe fn save_settings_from_ui(&mut self) {
-        let ai_enabled = SendMessageW(self.chk_ai_enabled, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
+        let ai_enabled =
+            SendMessageW(self.chk_ai_enabled, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
         let b_idx = (SendMessageW(self.cmb_ai_backend, CB_GETCURSEL, 0, 0) as usize)
             .min(AiBackendKind::ALL.len() - 1);
         let q_idx = (SendMessageW(self.cmb_hymt_quant, CB_GETCURSEL, 0, 0) as usize)
@@ -2116,7 +2980,8 @@ impl Win32AppState {
             SendMessageW(self.chk_autostart, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
         let _ = autostart::set_enabled(want_autostart);
 
-        set_hwnd_text(self.lbl_settings_status, "✓ 设置已保存并立即生效");
+        set_hwnd_text(self.lbl_settings_status, "设置已保存");
+        self.relayout_children();
     }
 
     unsafe fn handle_ui_event(&mut self, ev: UiEvent) {
@@ -2143,6 +3008,9 @@ impl Win32AppState {
                 }
             }
             UiEvent::AiTranslateDelta { seq, delta } => {
+                if self.ignored_ai_seq == Some(seq) {
+                    return;
+                }
                 if seq != self.translate_seq {
                     return;
                 }
@@ -2150,6 +3018,9 @@ impl Win32AppState {
                 set_hwnd_text(self.edit_ai_result, &self.ai_stream_buf);
             }
             UiEvent::AiTranslateDone { seq, result } => {
+                if self.ignored_ai_seq == Some(seq) {
+                    return;
+                }
                 if seq != self.translate_seq {
                     return;
                 }
@@ -2184,10 +3055,8 @@ impl Win32AppState {
                             {
                                 let assistant_msg = ChatMessage::assistant(reply);
                                 self.current_messages.push(assistant_msg.clone());
-                                let conv_id = self
-                                    .conversations
-                                    .get(self.active_conv_idx)
-                                    .map(|c| c.id);
+                                let conv_id =
+                                    self.conversations.get(self.active_conv_idx).map(|c| c.id);
                                 let _ = self
                                     .history
                                     .append_round(conv_id, &[user_last, assistant_msg]);
@@ -2256,7 +3125,16 @@ impl Win32AppState {
                     set_hwnd_text(self.lbl_settings_status, &format!("探测模型失败: {e}"));
                 }
             },
-            UiEvent::HyMtProgress(prog) => {
+            UiEvent::HyMtProgress {
+                seq,
+                progress: prog,
+            } => {
+                if seq != self.hymt_seq || self.hymt_removing {
+                    return;
+                }
+                if self.hymt_cancel_requested {
+                    return;
+                }
                 let mb_done = prog.downloaded_bytes as f64 / (1024.0 * 1024.0);
                 let mb_total = (prog.total_bytes.max(1)) as f64 / (1024.0 * 1024.0);
                 let pct = ((prog.downloaded_bytes as f64 / (prog.total_bytes.max(1) as f64))
@@ -2270,17 +3148,37 @@ impl Win32AppState {
                     ),
                 );
             }
-            UiEvent::HyMtReady(res) => match res {
-                Ok(url) => {
-                    set_hwnd_text(
-                        self.lbl_hymt_status,
-                        &format!("✓ HY-MT1.5-1.8B 本地推理服务运行中 ({url})"),
-                    );
+            UiEvent::HyMtReady { seq, result: res } => {
+                if seq != self.hymt_seq || self.hymt_removing {
+                    return;
                 }
-                Err(err) => {
-                    set_hwnd_text(self.lbl_hymt_status, &format!("HY-MT1.5 启动失败: {err}"));
+                self.hymt_downloading = false;
+                self.refresh_hymt_run_title();
+                if self.hymt_cancel_requested {
+                    let _ = hy_mt_manager::stop_service();
+                    self.hymt_cancel_requested = false;
+                    set_hwnd_text(self.lbl_hymt_status, "下载已取消，断点进度已保留");
+                } else {
+                    match res {
+                        Ok(url) => set_hwnd_text(
+                            self.lbl_hymt_status,
+                            &format!("HY-MT1.5-1.8B 本地推理服务运行中 ({url})"),
+                        ),
+                        Err(err) => set_hwnd_text(
+                            self.lbl_hymt_status,
+                            &format!("HY-MT1.5 启动失败：{err}"),
+                        ),
+                    }
                 }
-            },
+            }
+            UiEvent::HyMtRemoved { seq, result } => {
+                if seq != self.hymt_seq {
+                    return;
+                }
+                self.hymt_removing = false;
+                self.refresh_hymt_run_title();
+                set_hwnd_text(self.lbl_hymt_status,&match result{Ok(())=>"内置服务已删除：模型、下载断点、托管引擎及依赖已清理。可点击「下载并运行」重新安装。".into(),Err(e)=>format!("删除未完成：{e}")});
+            }
             UiEvent::HyMtCompatReady(rep) => {
                 set_hwnd_text(
                     self.lbl_hymt_status,
@@ -2306,6 +3204,7 @@ impl Win32AppState {
         }
         while let Ok(ui_ev) = self.ui_rx.try_recv() {
             self.handle_ui_event(ui_ev);
+            self.relayout_children();
         }
 
         let now = Instant::now();
@@ -2332,6 +3231,95 @@ unsafe extern "system" fn main_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_NCCALCSIZE => 0,
+        WM_NCHITTEST => {
+            let x = (lparam as u32 & 0xffff) as u16 as i16 as i32;
+            let y = ((lparam as u32 >> 16) & 0xffff) as u16 as i16 as i32;
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(hwnd, &mut r);
+            let edge = scale(5);
+            let left = x < r.left + edge;
+            let right = x >= r.right - edge;
+            let top = y < r.top + edge;
+            let bottom = y >= r.bottom - edge;
+            if top && left {
+                13
+            } else if top && right {
+                14
+            } else if bottom && left {
+                16
+            } else if bottom && right {
+                17
+            } else if left {
+                10
+            } else if right {
+                11
+            } else if top {
+                12
+            } else if bottom {
+                15
+            } else if y < r.top + scale(TOOLBAR) {
+                2
+            } else {
+                1
+            }
+        }
+        WM_PAINT => paint(hwnd),
+        WM_ERASEBKGND => 1,
+        WM_DRAWITEM => draw_item(lparam),
+        WM_MEASUREITEM => measure_item(lparam),
+        WM_DPICHANGED | WM_SETTINGCHANGE => {
+            with_state(|st| {
+                let dpi = if msg == WM_DPICHANGED {
+                    (wparam & 0xffff) as u32
+                } else {
+                    st.dpi
+                };
+                let old_regular = st.font_regular;
+                let old_bold = st.font_bold;
+                st.dpi = dpi.max(96);
+                st.font_regular = font(13, 400, st.dpi);
+                st.font_bold = font(13, 600, st.dpi);
+                configure(st.dpi, st.font_regular, st.font_bold);
+                EnumChildWindows(hwnd, refresh_control, 0);
+                small_label(st.lbl_web_header);
+                small_label(st.lbl_ai_header);
+                DeleteObject(old_regular);
+                DeleteObject(old_bold);
+                let dark = palette().dark() as u32;
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &dark as *const _ as *const c_void,
+                    4,
+                );
+                if msg == WM_DPICHANGED {
+                    let r = &*(lparam as *const RECT);
+                    SetWindowPos(
+                        hwnd,
+                        ptr::null_mut(),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOACTIVATE | 4,
+                    );
+                }
+                st.relayout_children();
+                st.render_chat_transcript();
+            });
+            0
+        }
+        m if m == WM_APP + 2 => {
+            with_state(|st| {
+                if wparam == ID_SETTINGS_VIEW {
+                    st.layout_settings();
+                } else {
+                    st.layout_chat_scroll(lparam as i32);
+                }
+            });
+            0
+        }
         WM_TIMER => {
             if wparam == TIMER_ID_POLL {
                 with_state(|st| st.poll_tick());
@@ -2355,11 +3343,16 @@ unsafe extern "system" fn main_wnd_proc(
             if w > 0 && h > 0 {
                 with_state(|st| {
                     st.relayout_children();
-                    st.pending_resize_save = Some((
-                        Instant::now() + RESIZE_SAVE_DEBOUNCE,
-                        w as f64,
-                        h as f64,
-                    ));
+                    if st.active_tab == TabMode::Chat {
+                        st.render_chat_transcript();
+                    }
+                    if st.active_tab != TabMode::Settings {
+                        st.pending_resize_save = Some((
+                            Instant::now() + RESIZE_SAVE_DEBOUNCE,
+                            unscale(w) as f64,
+                            unscale(h) as f64,
+                        ));
+                    }
                 });
             }
             0
@@ -2367,42 +3360,38 @@ unsafe extern "system" fn main_wnd_proc(
         WM_GETMINMAXINFO => {
             let mmi = lparam as *mut MINMAXINFO;
             if !mmi.is_null() {
-                (*mmi).ptMinTrackSize.x = WINDOW_MIN_WIDTH as i32;
-                (*mmi).ptMinTrackSize.y = WINDOW_MIN_HEIGHT as i32;
-                (*mmi).ptMaxTrackSize.x = WINDOW_MAX_WIDTH as i32;
-                (*mmi).ptMaxTrackSize.y = WINDOW_MAX_HEIGHT as i32;
+                (*mmi).ptMinTrackSize.x = scale(WINDOW_MIN_WIDTH as i32);
+                let mut min_h = WINDOW_MIN_HEIGHT as i32;
+                with_state(|st| {
+                    if st.active_tab == TabMode::Settings {
+                        min_h = 380;
+                    } else if st.active_tab == TabMode::Translate
+                        && st.settings.ai_translation_for_request().enabled
+                    {
+                        min_h = 304;
+                    }
+                });
+                (*mmi).ptMinTrackSize.y = scale(min_h);
+                (*mmi).ptMaxTrackSize.x = scale(WINDOW_MAX_WIDTH as i32);
+                (*mmi).ptMaxTrackSize.y = scale(WINDOW_MAX_HEIGHT as i32);
             }
             0
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
-            let hdc = wparam as HDC;
-            SetTextColor(hdc, rgb(235, 238, 245));
-            SetBkColor(hdc, rgb(34, 37, 46));
-            SetBkMode(hdc, OPAQUE);
-            let mut brush = ptr::null_mut();
-            with_state(|st| brush = st.brush_surface);
-            brush as LRESULT
-        }
-        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
-            let hdc = wparam as HDC;
-            SetTextColor(hdc, rgb(218, 224, 236));
-            SetBkColor(hdc, rgb(24, 26, 32));
-            SetBkMode(hdc, TRANSPARENT);
-            let mut brush = ptr::null_mut();
-            with_state(|st| brush = st.brush_bg);
-            brush as LRESULT
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            color_control(wparam as HDC, lparam as HWND)
         }
         WM_LBUTTONDOWN => {
-            let y = ((lparam as u32 >> 16) & 0xFFFF) as i16 as i32;
+            let y = unscale(((lparam as u32 >> 16) & 0xFFFF) as i16 as i32);
             with_state(|st| {
                 if st.active_tab == TabMode::Translate {
-                    let s1 = (TOP_BAR_HEIGHT + st.pane_layout.source_height) as i32;
-                    let s2 = s1 + 6 + (st.pane_layout.lang_height as i32) + 6 + (st.pane_layout.web_height as i32);
-                    if (y - s1).abs() <= 6 {
+                    let layout = st.translation_layout();
+                    let s1 = layout.languages.y;
+                    let s2 = layout.ai.y;
+                    if (y - s1).abs() <= 4 {
                         st.dragging_splitter = Some((1, y));
                         SetCapture(hwnd);
                         SetCursor(LoadCursorW(ptr::null_mut(), IDC_SIZENS));
-                    } else if (y - s2).abs() <= 6 {
+                    } else if layout.ai.h > 0 && (y - s2).abs() <= 4 {
                         st.dragging_splitter = Some((2, y));
                         SetCapture(hwnd);
                         SetCursor(LoadCursorW(ptr::null_mut(), IDC_SIZENS));
@@ -2412,7 +3401,7 @@ unsafe extern "system" fn main_wnd_proc(
             0
         }
         WM_MOUSEMOVE => {
-            let y = ((lparam as u32 >> 16) & 0xFFFF) as i16 as i32;
+            let y = unscale(((lparam as u32 >> 16) & 0xFFFF) as i16 as i32);
             with_state(|st| {
                 if let Some((split_id, last_y)) = st.dragging_splitter {
                     let delta = (y - last_y) as f64;
@@ -2478,12 +3467,29 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
         ID_BTN_TAB_TRANS if code == BN_CLICKED => st.switch_tab(TabMode::Translate),
         ID_BTN_TAB_CHAT if code == BN_CLICKED => st.switch_tab(TabMode::Chat),
         ID_BTN_TAB_SETTINGS if code == BN_CLICKED => st.switch_tab(TabMode::Settings),
+        ID_SETTINGS_DONE if code == BN_CLICKED => st.switch_tab(TabMode::Translate),
+        ID_CLOSE if code == BN_CLICKED => st.hide_window(),
+        ID_HISTORY_TOGGLE if code == BN_CLICKED => {
+            st.history_visible = !st.history_visible;
+            st.relayout_children();
+            st.render_chat_transcript();
+        }
+        ID_SETTINGS_TRANS..=ID_SETTINGS_GENERAL if code == BN_CLICKED => {
+            st.settings_section = id;
+            set_scroll(st.settings_view, 0);
+            st.relayout_children();
+        }
+        ID_CMB_AI_BACKEND | ID_CMB_CHAT_BACKEND if code == CBN_SELCHANGE => {
+            set_scroll(st.settings_view, 0);
+            st.relayout_children();
+        }
         ID_BTN_OCR if code == BN_CLICKED => st.trigger_ocr(),
         ID_BTN_PIN if code == BN_CLICKED => st.set_pinned(!st.pinned),
 
         ID_EDIT_SOURCE if code == EN_CHANGE => {
             if !st.suppress_source_change {
                 st.pending_auto_translate = Some(Instant::now() + AUTO_TRANSLATE_DEBOUNCE);
+                st.relayout_children();
             }
         }
         ID_CMB_SOURCE_LANG if code == CBN_SELCHANGE => {
@@ -2519,8 +3525,13 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
             st.suppress_source_change = false;
             st.web_cancel.cancel_current();
             st.ai_cancel.cancel_current();
+            st.translate_seq = st.translate_seq.wrapping_add(1);
+            st.web_result_text.clear();
+            st.ai_stream_buf.clear();
             set_hwnd_text(st.edit_web_result, "译文显示在这里");
             set_hwnd_text(st.edit_ai_result, "AI 译文显示在这里");
+            st.relayout_children();
+            SetFocus(st.edit_source);
         }
         ID_BTN_COPY_WEB if code == BN_CLICKED => {
             copy_text_to_clipboard(st.hwnd, &st.web_result_text);
@@ -2572,6 +3583,7 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
             st.render_chat_transcript();
         }
 
+        ID_CMB_HYMT_QUANT if code == CBN_SELCHANGE => st.refresh_hymt_run_title(),
         ID_BTN_HYMT_CHECK if code == BN_CLICKED => {
             let tx = st.ui_tx.clone();
             st.rt.spawn_blocking(move || {
@@ -2579,26 +3591,9 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
                 let _ = tx.send(UiEvent::HyMtCompatReady(rep));
             });
         }
-        ID_BTN_HYMT_RUN if code == BN_CLICKED => {
-            let q_idx = (SendMessageW(st.cmb_hymt_quant, CB_GETCURSEL, 0, 0) as usize)
-                .min(HyMtQuant::ALL.len() - 1);
-            let quant = HyMtQuant::ALL[q_idx];
-            let token = st.hymt_cancel.next();
-            let tx_prog = st.ui_tx.clone();
-            let tx_done = st.ui_tx.clone();
-            st.rt.spawn(async move {
-                let res = hy_mt_manager::download_and_start(quant, &token, |p| {
-                    let _ = tx_prog.send(UiEvent::HyMtProgress(p));
-                })
-                .await;
-                let _ = tx_done.send(UiEvent::HyMtReady(res));
-            });
-        }
-        ID_BTN_HYMT_STOP if code == BN_CLICKED => {
-            st.hymt_cancel.cancel_current();
-            hy_mt_manager::stop_server();
-            set_hwnd_text(st.lbl_hymt_status, "已停止内置 HY-MT1.5 本地服务");
-        }
+        ID_BTN_HYMT_RUN if code == BN_CLICKED => st.start_hymt_download(),
+        ID_BTN_HYMT_STOP if code == BN_CLICKED => st.stop_hymt_service(),
+        ID_BTN_HYMT_DELETE if code == BN_CLICKED => st.delete_hymt_service(),
         ID_BTN_AI_DISCOVER if code == BN_CLICKED => {
             let b_idx = (SendMessageW(st.cmb_ai_backend, CB_GETCURSEL, 0, 0) as usize)
                 .min(AiBackendKind::ALL.len() - 1);
@@ -2618,6 +3613,7 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
             set_hwnd_text(st.edit_chat_url, &get_hwnd_text(st.edit_ai_url));
             set_hwnd_text(st.edit_chat_key, &get_hwnd_text(st.edit_ai_key));
             set_hwnd_text(st.edit_chat_model, &get_hwnd_text(st.edit_ai_model));
+            st.relayout_children();
         }
         ID_BTN_HK_RESET if code == BN_CLICKED => {
             let def = ShortcutConfig::default();

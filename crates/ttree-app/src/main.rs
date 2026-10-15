@@ -10,6 +10,9 @@ mod ui_helpers;
 #[cfg(target_os = "windows")]
 mod windows_app;
 
+#[cfg(any(target_os = "windows", test))]
+mod windows_design;
+
 #[cfg(target_os = "macos")]
 fn main() {
     macos_app::run();
