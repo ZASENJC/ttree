@@ -45,10 +45,7 @@ jobs:
         env:
           MACOS_COMMUNITY_CERTIFICATE: ${{ secrets.MACOS_COMMUNITY_CERTIFICATE }}
           MACOS_COMMUNITY_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_COMMUNITY_CERTIFICATE_PASSWORD }}
-        run: |
-          keychain="$(scripts/macos/import-certificate.sh)"
-          trap 'security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$(dirname "$keychain")"' EXIT
-          security find-identity -v -p codesigning "$keychain" | grep -F B8D254561BB6CAD78AA71FA18D62A32D10F50C08
+        run: scripts/macos/preflight.sh
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin

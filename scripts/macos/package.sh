@@ -72,10 +72,7 @@ if [[ -z "$SIGNING_KEYCHAIN" ]]; then
   OWN_KEYCHAIN="$("$ROOT_DIR/scripts/macos/import-certificate.sh")"
   SIGNING_KEYCHAIN="$OWN_KEYCHAIN"
 fi
-REQUIREMENT='=designated => identifier "com.samwstu.ttree" and certificate leaf = H"B8D254561BB6CAD78AA71FA18D62A32D10F50C08"'
-codesign --force --options runtime --timestamp=none --sign B8D254561BB6CAD78AA71FA18D62A32D10F50C08 \
-  --identifier com.samwstu.ttree --requirements "$REQUIREMENT" --keychain "$SIGNING_KEYCHAIN" "$APP_PATH"
-"$ROOT_DIR/scripts/macos/verify-signature.sh" "$APP_PATH"
+"$ROOT_DIR/scripts/macos/sign-app.sh" "$APP_PATH" "$SIGNING_KEYCHAIN"
 security lock-keychain "$SIGNING_KEYCHAIN"
 mkdir -p "$RELEASE_DIR"
 tar -czf "$WORK_DIR/TTREE_universal.app.tar.gz" -C "$APP_DIR" TTREE.app

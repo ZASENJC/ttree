@@ -37,5 +37,11 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   echo "[certificate] Trusting the pinned identity on disposable CI runner" >&2
   sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$WORK_DIR/cert.pem" >&2
 fi
+# Register the transient keychain for codesign chain/private-key lookup.
+EXISTING_KEYCHAINS=()
+while IFS= read -r entry; do EXISTING_KEYCHAINS+=("$entry"); done < <(
+  security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//'
+)
+security list-keychains -d user -s "$KEYCHAIN" "${EXISTING_KEYCHAINS[@]}"
 rm -f "$WORK_DIR/cert.p12" "$WORK_DIR/cert.pem"
 printf '%s\n' "$KEYCHAIN"

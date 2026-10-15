@@ -187,8 +187,8 @@ extern "system" {
     ) -> i32;
 }
 
-fn uses_light_theme(setting: &str) -> bool {
-    let mut light = 1u32;
+fn uses_light_theme(setting: &str, default_light: bool) -> bool {
+    let mut light = u32::from(default_light);
     let mut len = 4;
     unsafe {
         RegGetValueW(
@@ -205,7 +205,7 @@ fn uses_light_theme(setting: &str) -> bool {
 }
 
 pub fn taskbar_uses_light_theme() -> bool {
-    uses_light_theme("SystemUsesLightTheme")
+    uses_light_theme("SystemUsesLightTheme", false)
 }
 
 #[derive(Clone, Copy)]
@@ -222,7 +222,7 @@ pub struct Palette {
 }
 impl Palette {
     pub fn system() -> Self {
-        if !uses_light_theme("AppsUseLightTheme") {
+        if !uses_light_theme("AppsUseLightTheme", true) {
             Self {
                 bg: rgb(31, 32, 34),
                 surface: rgb(36, 37, 39),
