@@ -187,6 +187,27 @@ extern "system" {
     ) -> i32;
 }
 
+fn uses_light_theme(setting: &str) -> bool {
+    let mut light = 1u32;
+    let mut len = 4;
+    unsafe {
+        RegGetValueW(
+            0x80000001u32 as i32 as isize,
+            wide_null("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize").as_ptr(),
+            wide_null(setting).as_ptr(),
+            0x10,
+            ptr::null_mut(),
+            &mut light as *mut _ as *mut c_void,
+            &mut len,
+        );
+    }
+    light != 0
+}
+
+pub fn taskbar_uses_light_theme() -> bool {
+    uses_light_theme("SystemUsesLightTheme")
+}
+
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub bg: u32,
@@ -201,21 +222,7 @@ pub struct Palette {
 }
 impl Palette {
     pub fn system() -> Self {
-        let mut light = 1u32;
-        let mut len = 4;
-        unsafe {
-            RegGetValueW(
-                0x80000001u32 as i32 as isize,
-                wide_null("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
-                    .as_ptr(),
-                wide_null("AppsUseLightTheme").as_ptr(),
-                0x10,
-                ptr::null_mut(),
-                &mut light as *mut _ as *mut c_void,
-                &mut len,
-            );
-        }
-        if light == 0 {
+        if !uses_light_theme("AppsUseLightTheme") {
             Self {
                 bg: rgb(31, 32, 34),
                 surface: rgb(36, 37, 39),

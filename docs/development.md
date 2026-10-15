@@ -57,6 +57,6 @@ README 图片放 `docs/images/`，只能提交确认可公开的界面。API Key
 
 ## 品牌与渲染图
 
-单色 Logo 源文件为 `assets/icons/icon.svg`。Mac 安装 librsvg 后运行 `python3 scripts/branding/generate-icons.py`，统一生成 PNG、ICO、ICNS。Windows 可生成 PNG/ICO；发布前仍须在 Mac 更新 ICNS。Windows build.rs 将图标及版本编译进 EXE，窗口与托盘均读取内嵌图标。
+单色 Logo 源文件为 `assets/icons/icon.svg`。Mac 安装 librsvg 后运行 `python3 scripts/branding/generate-icons.py`，统一生成 PNG、ICO、ICNS。Windows 可生成 PNG/ICO；发布前仍须在 Mac 更新 ICNS。Windows build.rs 将图标及版本编译进 EXE，窗口读取带底板的应用图标；托盘读取无底板的浅色/深色字形，并跟随系统任务栏主题。Mac 菜单栏使用透明字形与 NSImage template 自动适配明暗。
 
 README 产品图源文件为 `docs/design/product.html`，按 1600 × 1080 CSS 像素渲染，导出 `docs/images/product.png`（当前为 2x）。这是基于现有布局的界面示意，不是实机截图；不要用它作为交互验收证据。

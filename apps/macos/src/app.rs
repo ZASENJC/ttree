@@ -4,16 +4,16 @@ use std::sync::Arc;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSTextView,
+    NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSTextView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
-    NSTimer,
+    NSData, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize,
+    NSString, NSTimer,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
@@ -265,7 +265,15 @@ fn build_status_bar_item(
         let status_bar = NSStatusBar::systemStatusBar();
         let item = status_bar.statusItemWithLength(-1.0);
         if let Some(btn) = item.button(mtm) {
-            btn.setTitle(&NSString::from_str("译"));
+            let data =
+                NSData::with_bytes(include_bytes!("../../../assets/icons/status-template.png"));
+            let image = NSImage::initWithData(NSImage::alloc(), &data)
+                .expect("bundled status-bar glyph must decode");
+            image.setSize(NSSize::new(18.0, 18.0));
+            image.setTemplate(true);
+            btn.setImage(Some(&image));
+            btn.setTitle(&NSString::from_str(""));
+            btn.setToolTip(Some(&NSString::from_str("TTREE")));
         }
 
         let menu = NSMenu::new(mtm);

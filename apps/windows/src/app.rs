@@ -128,6 +128,7 @@ const TRANSPARENT: i32 = 1;
 const OPAQUE: i32 = 2;
 
 const NIM_ADD: u32 = 0x00000000;
+const NIM_MODIFY: u32 = 0x00000001;
 const NIM_DELETE: u32 = 0x00000002;
 const NIF_MESSAGE: u32 = 0x00000001;
 const NIF_ICON: u32 = 0x00000002;
@@ -946,17 +947,24 @@ pub fn run() {
 }
 
 unsafe fn install_tray_icon(hwnd: HWND) {
+    set_tray_icon(hwnd, NIM_ADD);
+}
+
+unsafe fn set_tray_icon(hwnd: HWND, operation: u32) {
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIconW(GetModuleHandleW(ptr::null()), IDI_TTREE);
+    // System/taskbar appearance may differ from the application's theme.
+    let glyph_id = if taskbar_uses_light_theme() { 2 } else { 3 };
+    nid.hIcon = LoadIconW(GetModuleHandleW(ptr::null()), glyph_id as *const u16);
+    assert!(!nid.hIcon.is_null(), "bundled tray glyph is missing");
     let tip = wide_null("TTREE AI 翻译与 OCR");
     let copy_len = tip.len().min(nid.szTip.len() - 1);
     nid.szTip[..copy_len].copy_from_slice(&tip[..copy_len]);
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    Shell_NotifyIconW(operation, &nid);
 }
 
 unsafe fn remove_tray_icon(hwnd: HWND) {
@@ -3269,6 +3277,9 @@ unsafe extern "system" fn main_wnd_proc(
         WM_DRAWITEM => draw_item(lparam),
         WM_MEASUREITEM => measure_item(lparam),
         WM_DPICHANGED | WM_SETTINGCHANGE => {
+            if msg == WM_SETTINGCHANGE {
+                set_tray_icon(hwnd, NIM_MODIFY);
+            }
             with_state(|st| {
                 let dpi = if msg == WM_DPICHANGED {
                     (wparam & 0xffff) as u32
