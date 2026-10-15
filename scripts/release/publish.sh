@@ -10,7 +10,10 @@ DRAFT_CREATED=0
 PUBLISHED=0
 cleanup() {
   if [[ "$DRAFT_CREATED" == 1 && "$PUBLISHED" == 0 ]]; then
-    gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+    # A publish request may succeed despite a lost response. Remove drafts only.
+    if [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" == true ]]; then
+      gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+    fi
   fi
 }
 trap cleanup EXIT
