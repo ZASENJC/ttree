@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-VALIDATE="$ROOT_DIR/scripts/validate-release-secrets.sh"
+VALIDATE="$ROOT_DIR/scripts/release/validate-secrets.sh"
 ENCRYPTED_UPDATER_KEY="$(printf '%s\n%s\n' \
   'untrusted comment: rsign encrypted secret key' \
   'mock-key-material' | openssl base64 -A)"

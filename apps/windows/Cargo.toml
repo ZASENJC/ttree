@@ -1,0 +1,26 @@
+[package]
+name = "ttree-windows"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ttree-windows"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ttree-core = { path = "../../crates/ttree-core" }
+ttree-storage = { path = "../../crates/ttree-storage" }
+ttree-platform = { path = "../../crates/ttree-platform" }
+ttree-ocr = { path = "../../crates/ttree-ocr" }
+ttree-translate = { path = "../../crates/ttree-translate" }
+ttree-ai = { path = "../../crates/ttree-ai" }
+anyhow.workspace = true
+global-hotkey.workspace = true
+tokio.workspace = true
+lucide-icons = { version = "=1.39.0", default-features = false }
+windows = { workspace = true, features = ["Win32_UI_Shell", "Win32_System_Com", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+winresource = { version = "=0.1.34", default-features = false }

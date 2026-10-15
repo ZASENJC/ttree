@@ -3,11 +3,12 @@ resolver = "2"
 members = [
     "crates/ttree-core",
     "crates/ttree-storage",
-    "crates/ttree-platform-macos",
+    "crates/ttree-platform",
     "crates/ttree-ocr",
     "crates/ttree-translate",
     "crates/ttree-ai",
-    "crates/ttree-app",
+    "apps/macos",
+    "apps/windows",
 ]
 
 [workspace.package]

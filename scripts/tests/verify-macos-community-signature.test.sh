@@ -38,7 +38,7 @@ esac
 EOF
 chmod +x "$TMP_DIR/bin/codesign"
 
-VERIFY="$ROOT_DIR/scripts/verify-macos-community-signature.sh"
+VERIFY="$ROOT_DIR/scripts/macos/verify-signature.sh"
 EXPECTED_ID="com.samwstu.ttree"
 EXPECTED_AUTHORITY="TTREE Open Source Code Signing"
 EXPECTED_SHA1="B8D254561BB6CAD78AA71FA18D62A32D10F50C08"

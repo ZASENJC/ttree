@@ -127,16 +127,14 @@ pub fn prepare_primary_for_ocr(img: &RawBgraImage) -> Result<RawBgraImage, Strin
 pub fn prepare_high_contrast_for_ocr(img: &RawBgraImage) -> Result<RawBgraImage, String> {
     let defringed = neutralize_cleartype_fringes(img);
     let factor = recommended_upscale_factor(defringed.width, defringed.height).max(2);
-    let factor = if (defringed.width as u64)
-        * (defringed.height as u64)
-        * (factor as u64)
-        * (factor as u64)
-        <= MAX_OCR_PIXELS
-    {
-        factor
-    } else {
-        1
-    };
+    let factor =
+        if (defringed.width as u64) * (defringed.height as u64) * (factor as u64) * (factor as u64)
+            <= MAX_OCR_PIXELS
+        {
+            factor
+        } else {
+            1
+        };
     let scaled = if factor > 1 {
         upscale_bilinear(&defringed, factor)
     } else {
@@ -309,12 +307,7 @@ pub fn sample_border_bgr(img: &RawBgraImage) -> (u8, u8, u8) {
     )
 }
 
-fn pad_with_bg(
-    img: &RawBgraImage,
-    bg_b: u8,
-    bg_g: u8,
-    bg_r: u8,
-) -> Result<RawBgraImage, String> {
+fn pad_with_bg(img: &RawBgraImage, bg_b: u8, bg_g: u8, bg_r: u8) -> Result<RawBgraImage, String> {
     let canvas_w = img
         .width
         .checked_add(BORDER_PADDING * 2)
@@ -389,7 +382,8 @@ mod tests {
         // 外圈填充应为纯白背景 (255, 255, 255)
         assert_eq!(&hc.bgra[0..3], &[255, 255, 255]);
         // 中心文字像素应被反相并拉伸为深黑色 (0, 0, 0)
-        let center_idx = ((hc.height as usize / 2) * hc.width as usize + (hc.width as usize / 2)) * 4;
+        let center_idx =
+            ((hc.height as usize / 2) * hc.width as usize + (hc.width as usize / 2)) * 4;
         assert_eq!(&hc.bgra[center_idx..center_idx + 3], &[0, 0, 0]);
     }
 }

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-SIGNING_ENV="$ROOT_DIR/scripts/signing-env.sh"
+SIGNING_ENV="$ROOT_DIR/scripts/macos/signing-env.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

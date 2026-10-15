@@ -1,176 +1,71 @@
-# AGENTS.md
+# TTREE 工作规则
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+## 任务边界
 
-## Project Overview
+在本轮授权内完成交付及必要验证；明确的只读或先审批要求是停止边界。已授权且范围未变的步骤不重复索取批准。发布、对外传讯及服务变更须有覆盖该动作的授权。
 
-ttree is a lightweight macOS AI translator built with **Tauri 2 + Svelte 5 + Rust**. It is designed as a hidden spotlight-style app: the main window starts hidden, global shortcuts show it instantly, and the window auto-hides on blur.
+选择最窄的适用技能。一般分析直接交付结论与证据；需要持久交付物时再建立文件。不因通用模板自动执行全套测试、定时重跑、提交或发布。
 
-Core features:
-- `CmdOrCtrl+Shift+Space` by default toggles the translation window.
-- `CmdOrCtrl+Shift+S` by default triggers screenshot OCR translation.
-- Translation engines: Google and Bing free web endpoints (no key) plus OpenAI-compatible streaming chat completions. A 中⇄英 "adaptive" target auto-picks direction by script detection.
-- macOS OCR uses Apple Vision via `objc2-vision` (`VNRecognizeTextRequest`).
-- Settings persist locally through `tauri-plugin-store`; shortcuts are user-configurable and re-registered immediately after saving. API keys are stored in the macOS Keychain, not the plaintext store.
+## 当前架构与目录
 
-## Common Commands
+TTREE 是纯 Rust Cargo workspace，Mac 用 AppKit，Windows 用 Win32。入口分别为 `apps/macos`（包 `ttree-macos`，二进制 `ttree`）与 `apps/windows`（包/二进制 `ttree-windows`，发行时命名 `TTREE.exe`）。不要恢复已移除的 Web 前端或旧框架命令。
 
-Install dependencies without running arbitrary dependency lifecycle scripts:
+- `apps/macos/src/`：Mac 窗口、菜单、控制器、原生控件。遵守其局部 AGENTS.md。
+- `apps/windows/src/`：Windows 窗口、绘制、对话框与设计布局。遵守其局部 AGENTS.md。
+- `crates/ttree-core`：配置模型、语言、消息校验、取消与布局数据。
+- `crates/ttree-storage`：本机 JSON 配置与 JSONL 历史。
+- `crates/ttree-translate`：免费翻译引擎、健康分流和回退。
+- `crates/ttree-ai`：HTTP / SSE、本地模型、HY-MT 下载与进程管理。
+- `crates/ttree-ocr/src/{macos,windows}`：平台专用截图与 OCR；公共预处理和结果类型留在上层。
+- `crates/ttree-platform/src/{macos,windows}`：平台专用划词；热键解析和自启入口共享。
+- `scripts/{macos,windows,release}`：各平台打包与公共发布工具。
+- `docs/`：开发与发布说明；图片只放 `docs/images/`。
+- `target/`、`dist/`：忽略的编译/发行产物。禁止向根目录堆放截图、日志、压缩包、临时报告。
 
-```bash
-npm run ci:install
+## 修改原则
+
+1. 翻译、AI、配置、语言等业务语义优先改共享 crate，避免在两个 UI 里复制规则。
+2. 原生控件与平台权限留在对应平台目录；共享 crate 的系统实现用 `cfg` 隔离。不得让 Windows 构建依赖 Apple 框架，反之亦然。
+3. 共享行为发生变化时，检查两个调用端；若另一个平台尚未实现，明确说明，不宣称已验证。
+4. 保留默认隐藏、快捷键唤起、Esc 收起、置顶时不因失焦隐藏等行为。不要重启无关应用、模型服务或清空用户配置。
+5. API Key 当前保存在本机 JSON 配置，不能在文档中宣称已使用 Keychain。禁止把用户配置、历史、凭据或模型文件提交到仓库，不打印私钥/口令。
+6. 不改变 `com.samwstu.ttree` 配置目录或历史格式来完成目录整理。版本唯一来源是根 `Cargo.toml` 的 `[workspace.package].version`；UI 使用 Cargo 版本常量。
+7. README 使用克制、简洁、以体验为主的中文文风；插图标清实机截图与示意图，不用虚构界面冒充运行结果。
+
+## 开发与必要验证
+
+```sh
+cargo check --workspace --locked
+cargo test --workspace --locked
+bash scripts/tests/run-release-tests.sh
+# 在对应系统运行
+cargo run -p ttree-macos -- --show
+cargo run -p ttree-windows -- --show
 ```
 
-Run the app in development mode:
+修改 Windows 代码可在 Mac 上先 `cargo check -p ttree-windows --target x86_64-pc-windows-msvc --locked`；它仅验证类型，不等于原生链接、启动或交互验证。实际发布必须通过 Windows runner 的编译、测试、ZIP 验证和启动检查。
 
-```bash
-npm run tauri dev
-```
+验证按影响范围选择；不为低影响文档修改强制运行完整套件。发布变更须跑发布合约测试。不要通过删除有效的门禁绕过失败。构建失败先报告最小真实错误。完整说明见 [开发指南](docs/development.md)。
 
-The Tauri window is configured with `visible: false`, so the app may appear to launch with no window. Use the configured global shortcut (default `CmdOrCtrl+Shift+Space`) to show it.
+## 自动发布约定
 
-Frontend-only development server:
+`.github/workflows/build.yml` 是唯一构建发布工作流。
 
-```bash
-npm run dev
-```
+- 分支推送、PR：双平台构建与测试；其他分支不发布。
+- `main` 推送：双平台成功后发布唯一的 `vX.Y.Z-dev.RUN.ATTEMPT` 预发布版，不覆盖 Latest。
+- 推送 `vX.Y.Z` 标签：必须匹配工作区版本，双平台成功后发布正式版，更新 Latest。
+- `workflow_dispatch`：只验证、上传临时 artifact，不发布。
+- 发布 job 必须依赖 metadata、macos、windows 三者成功。先创建草稿，上传附件，再下载验证签名与哈希，最后公开；不覆盖既有 Release。
+- 附件：Universal DMG、Mac `.app.tar.gz`、`.sig`、`latest.json`、Windows x64 ZIP、`SHA256SUMS`。
+- 保留旧客户端更新签名兼容性；不能把纯 Rust 应用描述成已有自动更新界面。
 
-Frontend checks and build:
+## Mac 签名硬约束
 
-```bash
-npm run check
-npm run build
-```
-
-Frontend tests:
-
-```bash
-npm test
-```
-
-Rust backend checks/tests:
-
-```bash
-cd src-tauri && cargo check
-cd src-tauri && cargo test
-cd src-tauri && cargo test <test_name>
-cd src-tauri && cargo clippy
-cd src-tauri && cargo fmt
-```
-
-Production app build:
-
-```bash
-npm run tauri build
-```
-
-Build outputs are under `src-tauri/target/release/bundle/`, including `bundle/macos/TTREE.app` and `bundle/dmg/*.dmg` (productName is `TTREE`).
-
-An ordinary local `tauri build` is not proof that a distributable macOS build is valid. Before release, the final `.app`, DMG, updater archive, updater signature, and `latest.json` must pass the community-signing checks described below.
-
-## Release Process (应用内更新)
-
-The app self-updates via the Tauri Updater plugin. Releases are built and signed by CI, then published to GitHub Releases; installed apps fetch `latest.json` from the repo and update in place.
-
-**When the user asks to publish a new version, follow these steps in order:**
-
-1. **Bump the version in both places** (they must match) and commit:
-   - `package.json` → `"version"`
-   - `src-tauri/tauri.conf.json` → `"version"`
-2. **Verify locally** before tagging:
-   ```bash
-   npm run check && npm test
-   cd src-tauri && cargo check && cd ..
-   ```
-3. **Tag and push the tag** (triggers the release workflow on `v*` tags):
-   ```bash
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   ```
-4. CI (`.github/workflows/release.yml`) builds a single `universal-apple-darwin` (arm64 + x86_64 combined; the runner only ships arm64 by default, so the workflow explicitly runs `rustup target add x86_64-apple-darwin` first). `scripts/package-macos-community.sh` signs the app with the persistent community certificate, rebuilds the DMG/updater archive, and verifies both containers.
-5. The workflow creates a draft Release first. It must pass `scripts/verify-macos-community-signature.sh` and verify all four release assets before publishing. Manual `workflow_dispatch` runs are verification-only and never publish.
-6. Watch the run: `gh run watch -R ZASENJC/ttree` (or check https://github.com/ZASENJC/ttree/actions). Confirm the published Release lists `latest.json` + the signed `.tar.gz`/`.sig` assets.
-7. Installed apps auto-check for updates on startup and every 6h, hitting the network only once ≥7 days since the last check; users install from 设置 → 通用. New installs get the latest Release immediately.
-
-**Updater-signing prerequisites (already done, do not repeat):** signing keys live at `~/.config/ttree-updater/` on this machine; the public key is in `tauri.conf.json` and the private key is in the `TAURI_SIGNING_PRIVATE_KEY` repo secret. The private key **must carry a strong passphrase**: without a second factor, anyone who exfiltrates the key can sign an updater package that installed apps auto-accept (RCE). The passphrase lives in macOS Keychain (account `updater-signing-password`, service `com.samwstu.ttree`) for local builds and in the `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secret for CI. To build a signed update locally instead of via CI: `source ./scripts/signing-env.sh && ./scripts/package-macos-community.sh` — the environment loader reads the passphrase from Keychain, while the package script withholds the key from the Tauri build and exposes it only to the updater signer. If the key was ever stored unencrypted, rotate it: generate a new rsign/minisign keypair with a passphrase, update `tauri.conf.json` pubkey, and ship one release on the old key that bumps users to the new key.
-
-**Community code-signing prerequisites (configured July 2026):** the persistent certificate is `TTREE Open Source Code Signing`, SHA-1 `B8D254561BB6CAD78AA71FA18D62A32D10F50C08`. Local encrypted material lives under `~/.config/ttree-code-signing/`; its password is stored in Keychain account `community-code-signing-password`, service `com.samwstu.ttree`. CI secrets contain only `MACOS_COMMUNITY_CERTIFICATE` and `MACOS_COMMUNITY_CERTIFICATE_PASSWORD`; the expected identity and SHA-1 are pinned literals in the workflow and release scripts and must never be secret-overridable. Never commit, print, rotate, recreate, or replace the certificate/private key. Losing or rotating it changes the TCC identity and forces every user to reauthorize Screen Recording.
-
-### macOS Code Signing and Screen Recording TCC
-
-This is a release-critical invariant. macOS Screen Recording permission is attached to the app's code signing designated requirement, not just its display name, path, or `CFBundleIdentifier`.
-
-- Screenshot OCR must keep using Apple's native free-selection command `/usr/sbin/screencapture -i -x -r`, followed by Apple Vision OCR. Do not replace it with a custom Tauri selection window, CoreGraphics overlay, or a different screenshot architecture merely to address a permission prompt.
-- The failure mode seen in July 2026 was an unsigned release bundle whose executable only had a linker-generated ad-hoc signature. Its identity looked like `Identifier=ttree-<hash>`, `TeamIdentifier=not set`, `Info.plist=not bound`, and `designated => cdhash ...`. Every rebuild changed the CDHash, so System Settings could show TTREE as enabled for the old build while the new build was denied and asked again.
-- Tauri updater minisign keys and macOS code-signing certificates solve different problems. A valid `.tar.gz.sig` does not give the `.app` a stable macOS identity and does not preserve TCC permissions; both signing layers are required.
-- The current GitHub release mode is community-signed, not Apple-notarized. Every distributed build must use the same `TTREE Open Source Code Signing` certificate and the explicit designated requirement `identifier "com.samwstu.ttree" and certificate leaf = H"b8d254561bb6cad78aa71fa18d62a32d10f50c08"`.
-- Never publish when `codesign --verify --deep --strict` fails, `Signature=adhoc`, the authority/fingerprint differs, `Info.plist` is not bound, sealed resources are absent, or the designated requirement is identifier-only/`cdhash`-based. Run `scripts/verify-macos-community-signature.sh` as the hard gate.
-- Gatekeeper rejection by `spctl` is expected because the community certificate is not Apple-notarized. Release notes and README must instruct first-time users to use System Settings → Privacy & Security → Open Anyway, then grant Screen & System Audio Recording and restart TTREE.
-- `workflow_dispatch` must build/upload temporary verification artifacts only. Only a pushed `v*` tag matching `package.json` may create a draft Release, and the draft may publish only after asset verification.
-- A development build working is insufficient. For permission regression testing, install packaged build A, authorize Screen Recording once, then create packaged build B with a different CDHash but the same certificate-backed designated requirement. Install B without calling `tccutil reset`; OCR must work without another permission prompt.
-- Migrating users from an old ad-hoc build to the first community-signed build may require removing/resetting the stale TTREE Screen Recording entry and authorizing once. Later builds signed by the same identity must retain permission.
-- A custom ad-hoc requirement may be used only for contained local diagnosis. It is not secure against bundle-ID impersonation and must never be distributed or used as the production fix.
-- If the project later joins Apple Developer Program, Developer ID + notarization may replace community signing, but that is an intentional identity migration requiring its own user reauthorization plan. Do not silently mix or switch signing modes.
-
-## Architecture
-
-### Tauri / Rust backend
-
-`src-tauri/src/lib.rs` is the backend composition point. It registers plugins, commands, global shortcuts, tray setup, macOS vibrancy, and the blur-to-hide window behavior.
-
-Important backend modules:
-
-- `commands.rs` exposes Tauri commands used by the Svelte frontend:
-  - translation (Google / Bing one-shot, or OpenAI streaming)
-  - AI chat (`chat`, `get/set_chat_ai_config`) — separate config from translation
-  - screenshot OCR（Apple 原生 `screencapture` 自由框选 + Vision OCR）
-  - show main window
-  - get/set OpenAI translation config, get/set appearance config
-  - get/set shortcut config, `set_shortcut_recording` (suppresses global shortcuts during key capture)
-  - `get_pinned` / `set_pinned` — window always-on-top + blur-no-hide toggle
-  - chat history: `load_chat_history`, `load_conversations`, `start_new_conversation`, `append_chat_history`, `clear_chat_history`
-- `shortcut.rs` builds the global shortcut plugin and dispatches five registered shortcuts: `toggle` (show/hide window, emits `trigger-translate` on show to reset the frontend to the translate view), `ocr` (screenshot OCR), `ai_dialog` (open AI chat), `selection_translate` (capture selected text and translate), and `selection_ai_dialog` (capture selected text and send to AI). All are optional. Two pairs may intentionally share the same key — `toggle`↔`selection_translate` and `ai_dialog`↔`selection_ai_dialog`; on collision the selection action wins (dispatch order in `ParsedShortcuts::entries` lists selection actions first), so a shared key runs the selection behavior when text is selected and falls back to the plain toggle/dialog otherwise. All other key collisions are rejected at validation. Startup uses persisted shortcut config; saving validates, unregisters existing shortcuts, and registers the deduplicated set immediately.
-- `config.rs` owns persisted config models (`OpenAiConfig`, `ChatAiConfig`, `ShortcutConfig`, `AppearanceConfig`) and store reads/writes through `tauri-plugin-store`. Translation and chat use separate AI config entries; each carries its own optional prompt (`translate_prompt`, `chat_prompt`). `ShortcutConfig` holds five independently-optional shortcuts: `toggle`, `ocr`, `ai_dialog`, `selection_translate`, `selection_ai_dialog` (empty string disables one). **API keys never touch the store** — `config` reads/writes them through `keychain`. `save_openai`/`save_chat_ai` validate `base_url` (must be http(s), rejects `file:`/`data:`) and after a successful Keychain write they also delete any leftover legacy plaintext `api_key` key from the store. `Debug` impls redact `api_key`. Window size is persisted too, but debounced (500ms) and written on a blocking thread because `WindowEvent::Resized` fires dozens of times/second during a drag.
-- `keychain.rs` wraps macOS Keychain generic-password items (`security-framework`). Service is the bundle id `com.samwstu.ttree`; accounts are `openai.api_key` / `chat_ai.api_key`. `get_secret` returns `Ok(None)` for a missing item (first-use); non-macOS is a compile-gated stub that errors. `config::load_secret_migrated` does a one-time plaintext→Keychain migration: if the Keychain has nothing but the old store key still holds a plaintext value, it copies the value into the Keychain and clears the store copy.
-- `history.rs` persists AI chat history as line-delimited JSON (`chat-history.jsonl`, a separate file from `settings.json`). Append-only writes (one line per message, single `write_all` per round), a `static Mutex` serializes all read/append/clear, and a single corrupt line is skipped rather than aborting the parse. Conversations are split by `{"type":"session_start"}` markers (`#[serde(untagged)]` so legacy `{"role","content"}` lines still parse); `Conversation.summary` is the first user line truncated to 40 chars. `read_conversations` returns old→new; `read_all` flattens to a message stream for backward compatibility.
-- `window.rs` centralizes main-window show/hide/focus behavior. The app keeps the window hidden instead of destroying it for instant recall.
-- `translate/mod.rs` dispatches by `Engine` (`openai`/`google`/`bing`), owns a shared pooled `reqwest::Client` (two instances: default, and one with a cookie jar for Bing's token dance), and disables redirects (SSRF guard — OpenAI-compatible POSTs are single-hop, so 3xx can't bounce an `api_key`-bearing request to an internal host). It also defines `ChatMessage` and `validate_messages` — the IPC-boundary guard (role whitelist `user`/`assistant`/`system`, 64 KiB per message, ≤200 messages) applied to both `chat` and `append_chat_history`.
-- `translate/google.rs` calls the free `translate.googleapis.com` endpoint and parses its nested array response.
-- `translate/bing.rs` calls the free `bing.com/ttranslatev3` endpoint. Bing needs a one-shot token (IG / IID / key / token) scraped from the translator page's HTML before POSTing, so it uses the cookie-store client and a browser User-Agent. Unofficial endpoint — may break or rate-limit.
-- `translate/openai.rs` streams OpenAI-compatible SSE responses and emits `translate-chunk` (translation) or `chat-chunk` (AI chat) events to the frontend.
-- `selection/macos.rs` captures the currently selected text via the macOS Accessibility API; falls back to a temporary `Cmd+C` + clipboard read if Accessibility fails. Non-macOS returns `None`.
-- `screenshot.rs` invokes `/usr/sbin/screencapture -i -x -r` for Apple's native interactive free-selection UI, writes the selected region to a unique temporary PNG, and treats Esc/no file as cancellation. `commands::screenshot_ocr` sends that PNG to Vision and removes it afterward.
-- `ocr/vision.rs` performs macOS-native OCR with Apple Vision (`VNRecognizeTextRequest`).
-- `tray.rs` creates the menu bar tray menu (`翻译`, `设置`, `退出`).
-
-### Svelte frontend
-
-`src/App.svelte` holds two pieces of main-window view state: `view` (`main` / `settings`) and, within `main`, `mode` (`translate` / `chat`). On mount it loads chat history + appearance config, reads the current version, and kicks off the update auto-check. It listens for five backend events: `open-settings`, `trigger-translate`, `trigger-ocr`, `trigger-selected-translate`, `trigger-ai-dialog`. Screenshot selection is owned by the native macOS service; there is no screenshot-selection frontend window.
-
-Important frontend areas:
-
-- `src/lib/components/TranslatePanel.svelte` is the main spotlight UI. It handles Enter-to-translate, Esc-to-hide, engine/language selectors, and the dual-column result view (web translation + AI translation shown side by side).
-- `src/lib/views/ChatPanel.svelte` is the AI chat view. It sends multi-turn messages, streams the assistant reply via `chat-chunk`, and surfaces the conversation-history sidebar.
-- `src/lib/stores/translation.svelte.ts` owns translation state, including two web engines (`google`/`bing`) switchable via `WEB_ENGINES` and an adaptive target (default) that calls `resolveAdaptiveTarget` — CJK-containing input → English, otherwise → Chinese.
-- `src/lib/stores/chat.svelte.ts` owns chat state and orchestrates history. `sendText`/`reset` drive the AI-dialog flow; `recentChatContext` (from `chatContext.ts`) trims to the last 24 messages and drops leading orphan assistant turns before sending.
-- `src/lib/stores/appearance.svelte.ts` applies panel opacity to a `--panel-opacity` CSS var on `document.documentElement`. The opacity min (0.35) is intentionally kept in sync with `config.rs::PANEL_OPACITY_MIN` so frontend/backend clamping agree.
-- `src/lib/stores/update.svelte.ts` drives the in-app updater. It checks on startup if ≥7 days since the last check (persisted in `settings.json` as `update.last_check`), re-checks every 6h while running, and only re-stamps the timestamp on `uptodate`/`error` (so an available-but-uninstalled update survives). Download → install → `relaunch()`.
-- `src/lib/stores/languages.ts` holds the language list, the `adaptive` 中⇄英 target, and `resolveAdaptiveTarget` (script-based).
-- The `.svelte.ts` stores (`translation`, `chat`, `appearance`, `update`) use the `.svelte.ts` extension because they contain Svelte 5 runes (`$state`). Do not move rune-based stores back to plain `.ts`; doing so leaves `$state` uncompiled and causes a runtime white screen. (`chatContext.ts` / `languages.ts` / `shortcuts.ts` are plain modules with no runes.)
-- `src/lib/shortcuts/shortcutRecorder.ts` is a pure utility that converts keyboard events into Tauri-style shortcut strings. It has a Vitest unit test (`shortcutRecorder.test.ts`).
-- `src/lib/api/tauri.ts` is the frontend boundary for all `invoke` calls and event subscriptions. `Engine` here is the string union `"openai" | "google" | "bing"`, matching the Rust `Engine` enum's `rename_all = "lowercase"`.
-- `src/lib/views/Settings.svelte` edits OpenAI config, chat config, custom shortcuts, autostart, panel opacity, and exposes the updater (check/download/install). It temporarily pins the window on enter and restores the prior pin state on leave.
-- Styling is based on CSS custom properties in `src/styles/tokens.css` plus global rules in `src/styles/global.css`.
-
-## Runtime Notes
-
-- Screenshot OCR requires macOS Screen Recording permission. In dev mode the permission prompt may refer to the terminal or dev binary, so dev success does not validate a release package. Packaged builds must keep the certificate-pinned community designated requirement unchanged across updates. Selected-text capture is separate: it prefers Accessibility permission and falls back to a temporary copy.
-- OpenAI translation results stream via the `translate-chunk` event; AI chat streams via `chat-chunk`; Google and Bing return a complete string from the `translate` command.
-- When the window is pinned (`set_pinned`), it stays always-on-top and does not auto-hide on blur.
-- The Google and Bing endpoints are unofficial free endpoints and may be rate-limited or break (Bing scrapes a token from HTML, which is especially fragile).
-- API keys live in the macOS Keychain, not the plaintext store. The store holds only non-sensitive config; the only trace of keys is transiently during the one-time plaintext→Keychain migration.
-
-## Current Caveats
-
-- The README may lag behind implementation details; check `config.rs`, `shortcut.rs`, and `Settings.svelte` for the current shortcut behavior. (It also still claims API keys are plaintext and only two engines exist — both outdated; trust the code.)
-- Rust unit tests cover: native screenshot command flags, translation response/token parsing (Google, Bing), SSE parsing (OpenAI), selection text normalization, message validation, chat-history JSONL parsing + summary truncation + conversation splitting, and base_url normalization. `scripts/tests/verify-macos-community-signature.test.sh` and `scripts/tests/release-workflow.test.sh` cover the release identity/workflow contract. Frontend unit tests cover the shortcut recorder (`shortcutRecorder.test.ts`), chat-context trimming (`chatContext.test.ts`), and the language list / adaptive target (`languages.test.ts`); no component-level test suite yet.
+- 固定证书 `TTREE Open Source Code Signing`，SHA-1 `B8D254561BB6CAD78AA71FA18D62A32D10F50C08`。绝不打印、重建、替换、轮换、提交该证书或私钥；不得用 Secret 覆盖预期身份或指纹。
+- 固定 designated requirement：`identifier "com.samwstu.ttree" and certificate leaf = H"b8d254561bb6cad78aa71fa18d62a32d10f50c08"`。录屏 TCC 依赖它，不能退化为 ad-hoc、identifier-only 或 CDHash 要求。
+- 每个最终 `.app` 以及 DMG/归档中的 `.app` 必须通过 `scripts/macos/verify-signature.sh`（deep + strict、证书 Authority、绑定的 Info.plist、资源封印、指定要求）。禁止失败后发布。
+- Apple 原生截图必须保持 `/usr/sbin/screencapture -i -x -r` + Vision；不得以解决权限为由改造为自绘选择窗口。
+- 社区签名不等于 Apple 公证；`spctl` 拒绝并不能代替上述签名验证。README/Release 须保留“隐私与安全性 → 仍要打开”、录屏授权及重启说明。
+- updater minisign 与 macOS 签名是两层独立保证，均须保留。更新私钥必须加密且口令至少 16 字符，只在打包后的 signer 步骤接收密钥；编译阶段不得暴露签名材料。
+- 本机加密材料在 `~/.config/ttree-code-signing/` 和 `~/.config/ttree-updater/`，口令从既有 Keychain 项读取。CI 使用已有的四项证书/更新签名 Secrets，详见 [发布指南](docs/releasing.md)。
+- TCC 跨升级实测需安装 A、授权一次、再安装 CDHash 不同但同证书的 B，不执行 `tccutil reset`，确认 OCR 不再提示。普通编译或签名检查不等于完成此实测。

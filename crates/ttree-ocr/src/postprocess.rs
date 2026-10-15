@@ -133,7 +133,10 @@ pub fn score_ocr_text(text: &str) -> i64 {
             score += 3;
         } else if ch.is_alphabetic() {
             score += 3;
-        } else if matches!(ch, '.' | ',' | '-' | '_' | '/' | ':' | ';' | '?' | '!' | '\'' | '"') {
+        } else if matches!(
+            ch,
+            '.' | ',' | '-' | '_' | '/' | ':' | ';' | '?' | '!' | '\'' | '"'
+        ) {
             score += 1;
         } else if ch.is_whitespace() {
             // 不加分也不扣分
@@ -151,7 +154,9 @@ mod tests {
 
     #[test]
     fn strips_spaces_between_cjk_words_while_preserving_english_spaces() {
-        let words = vec!["这", "是", "Windows", "原", "生", "OCR", "Test", "engine", "！"];
+        let words = vec![
+            "这", "是", "Windows", "原", "生", "OCR", "Test", "engine", "！",
+        ];
         assert_eq!(join_ocr_words(&words), "这是Windows原生OCR Test engine！");
     }
 

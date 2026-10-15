@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc">
+<title id="title">两个原生客户端，一个共享内核</title><desc id="desc">apps/macos 和 apps/windows 分开维护界面，共同使用 crates 内的翻译、AI、配置、历史记录、OCR 与系统适配。此图为目录示意。</desc>
+<rect width="1200" height="600" rx="32" fill="#f5f5f7"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,PingFang SC,Microsoft YaHei,sans-serif" text-anchor="middle">
+<text x="600" y="72" font-size="32" font-weight="700" fill="#1d1d1f">各有风格。共享内核。</text>
+<text x="600" y="108" font-size="17" fill="#6e6e73">平台交互，分开打磨。共同能力，一起向前。</text>
+<rect x="100" y="153" width="450" height="143" rx="24" fill="white"/>
+<rect x="650" y="153" width="450" height="143" rx="24" fill="white"/>
+<text x="325" y="202" font-size="26" font-weight="600" fill="#1d1d1f">macOS</text>
+<text x="325" y="237" font-size="18" fill="#6e6e73">AppKit · Apple Vision</text>
+<text x="325" y="272" font-size="15" fill="#86868b">apps/macos</text>
+<text x="875" y="202" font-size="26" font-weight="600" fill="#1d1d1f">Windows</text>
+<text x="875" y="237" font-size="18" fill="#6e6e73">Win32 · Windows OCR</text>
+<text x="875" y="272" font-size="15" fill="#86868b">apps/windows</text>
+<path d="M325 296v40h550v-40M600 336v35" fill="none" stroke="#b8b8bd" stroke-width="3"/>
+<rect x="100" y="371" width="1000" height="157" rx="24" fill="#e8e8ed"/>
+<text x="600" y="415" font-size="25" font-weight="600" fill="#1d1d1f">共享 Rust 能力</text>
+<text x="600" y="455" font-size="18" fill="#424245">翻译与 AI　·　配置与历史　·　语言与消息　·　OCR 与系统适配</text>
+<text x="600" y="496" font-size="15" fill="#6e6e73">crates /　 一份业务逻辑，两端同步演进</text>
+<text x="600" y="570" font-size="13" fill="#86868b">工作区结构示意 · 非应用界面</text>
+</g></svg>

@@ -8,16 +8,22 @@
 
 pub mod postprocess;
 pub mod preprocess;
+#[cfg(any(target_os = "macos", test))]
+#[path = "macos/screenshot.rs"]
 pub mod screenshot;
 
 #[cfg(target_os = "macos")]
+#[path = "macos/image.rs"]
 pub mod image;
 #[cfg(target_os = "macos")]
+#[path = "macos/vision.rs"]
 pub mod vision;
 
 #[cfg(target_os = "windows")]
+#[path = "windows/windows_capture.rs"]
 pub mod windows_capture;
 #[cfg(target_os = "windows")]
+#[path = "windows/windows_ocr.rs"]
 pub mod windows_ocr;
 
 use serde::{Deserialize, Serialize};
@@ -108,4 +114,3 @@ pub fn recognize_file(path: &str) -> Result<OcrOutcome, String> {
 pub fn recognize_file(_path: &str) -> Result<OcrOutcome, String> {
     Err("当前平台暂不支持 OCR".to_string())
 }
-

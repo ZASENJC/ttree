@@ -1,138 +1,87 @@
-# TTREE
+<p align="center"><img src="assets/icons/128x128.png" width="80" alt="TTREE 图标"></p>
+<h1 align="center">TTREE</h1>
+<p align="center"><strong>让语言退后。让想法向前。</strong></p>
+<p align="center">翻译。截图识字。与 AI 对话。<br>轻轻唤起，接着思考。</p>
+<p align="center"><a href="https://github.com/ZASENJC/ttree/releases/latest">下载正式版</a> · <a href="https://github.com/ZASENJC/ttree/releases">探索新版本</a> · <a href="docs/development.md">参与开发</a></p>
 
-> 轻量 macOS AI 翻译器。快捷键秒级呼出，截图 OCR、划词翻译、AI 对话，多引擎流式输出。
+<p align="center"><img src="docs/images/product.png" width="1200" alt="TTREE Mac 与 Windows 界面渲染示意：原文、免费译文和 AI 译文在同一窗口呈现"></p>
+<p align="center"><sub>macOS 与 Windows · 界面渲染示意</sub></p>
 
-基于 **Tauri 2 + Svelte 5 + Rust** 构建：窗口隐藏而非销毁，保证快捷键瞬时召回；macOS 端 OCR 直接调用系统 Vision 框架，划词捕获走原生 Accessibility，零重型依赖。
+## 一个快捷键，回到心流。
 
----
+阅读到一半，遇到另一种语言。选中它，或截下它。TTREE 随即出现，把译文带到眼前。按下 Esc，继续刚才的事。
 
-## ✨ 功能
+默认使用 **⌘ ⇧ Space**（Mac）或 **Ctrl ⇧ Space**（Windows）呼出。窗口隐藏时，仍在等待下一次需要。
 
-- **快捷键呼出翻译** — 默认 `⌘⇧Space` 呼出/收起窗口，输入文本回车翻译，`Esc` 收起，失焦自动隐藏
-- **截图 OCR 翻译** — `⌘⇧S` 框选屏幕区域，调用 macOS 原生 **Vision** 框架识别文字并自动翻译（按系统实际支持配置中/英/日等语言，截图先规范化为 8-bit sRGB 位图，失败时自动兼容重试）
-- **划词翻译 / 划词 AI** — 选中任意应用内的文本，一键翻译或发送给 AI（基于 macOS Accessibility，未授权时回退到临时复制并恢复剪贴板）
-- **AI 对话模式** — 独立于翻译的多轮对话，支持自定义 system 提示词
-- **自动免费翻译** — Google / 微软必应无需 key，健康服务轮询分流；超时、限流、空响应或服务异常时自动切换，故障服务冷却 30–300 秒后恢复尝试，长文本自动分块
-- **OpenAI 兼容翻译** — 流式逐字输出，可配置 base_url / api_key / 模型 / 翻译提示词
-- **双栏对照** — 网页译文与 AI 译文并列展示，免费译文统一显示为“翻译”，可分别复制结果
-- **固定窗口** — 置顶且失焦不隐藏，方便对照查阅
-- **自定义快捷键** — 五个动作均可独立配置，支持「呼出」与「划词」共用同一组合键（有选中文本时执行划词）
-- **系统托盘 + 开机自启**（可选）
-- 毛玻璃磨砂界面，明暗主题自适应
+## 看得懂。也聊得开。
 
-## ⌨️ 快捷键
+**文字，从画面里走出来。** 按下 **⌘ ⇧ S** 或 **Ctrl ⇧ S**，框选屏幕上的文字，识别后接着翻译。Mac 使用 Apple Vision；Windows 使用系统 OCR。
 
-| 动作 | 默认 | 说明 |
-|------|------|------|
-| 呼出 / 收起翻译窗口 | `⌘⇧Space` | 显示时自动复位到翻译页 |
-| 截图 OCR 翻译 | `⌘⇧S` | 框选区域 → Vision 识别 → 自动翻译 |
-| 呼出 AI 对话 | —（可在设置配置） | 独立对话模式 |
-| 划词翻译 | —（可在设置配置） | 捕获选中文本直接翻译 |
-| 划词 AI 对话 | —（可在设置配置） | 捕获选中文本发送给 AI |
+**两份译文，一眼对照。** Google 与 Bing 提供免费翻译，遇到服务异常自动切换。打开 AI 翻译，还能在同一个窗口里比较另一种表达。
 
-所有快捷键均可在设置中自定义，留空即禁用；必须包含 `Cmd/Ctrl/Option` 中的至少一个修饰键。
+**顺着想法，聊下去。** 切换到 AI 对话，保留上下文，继续追问。翻译与对话各自拥有模型和提示词设置。
 
-## 📥 安装
+**模型，由你选择。** 连接 OpenAI 兼容服务、Ollama 或本地模型服务；也可按需下载内置 HY-MT 翻译模型。模型文件独立下载，不占用安装包。
 
-GitHub Release 使用项目固定的社区代码签名证书，但没有经过 Apple 公证。首次安装时 macOS 显示“无法验证开发者”是社区签名包的预期行为。
+## 两个平台。一样顺手。
 
-1. 从本仓库的 GitHub Release 下载 DMG，将 TTREE 拖入“应用程序”。
-2. 首次打开若被阻止，进入 **系统设置 → 隐私与安全性**，找到 TTREE 提示并选择 **仍要打开**。
-3. 按 `⌘⇧S` 使用截图 OCR，在系统提示中允许 **屏幕与系统音频录制**。
-4. 授权后完全退出并重新打开 TTREE。
+Mac 的轻盈，Windows 的熟悉。各自使用原生窗口和控件，共享翻译、对话与历史记录逻辑。
 
-后续版本使用同一张社区证书和固定 designated requirement 签名，正常情况下升级不会再次索要录屏权限。请勿安装使用相同 Bundle ID 的未知构建；从旧的临时签名版本迁移到首个社区签名版本时，可能需要清理旧权限记录并重新授权一次。
+| | macOS | Windows |
+| --- | --- | --- |
+| 原生界面 | AppKit · 系统毛玻璃 | Win32 · 系统明暗主题 |
+| 截图识字 | 原生自由框选 + Apple Vision | 原生框选 + Windows OCR |
+| 划词翻译 | Accessibility，必要时回退复制 | 临时复制并恢复剪贴板 |
+| 下载 | Universal DMG · Apple 芯片与 Intel | x64 ZIP · 解压即用 |
 
-## 📋 系统权限
+![共享能力与双平台目录关系](docs/images/workspace.svg)
 
-首次使用相关功能时，macOS 会弹出授权请求，请在 **系统设置 → 隐私与安全性** 中开启：
+## 准备好，开始。
 
-| 权限 | 用途 |
-|------|------|
-| **屏幕录制** | 截图 OCR |
-| **辅助功能（Accessibility）** | 划词翻译 / 划词 AI（捕获选中文本）|
+### 在 Mac 上
 
-> 开发模式下授权对象可能是终端或 dev 二进制，因此开发版可用不代表发布包的权限身份正确。
+1. [下载最新正式版](https://github.com/ZASENJC/ttree/releases/latest)中的 `TTREE_*_universal.dmg`，将 TTREE 拖入“应用程序”。
+2. 首次打开若被拦截，进入 **系统设置 → 隐私与安全性 → 仍要打开**。
+3. 使用截图翻译时，授予 **屏幕与系统音频录制** 权限，随后完全退出并重新打开 TTREE。划词翻译可按需授予 **辅助功能** 权限。
 
-## 🚀 开发
+Mac 发行包沿用固定社区证书签名，尚未经过 Apple 公证。同一证书用于后续升级，以维持录屏权限身份。旧临时签名版本迁移时，可能需要重新授权一次。
 
-**前置**：Node.js 20+、Rust（stable）、Xcode Command Line Tools。
+### 在 Windows 上
 
-```bash
-npm run ci:install   # 按 lockfile 安装；禁用任意 lifecycle 脚本，仅重建 esbuild/fsevents
-npm run tauri dev    # 启动开发模式
+1. 下载 `TTREE_*_windows_x64.zip`，解压到固定目录。
+2. 运行文件夹里的 `TTREE.exe`。窗口默认隐藏，按 **Ctrl ⇧ Space** 呼出，也可使用托盘菜单。
+3. OCR 需要系统安装相应语言的文字识别组件；缺少语言时按应用提示补充。
+
+Windows 包为未使用商业证书签名的便携版，首次运行可能遇到 SmartScreen 提示。请核对下载来源及附件 `SHA256SUMS`。启用开机自启后，请保留解压目录。
+
+### 几个顺手的动作
+
+| 动作 | Mac | Windows |
+| --- | --- | --- |
+| 呼出 / 收起 | ⌘ ⇧ Space | Ctrl ⇧ Space |
+| 截图翻译 | ⌘ ⇧ S | Ctrl ⇧ S |
+| 发送 / 翻译 | Enter | Enter |
+| 换行 | Shift + Enter | Shift + Enter |
+| 收起窗口 | Esc | Esc |
+
+AI 对话、划词翻译、划词 AI 的快捷键可在设置中配置。点按置顶，让窗口留在身边。
+
+## 给创作者，留好空间。
+
+一个 Cargo 工作区，两套原生界面。共享功能修改一次；平台交互在各自目录里打磨。
+
+```text
+apps/macos/       Mac 界面与交互
+apps/windows/     Windows 界面与交互
+crates/           翻译、AI、配置、历史、OCR 与系统适配
+scripts/macos/    Mac 打包与签名
+scripts/windows/ Windows 打包与启动验证
+scripts/release/ 双平台发布与附件校验
+docs/            开发、发布说明与图片
 ```
 
-> Tauri 主窗口配置为 `visible: false`，开发模式下启动可能看不到窗口——用默认快捷键 `⌘⇧Space` 呼出。
+开发入口：`cargo run -p ttree-macos -- --show`（Mac），`cargo run -p ttree-windows -- --show`（Windows）。完整依赖与检查命令见[开发指南](docs/development.md)。
 
-仅启动前端（无后端）：
+推送到 `main`，自动构建两个平台并发布预发布版；推送匹配工作区版本的 `vX.Y.Z` 标签，验证后发布正式版。其他分支与 PR 只验证。[查看发布流程](docs/releasing.md) · [查看构建状态](https://github.com/ZASENJC/ttree/actions/workflows/build.yml)。
 
-```bash
-npm run dev
-```
-
-## 📦 构建
-
-```bash
-npm run tauri build    # 产出 .app 与 .dmg
-```
-
-产物位于 `src-tauri/target/release/bundle/`（含 `bundle/macos/TTREE.app` 与 `bundle/dmg/*.dmg`）。
-
-普通 `tauri build` 只用于本地开发，不能直接作为 GitHub 发布包。社区发布由 GitHub Actions 调用 `scripts/package-macos-community.sh`，用固定证书和 designated requirement 重签 `.app`，再重建并验证 DMG、updater archive、`.sig` 与 `latest.json`。手动触发 `release` workflow 只上传 7 天保留的临时验证产物；只有推送与 `package.json`、`tauri.conf.json` 版本都一致的 `v*` tag 才可能发布 Release。
-
-## 🏗️ 架构
-
-```
-src-tauri/src/            Rust 后端
-├── lib.rs                插件注册、毛玻璃、失焦隐藏、setup
-├── commands.rs           暴露给前端的 Tauri 命令
-├── config.rs             配置读写（tauri-plugin-store）
-├── shortcut.rs           全局快捷键注册与分发（含冲突校验）
-├── window.rs             窗口显示/隐藏/居中/聚焦/固定
-├── tray.rs               系统托盘菜单
-├── screenshot.rs         screencapture -i 区域截图
-├── ocr/image.rs          ImageIO 解码 / 8-bit sRGB 规范化 / 小截图边距
-├── ocr/vision.rs         Apple Vision OCR（有效语言组合 / 旧模型回退）
-├── selection/macos.rs    划词捕获（Accessibility + 剪贴板回退）
-└── translate/
-    ├── mod.rs            引擎分发 + 共享 HTTP 客户端
-    ├── auto.rs           免费服务轮询 / 故障切换 / 冷却 / 长文本分块
-    ├── google.rs         谷歌免费端接口
-    ├── bing.rs           必应免费端接口（令牌抓取）
-    └── openai.rs         OpenAI 兼容 SSE 流式（翻译 + 对话）
-
-src/                      Svelte 5 前端（runes）
-├── App.svelte            翻译 / 对话 / 设置 路由
-├── lib/components/       TranslatePanel / EngineTabs / LangSelector / ResultView
-├── lib/views/            ChatPanel / Settings
-├── lib/stores/           translation / chat（.svelte.ts runes）/ languages
-├── lib/shortcuts/        快捷键录制工具（shortcutRecorder）
-└── lib/api/tauri.ts      invoke / event 封装
-```
-
-## ✅ 测试与检查
-
-```bash
-# Rust
-cd src-tauri && cargo test          # 翻译解析 / SSE / 快捷键 / 划词 / 真实 PNG Vision OCR
-cd src-tauri && cargo clippy -- -D warnings
-
-# 前端
-npm test          # Vitest（快捷键录制器）
-npm run check     # svelte-check 类型检查
-```
-
-macOS OCR 回归测试会通过 Xcode Command Line Tools 的 Swift 在临时目录生成样例，并真正执行 ImageIO 和 Vision；覆盖单行、灰度、16-bit、透明图片以及中英混排。
-
-## ⚠️ 说明与限制
-
-- 免费翻译自动在谷歌 / 微软必应之间分流和切换；两者都是**非官方免费端点**，同时不可用时会提示稍后重试。OpenAI 兼容接口需自备 API Key。
-- OCR 保留 Apple 原生自由框选；截图期间临时隐藏主窗口，重复触发会被忽略。中文识别只与英文组合；截图经 ImageIO 解码后绘制成 8-bit sRGB 位图，小截图加边距。识别失败或无文字时用旧版 Vision 模型在 CPU 上重试，取消框选不会显示为识别失败。
-- API Key 存储在 macOS Keychain，不写入明文 Tauri store。
-- 仅支持 **macOS 11.0+**（依赖 Vision、Accessibility、screencapture 等系统框架）。
-- GitHub Release 是社区签名、非 Apple 公证包；首次安装需要在“隐私与安全性”中手动选择“仍要打开”。
-
-## 📄 许可证
-
-MIT
+<sub>免费翻译依赖非官方端点，可用性取决于服务。离线模型需单独下载，并满足对应硬件与模型许可条件。配置与对话历史保存在本机；当前 API Key 随本机 JSON 配置保存，请勿分享配置文件。纯 Rust 版本目前通过下载 Release 手动升级；发布保留旧版更新客户端所需的签名附件。macOS 包声明最低系统版本为 11.0；Windows 提供 x64 构建。MIT 开源，第三方图标许可见 assets/licenses。</sub>

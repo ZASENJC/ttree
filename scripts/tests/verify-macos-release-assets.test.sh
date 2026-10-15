@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-VERIFY="$ROOT_DIR/scripts/verify-macos-release-assets.sh"
+VERIFY="$ROOT_DIR/scripts/release/verify-macos-assets.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

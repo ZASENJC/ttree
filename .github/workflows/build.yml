@@ -1,0 +1,178 @@
+name: Build and release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.release.outputs.app_version }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      publish: ${{ steps.release.outputs.publish }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Validate release contracts
+        run: bash scripts/tests/run-release-tests.sh
+      - name: Resolve release metadata
+        id: release
+        run: python3 scripts/release/metadata.py --github-output "$GITHUB_OUTPUT"
+
+  macos:
+    needs: metadata
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Prepare Metal compiler
+        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-universal-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/**/Cargo.toml') }}
+          restore-keys: macos-universal-
+      - name: Check and test shared libraries and native apps
+        run: |
+          cargo check --workspace --locked
+          cargo test --workspace --locked
+      - name: Build universal app without signing material
+        run: scripts/macos/package.sh universal-apple-darwin "$GITHUB_RUN_NUMBER" --build-only
+      - name: Sign and verify distributable macOS assets
+        if: github.event_name != 'pull_request' && github.repository == 'ZASENJC/ttree'
+        env:
+          MACOS_COMMUNITY_CERTIFICATE: ${{ secrets.MACOS_COMMUNITY_CERTIFICATE }}
+          MACOS_COMMUNITY_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_COMMUNITY_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+          APP_VERSION: ${{ needs.metadata.outputs.app_version }}
+        run: |
+          brew list minisign >/dev/null 2>&1 || brew install minisign
+          scripts/macos/package.sh universal-apple-darwin "$GITHUB_RUN_NUMBER" --package-only
+          scripts/release/generate-manifest.sh dist/macos "$RELEASE_TAG" "$GITHUB_REPOSITORY"
+          scripts/release/verify-macos-assets.sh dist/macos "$RELEASE_TAG" "$GITHUB_REPOSITORY" "$APP_VERSION"
+          python3 scripts/release/checksums.py dist/macos --write macos.sha256
+      - name: Upload signed macOS assets
+        if: github.event_name != 'pull_request' && github.repository == 'ZASENJC/ttree'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/macos/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows:
+    needs: metadata
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-x64-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/**/Cargo.toml') }}
+          restore-keys: windows-x64-
+      - name: Check and test shared libraries and native apps
+        run: |
+          cargo check --workspace --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and validate portable ZIP
+        run: ./scripts/windows/package.ps1
+      - name: Launch packaged Windows app
+        run: ./scripts/windows/smoke.ps1 -Exe target/package/windows/TTREE/TTREE.exe -Output target/windows-smoke
+      - name: Record Windows checksums
+        run: python scripts/release/checksums.py dist/windows --write windows.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/windows/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Upload Windows smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/windows-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+  publish:
+    needs: [metadata, macos, windows]
+    if: needs.metadata.outputs.publish == 'true' && github.repository == 'ZASENJC/ttree'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      APP_VERSION: ${{ needs.metadata.outputs.app_version }}
+      RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+      PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/release
+      - name: Verify transferred assets and updater signature
+        env:
+          VERIFY_MACOS_CONTAINERS: '0'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y minisign
+          python3 scripts/release/checksums.py dist/release --check macos.sha256 --check windows.sha256
+          scripts/release/verify-macos-assets.sh dist/release "$RELEASE_TAG" "$GITHUB_REPOSITORY" "$APP_VERSION"
+          python3 scripts/release/verify-assets.py dist/release "$APP_VERSION"
+          rm dist/release/macos.sha256 dist/release/windows.sha256
+          python3 scripts/release/checksums.py dist/release --write SHA256SUMS
+      - name: Generate release notes and publish verified draft
+        run: scripts/release/publish.sh
