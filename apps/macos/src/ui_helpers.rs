@@ -125,7 +125,7 @@ pub fn pale_ink(alpha: f64) -> Retained<NSColor> {
             white as CGFloat,
             effective_alpha as CGFloat,
         );
-        NonNull::from(&*color)
+        NonNull::new(Retained::autorelease_ptr(color)).expect("NSColor pointer")
     });
     unsafe { NSColor::colorWithName_dynamicProvider(None, &block) }
 }
