@@ -62,7 +62,9 @@ const WS_VSCROLL: u32 = 0x00200000;
 const WS_BORDER: u32 = 0x00800000;
 
 const WS_EX_TOOLWINDOW: u32 = 0x00000080;
+const WS_EX_APPWINDOW: u32 = 0x00040000;
 const WS_EX_LAYERED: u32 = 0x00080000;
+const GWL_EXSTYLE: i32 = -20;
 
 const ES_MULTILINE: u32 = 0x0004;
 const ES_AUTOVSCROLL: u32 = 0x0040;
@@ -122,6 +124,8 @@ const HWND_NOTOPMOST: HWND = -2isize as HWND;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_FRAMECHANGED: u32 = 0x0020;
 
 const LWA_ALPHA: u32 = 0x00000002;
 const TRANSPARENT: i32 = 1;
@@ -212,6 +216,7 @@ const ID_BTN_UPDATE: usize = 428;
 const ID_CHK_AUTOSTART: usize = 425;
 const ID_BTN_SAVE_SETTINGS: usize = 426;
 const ID_BTN_HYMT_DELETE: usize = 427;
+const ID_CHK_NORMAL_WINDOW: usize = 429;
 
 const ID_TRAY_TRANSLATE: usize = 901;
 const ID_TRAY_OCR: usize = 902;
@@ -649,6 +654,7 @@ struct Win32AppState {
     cmb_opacity: HWND,
     chk_ocr_newline: HWND,
     chk_autostart: HWND,
+    chk_normal_window: HWND,
     btn_save_settings: HWND,
     lbl_settings_status: HWND,
 }
@@ -727,7 +733,13 @@ pub fn run() {
 
         let title = wide_null("TTREE");
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_COMPOSITED,
+            WS_EX_LAYERED
+                | WS_EX_COMPOSITED
+                | if settings.appearance().normal_window_mode {
+                    WS_EX_APPWINDOW
+                } else {
+                    WS_EX_TOOLWINDOW
+                },
             class_name.as_ptr(),
             title.as_ptr(),
             WS_OVERLAPPED | WS_THICKFRAME | WS_CLIPCHILDREN,
@@ -903,6 +915,7 @@ pub fn run() {
             cmb_opacity: ptr::null_mut(),
             chk_ocr_newline: ptr::null_mut(),
             chk_autostart: ptr::null_mut(),
+            chk_normal_window: ptr::null_mut(),
             updater: Default::default(),
             update_view: Default::default(),
             btn_update: ptr::null_mut(),
@@ -1507,6 +1520,14 @@ impl Win32AppState {
             ID_CHK_AUTOSTART,
             false,
         );
+        self.chk_normal_window = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "普通窗口模式",
+            BS_AUTOCHECKBOX,
+            ID_CHK_NORMAL_WINDOW,
+            false,
+        );
         self.btn_update = self.create_ctrl(
             hinst,
             "BUTTON",
@@ -1670,6 +1691,7 @@ impl Win32AppState {
             self.cmb_opacity,
             self.chk_ocr_newline,
             self.chk_autostart,
+            self.chk_normal_window,
             self.btn_update,
             self.lbl_update,
         ]
@@ -2014,6 +2036,7 @@ impl Win32AppState {
                 self.cmb_opacity,
                 self.chk_ocr_newline,
                 self.chk_autostart,
+                self.chk_normal_window,
                 self.btn_update,
                 self.lbl_update,
             ],
@@ -2046,9 +2069,9 @@ impl Win32AppState {
             ID_SETTINGS_KEYS => 82 + row_h * 5 + 32 + 90,
             _ => {
                 if wide {
-                    490
+                    568
                 } else {
-                    530
+                    608
                 }
             }
         };
@@ -2278,9 +2301,13 @@ impl Win32AppState {
             }
             _ => {
                 let opacity_h = if wide { 84 } else { 112 };
-                bg.card(BoxRect::new(x, top, fw, opacity_h + 286), p);
+                bg.card(BoxRect::new(x, top, fw, opacity_h + 364), p);
                 form_row(self.lbl_opacity, self.cmb_opacity, top + 18, 32, &mut bg);
                 for (i, (c, description)) in [
+                    (
+                        self.chk_normal_window,
+                        "显示在任务栏和 Alt+Tab 中，切走时不收起",
+                    ),
                     (self.chk_ocr_newline, "合并识别文本中的段落换行"),
                     (self.chk_autostart, "登录 Windows 时自动启动"),
                 ]
@@ -2292,13 +2319,18 @@ impl Win32AppState {
                     place(c, x + inset, y + 15, fw - inset * 2, 26);
                     show(c);
                     bg.label(
-                        BoxRect::new(x + inset + 25, y + 44, fw - inset * 2 - 25, 18),
+                        BoxRect::new(
+                            x + inset + if c == self.chk_normal_window { 0 } else { 25 },
+                            y + 44,
+                            fw - inset * 2 - if c == self.chk_normal_window { 0 } else { 25 },
+                            18,
+                        ),
                         description,
                         true,
                         true,
                     );
                 }
-                let update_y = top + opacity_h + 168;
+                let update_y = top + opacity_h + 246;
                 place(self.btn_update, x + inset, update_y, 140, 32);
                 place(
                     self.lbl_update,
@@ -2381,6 +2413,66 @@ impl Win32AppState {
         );
         selection(self.active_tab, self.settings_section, pin);
         InvalidateRect(self.btn_pin, ptr::null(), 0);
+    }
+
+    unsafe fn apply_normal_window_mode(&self, enabled: bool) {
+        let current = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+        let style = (current & !(WS_EX_APPWINDOW | WS_EX_TOOLWINDOW))
+            | if enabled {
+                WS_EX_APPWINDOW
+            } else {
+                WS_EX_TOOLWINDOW
+            };
+        if current == style {
+            return;
+        }
+        let visible = IsWindowVisible(self.hwnd) != 0;
+        let focus = GetFocus();
+        // The shell updates taskbar membership when a window is hidden and shown.
+        // Do not use hide_window here: switching modes must keep active requests.
+        if visible {
+            ShowWindow(self.hwnd, SW_HIDE);
+        }
+        SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style as isize);
+        SetWindowPos(
+            self.hwnd,
+            ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        if visible {
+            ShowWindow(self.hwnd, SW_SHOW);
+            SetForegroundWindow(self.hwnd);
+            if !focus.is_null() {
+                SetFocus(focus);
+            }
+        }
+    }
+
+    unsafe fn save_normal_window_mode(&self) {
+        let mut cfg = self.settings.appearance();
+        let previous = cfg.normal_window_mode;
+        cfg.normal_window_mode =
+            SendMessageW(self.chk_normal_window, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
+        if let Err(error) = self.settings.save_appearance(cfg) {
+            SendMessageW(
+                self.chk_normal_window,
+                BM_SETCHECK,
+                if previous { BST_CHECKED } else { BST_UNCHECKED },
+                0,
+            );
+            set_hwnd_text(
+                self.lbl_settings_status,
+                &format!("保存窗口模式失败: {error}"),
+            );
+        } else {
+            self.apply_normal_window_mode(cfg.normal_window_mode);
+            set_hwnd_text(self.lbl_settings_status, "窗口模式已保存");
+        }
+        InvalidateRect(self.chk_normal_window, ptr::null(), 0);
     }
 
     unsafe fn show_and_focus(&mut self) {
@@ -2917,6 +3009,16 @@ impl Win32AppState {
         SendMessageW(self.cmb_opacity, CB_SETCURSEL, op_idx, 0);
 
         SendMessageW(
+            self.chk_normal_window,
+            BM_SETCHECK,
+            if app_cfg.normal_window_mode {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
+        SendMessageW(
             self.chk_ocr_newline,
             BM_SETCHECK,
             if app_cfg.ocr_strip_newlines {
@@ -3020,8 +3122,15 @@ impl Win32AppState {
         let app_cfg = AppearanceConfig {
             panel_opacity: opacity,
             ocr_strip_newlines: ocr_strip,
+            normal_window_mode: self.settings.appearance().normal_window_mode,
         };
-        let _ = self.settings.save_appearance(app_cfg);
+        if let Err(error) = self.settings.save_appearance(app_cfg) {
+            set_hwnd_text(
+                self.lbl_settings_status,
+                &format!("保存通用设置失败: {error}"),
+            );
+            return;
+        }
         let alpha = (opacity * 255.0).round() as u8;
         SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
 
@@ -3394,7 +3503,11 @@ unsafe extern "system" fn main_wnd_proc(
             let active_state = wparam & 0xFFFF;
             if active_state == WA_INACTIVE {
                 with_state(|st| {
-                    if !st.pinned && !st.ocr_in_flight && st.active_tab != TabMode::Settings {
+                    if !st.pinned
+                        && !st.settings.appearance().normal_window_mode
+                        && !st.ocr_in_flight
+                        && st.active_tab != TabMode::Settings
+                    {
                         st.hide_window();
                     }
                 });
@@ -3552,6 +3665,7 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
         }
         ID_BTN_OCR if code == BN_CLICKED => st.trigger_ocr(),
         ID_BTN_PIN if code == BN_CLICKED => st.set_pinned(!st.pinned),
+        ID_CHK_NORMAL_WINDOW if code == BN_CLICKED => st.save_normal_window_mode(),
 
         ID_EDIT_SOURCE if code == EN_CHANGE => {
             if !st.suppress_source_change {
