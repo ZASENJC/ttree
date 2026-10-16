@@ -11,6 +11,7 @@
 #![allow(non_snake_case, clippy::too_many_arguments)]
 
 mod dialogs;
+mod shortcut_recorder;
 mod ui;
 
 use crate::design::{BoxRect, TranslationLayout, SIDEBAR, TOOLBAR};
@@ -36,7 +37,9 @@ use ttree_core::{
 };
 use ttree_ocr::OcrOutcome;
 use ttree_platform::autostart;
-use ttree_platform::hotkey::{parse_shortcut_config, ParsedShortcuts, ShortcutAction};
+use ttree_platform::hotkey::{
+    parse_shortcut_config, register_shortcuts, ParsedShortcuts, ShortcutAction,
+};
 use ttree_platform::selection::capture_selected_text;
 use ttree_storage::{HistoryStore, SettingsStore};
 
@@ -62,7 +65,9 @@ const WS_VSCROLL: u32 = 0x00200000;
 const WS_BORDER: u32 = 0x00800000;
 
 const WS_EX_TOOLWINDOW: u32 = 0x00000080;
+const WS_EX_APPWINDOW: u32 = 0x00040000;
 const WS_EX_LAYERED: u32 = 0x00080000;
+const GWL_EXSTYLE: i32 = -20;
 
 const ES_MULTILINE: u32 = 0x0004;
 const ES_AUTOVSCROLL: u32 = 0x0040;
@@ -122,6 +127,8 @@ const HWND_NOTOPMOST: HWND = -2isize as HWND;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_FRAMECHANGED: u32 = 0x0020;
 
 const LWA_ALPHA: u32 = 0x00000002;
 const TRANSPARENT: i32 = 1;
@@ -212,6 +219,7 @@ const ID_BTN_UPDATE: usize = 428;
 const ID_CHK_AUTOSTART: usize = 425;
 const ID_BTN_SAVE_SETTINGS: usize = 426;
 const ID_BTN_HYMT_DELETE: usize = 427;
+const ID_CHK_NORMAL_WINDOW: usize = 429;
 
 const ID_TRAY_TRANSLATE: usize = 901;
 const ID_TRAY_OCR: usize = 902;
@@ -523,6 +531,7 @@ struct Win32AppState {
     history: Arc<HistoryStore>,
     hotkey_mgr: GlobalHotKeyManager,
     registered_hotkeys: Vec<HotKey>,
+    recording_shortcut: bool,
     parsed_shortcuts: ParsedShortcuts,
 
     hwnd: HWND,
@@ -649,6 +658,7 @@ struct Win32AppState {
     cmb_opacity: HWND,
     chk_ocr_newline: HWND,
     chk_autostart: HWND,
+    chk_normal_window: HWND,
     btn_save_settings: HWND,
     lbl_settings_status: HWND,
 }
@@ -668,6 +678,15 @@ fn with_state<F: FnOnce(&mut Win32AppState)>(f: F) {
 }
 
 pub fn run() {
+    let show_on_launch = crate::startup::should_show(std::env::args_os().skip(1));
+    let _instance = match crate::startup::acquire(show_on_launch) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(error) => {
+            crate::startup::report_error(&error);
+            return;
+        }
+    };
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -689,7 +708,7 @@ pub fn run() {
 
     unsafe {
         let hinstance = GetModuleHandleW(ptr::null());
-        let class_name = wide_null("TTreePureRustWin32MainClass");
+        let class_name = wide_null(crate::startup::WINDOW_CLASS);
         let colors = palette();
         let bg_brush = CreateSolidBrush(colors.bg);
         let surface_brush = CreateSolidBrush(colors.surface);
@@ -727,7 +746,13 @@ pub fn run() {
 
         let title = wide_null("TTREE");
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_COMPOSITED,
+            WS_EX_LAYERED
+                | WS_EX_COMPOSITED
+                | if settings.appearance().normal_window_mode {
+                    WS_EX_APPWINDOW
+                } else {
+                    WS_EX_TOOLWINDOW
+                },
             class_name.as_ptr(),
             title.as_ptr(),
             WS_OVERLAPPED | WS_THICKFRAME | WS_CLIPCHILDREN,
@@ -795,6 +820,7 @@ pub fn run() {
             history,
             hotkey_mgr,
             registered_hotkeys: Vec::new(),
+            recording_shortcut: false,
             parsed_shortcuts: ParsedShortcuts::default(),
             hwnd,
             font_regular,
@@ -903,6 +929,7 @@ pub fn run() {
             cmb_opacity: ptr::null_mut(),
             chk_ocr_newline: ptr::null_mut(),
             chk_autostart: ptr::null_mut(),
+            chk_normal_window: ptr::null_mut(),
             updater: Default::default(),
             update_view: Default::default(),
             btn_update: ptr::null_mut(),
@@ -914,8 +941,11 @@ pub fn run() {
         app_state.build_child_controls(hinstance);
         SendMessageW(hwnd, 0x0127, (1 << 16) | 1, 0); // UIS_SET | UISF_HIDEFOCUS; keyboard navigation restores it.
         let sc = app_state.settings.shortcuts();
-        let _ = app_state.apply_shortcuts(&sc);
+        let shortcut_result = app_state.apply_shortcuts(&sc);
         app_state.populate_settings_fields();
+        if let Err(error) = shortcut_result {
+            set_hwnd_text(app_state.lbl_settings_status, &error);
+        }
         app_state.refresh_chat_controls();
         app_state.relayout_children();
 
@@ -925,12 +955,17 @@ pub fn run() {
         WIN_CTX.with(|cell| {
             *cell.borrow_mut() = Some(app_state);
         });
-        if std::env::args().any(|a| a == "--show") {
+        if show_on_launch {
             with_state(|st| st.show_and_focus());
         }
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
+            with_state(|state| {
+                state.set_shortcut_recording(
+                    shortcut_recorder::is_field(GetFocus()) && IsWindowVisible(GetFocus()) != 0,
+                );
+            });
             // Let text-input subclasses handle Return before dialog navigation consumes it.
             if (msg.message == WM_KEYDOWN || msg.message == WM_CHAR)
                 && (msg.wParam == 0x0d || msg.wParam == 0x1b)
@@ -1507,6 +1542,14 @@ impl Win32AppState {
             ID_CHK_AUTOSTART,
             false,
         );
+        self.chk_normal_window = self.create_ctrl(
+            hinst,
+            "BUTTON",
+            "普通窗口模式",
+            BS_AUTOCHECKBOX,
+            ID_CHK_NORMAL_WINDOW,
+            false,
+        );
         self.btn_update = self.create_ctrl(
             hinst,
             "BUTTON",
@@ -1670,6 +1713,7 @@ impl Win32AppState {
             self.cmb_opacity,
             self.chk_ocr_newline,
             self.chk_autostart,
+            self.chk_normal_window,
             self.btn_update,
             self.lbl_update,
         ]
@@ -1691,6 +1735,42 @@ impl Win32AppState {
             self.pane_layout.web_height as i32,
             self.settings.ai_translation_for_request().enabled,
         )
+    }
+
+    unsafe fn layout_source_input(&self, source: BoxRect, has_text: bool) {
+        // Commit only the final width: widening then narrowing a populated edit
+        // reformats its contents twice, even when the window layout is unchanged.
+        place(
+            self.edit_source,
+            14,
+            source.y + 6,
+            source.w - if has_text { 76 } else { 28 },
+            (source.h - 12).max(12),
+        );
+        if has_text {
+            place(self.btn_clear_trans, source.w - 58, source.y + 4, 44, 24);
+        }
+        visible(self.btn_clear_trans, has_text);
+    }
+
+    unsafe fn refresh_source_input(&self) {
+        if self.active_tab == TabMode::Translate {
+            let has_text = GetWindowTextLengthW(self.edit_source) > 0;
+            if shown(self.btn_clear_trans) != has_text {
+                let source = self.translation_layout().source;
+                self.layout_source_input(source, has_text);
+                let area = RECT {
+                    left: scale(source.x),
+                    top: scale(source.y),
+                    right: scale(source.x + source.w),
+                    bottom: scale(source.y + source.h),
+                };
+                InvalidateRect(self.hwnd, &area, 0);
+                InvalidateRect(self.edit_source, ptr::null(), 0);
+            }
+        }
+        // Text can add/remove wrapped lines without changing the edit's bounds.
+        edit_geometry(self.edit_source);
     }
 
     unsafe fn relayout_children(&self) {
@@ -1777,13 +1857,7 @@ impl Win32AppState {
                 let l = self.translation_layout();
                 bg.surface(l.source, p.surface, 0);
                 bg.surface(l.languages, p.surface, 0);
-                place(
-                    self.edit_source,
-                    14,
-                    l.source.y + 6,
-                    w - 28,
-                    (l.source.h - 12).max(12),
-                );
+                self.layout_source_input(l.source, GetWindowTextLengthW(self.edit_source) > 0);
                 show(self.edit_source, true);
                 let ly = l.languages.y + (l.languages.h - 30) / 2;
                 let left = if w < 430 { 100 } else { 114 };
@@ -1796,22 +1870,6 @@ impl Win32AppState {
                 show(self.cmb_target_lang, true);
                 place(self.btn_trans_now, w - 60, ly + 2, 48, 26);
                 show(self.btn_trans_now, true);
-                show(
-                    self.btn_clear_trans,
-                    !get_hwnd_text(self.edit_source).is_empty(),
-                );
-                // Keep the source clear action in its own corner, never overlapping language controls.
-                if !get_hwnd_text(self.edit_source).is_empty() {
-                    place(self.btn_clear_trans, w - 58, l.source.y + 4, 44, 24);
-                    show(self.btn_clear_trans, true);
-                    place(
-                        self.edit_source,
-                        14,
-                        l.source.y + 6,
-                        w - 76,
-                        (l.source.h - 12).max(12),
-                    );
-                }
                 bg.grip(l.languages.y, w, p.line);
                 bg.grip(l.web.y, w, p.line);
                 place(self.lbl_web_header, 16, l.web.y + 7, w - 90, 17);
@@ -2014,6 +2072,7 @@ impl Win32AppState {
                 self.cmb_opacity,
                 self.chk_ocr_newline,
                 self.chk_autostart,
+                self.chk_normal_window,
                 self.btn_update,
                 self.lbl_update,
             ],
@@ -2046,9 +2105,9 @@ impl Win32AppState {
             ID_SETTINGS_KEYS => 82 + row_h * 5 + 32 + 90,
             _ => {
                 if wide {
-                    490
+                    568
                 } else {
-                    530
+                    608
                 }
             }
         };
@@ -2271,16 +2330,20 @@ impl Win32AppState {
                 show(self.btn_hk_reset);
                 bg.label(
                     BoxRect::new(x, top + card_h + 58, fw, 20),
-                    "留空即可停用对应快捷键",
+                    "点击后按组合键；Backspace / Delete 清空，Esc 取消",
                     true,
                     true,
                 );
             }
             _ => {
                 let opacity_h = if wide { 84 } else { 112 };
-                bg.card(BoxRect::new(x, top, fw, opacity_h + 286), p);
+                bg.card(BoxRect::new(x, top, fw, opacity_h + 364), p);
                 form_row(self.lbl_opacity, self.cmb_opacity, top + 18, 32, &mut bg);
                 for (i, (c, description)) in [
+                    (
+                        self.chk_normal_window,
+                        "显示在任务栏和 Alt+Tab 中，切走时不收起",
+                    ),
                     (self.chk_ocr_newline, "合并识别文本中的段落换行"),
                     (self.chk_autostart, "登录 Windows 时自动启动"),
                 ]
@@ -2292,13 +2355,18 @@ impl Win32AppState {
                     place(c, x + inset, y + 15, fw - inset * 2, 26);
                     show(c);
                     bg.label(
-                        BoxRect::new(x + inset + 25, y + 44, fw - inset * 2 - 25, 18),
+                        BoxRect::new(
+                            x + inset + if c == self.chk_normal_window { 0 } else { 25 },
+                            y + 44,
+                            fw - inset * 2 - if c == self.chk_normal_window { 0 } else { 25 },
+                            18,
+                        ),
                         description,
                         true,
                         true,
                     );
                 }
-                let update_y = top + opacity_h + 168;
+                let update_y = top + opacity_h + 246;
                 place(self.btn_update, x + inset, update_y, 140, 32);
                 place(
                     self.lbl_update,
@@ -2383,6 +2451,66 @@ impl Win32AppState {
         InvalidateRect(self.btn_pin, ptr::null(), 0);
     }
 
+    unsafe fn apply_normal_window_mode(&self, enabled: bool) {
+        let current = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+        let style = (current & !(WS_EX_APPWINDOW | WS_EX_TOOLWINDOW))
+            | if enabled {
+                WS_EX_APPWINDOW
+            } else {
+                WS_EX_TOOLWINDOW
+            };
+        if current == style {
+            return;
+        }
+        let visible = IsWindowVisible(self.hwnd) != 0;
+        let focus = GetFocus();
+        // The shell updates taskbar membership when a window is hidden and shown.
+        // Do not use hide_window here: switching modes must keep active requests.
+        if visible {
+            ShowWindow(self.hwnd, SW_HIDE);
+        }
+        SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style as isize);
+        SetWindowPos(
+            self.hwnd,
+            ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        if visible {
+            ShowWindow(self.hwnd, SW_SHOW);
+            SetForegroundWindow(self.hwnd);
+            if !focus.is_null() {
+                SetFocus(focus);
+            }
+        }
+    }
+
+    unsafe fn save_normal_window_mode(&self) {
+        let mut cfg = self.settings.appearance();
+        let previous = cfg.normal_window_mode;
+        cfg.normal_window_mode =
+            SendMessageW(self.chk_normal_window, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
+        if let Err(error) = self.settings.save_appearance(cfg) {
+            SendMessageW(
+                self.chk_normal_window,
+                BM_SETCHECK,
+                if previous { BST_CHECKED } else { BST_UNCHECKED },
+                0,
+            );
+            set_hwnd_text(
+                self.lbl_settings_status,
+                &format!("保存窗口模式失败: {error}"),
+            );
+        } else {
+            self.apply_normal_window_mode(cfg.normal_window_mode);
+            set_hwnd_text(self.lbl_settings_status, "窗口模式已保存");
+        }
+        InvalidateRect(self.chk_normal_window, ptr::null(), 0);
+    }
+
     unsafe fn show_and_focus(&mut self) {
         ShowWindow(self.hwnd, SW_RESTORE);
         ShowWindow(self.hwnd, SW_SHOW);
@@ -2399,6 +2527,7 @@ impl Win32AppState {
     }
 
     unsafe fn hide_window(&mut self) {
+        self.set_shortcut_recording(false);
         self.web_cancel.cancel_current();
         self.ai_cancel.cancel_current();
         ShowWindow(self.hwnd, SW_HIDE);
@@ -2406,17 +2535,33 @@ impl Win32AppState {
 
     fn apply_shortcuts(&mut self, cfg: &ShortcutConfig) -> Result<(), String> {
         let parsed = parse_shortcut_config(cfg).map_err(|e| e.to_string())?;
-        for hk in self.registered_hotkeys.drain(..) {
-            let _ = self.hotkey_mgr.unregister(hk);
-        }
-        for hk in parsed.unique_hotkeys() {
-            self.hotkey_mgr
-                .register(hk)
-                .map_err(|e| format!("注册全局快捷键失败: {e}"))?;
-            self.registered_hotkeys.push(hk);
+        if !self.recording_shortcut {
+            register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &parsed)?;
         }
         self.parsed_shortcuts = parsed;
         Ok(())
+    }
+
+    unsafe fn set_shortcut_recording(&mut self, recording: bool) {
+        if recording == self.recording_shortcut {
+            return;
+        }
+        self.recording_shortcut = recording;
+        // Discard pending presses so recording never opens a window or starts OCR.
+        while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+        let desired = if recording {
+            ParsedShortcuts::default()
+        } else {
+            self.parsed_shortcuts.clone()
+        };
+        match register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &desired) {
+            Ok(()) if recording => set_hwnd_text(
+                self.lbl_settings_status,
+                "请按组合键；Backspace / Delete 清空，Esc 取消",
+            ),
+            Ok(()) => set_hwnd_text(self.lbl_settings_status, "录入完成，保存设置后生效"),
+            Err(error) => set_hwnd_text(self.lbl_settings_status, &error),
+        }
     }
 
     unsafe fn handle_hotkey_action(&mut self, action: ShortcutAction) {
@@ -2895,11 +3040,11 @@ impl Win32AppState {
         set_hwnd_text(self.edit_chat_key, &chat_cfg.api_key);
         set_hwnd_text(self.edit_chat_model, &chat_cfg.model);
 
-        set_hwnd_text(self.edit_hk_toggle, &hk_cfg.toggle);
-        set_hwnd_text(self.edit_hk_ocr, &hk_cfg.ocr);
-        set_hwnd_text(self.edit_hk_chat, &hk_cfg.ai_dialog);
-        set_hwnd_text(self.edit_hk_sel_trans, &hk_cfg.selection_translate);
-        set_hwnd_text(self.edit_hk_sel_chat, &hk_cfg.selection_ai_dialog);
+        shortcut_recorder::set_value(self.edit_hk_toggle, &hk_cfg.toggle);
+        shortcut_recorder::set_value(self.edit_hk_ocr, &hk_cfg.ocr);
+        shortcut_recorder::set_value(self.edit_hk_chat, &hk_cfg.ai_dialog);
+        shortcut_recorder::set_value(self.edit_hk_sel_trans, &hk_cfg.selection_translate);
+        shortcut_recorder::set_value(self.edit_hk_sel_chat, &hk_cfg.selection_ai_dialog);
 
         let op_idx = if app_cfg.panel_opacity >= 0.95 {
             0
@@ -2916,6 +3061,16 @@ impl Win32AppState {
         };
         SendMessageW(self.cmb_opacity, CB_SETCURSEL, op_idx, 0);
 
+        SendMessageW(
+            self.chk_normal_window,
+            BM_SETCHECK,
+            if app_cfg.normal_window_mode {
+                BST_CHECKED
+            } else {
+                BST_UNCHECKED
+            },
+            0,
+        );
         SendMessageW(
             self.chk_ocr_newline,
             BM_SETCHECK,
@@ -2946,6 +3101,8 @@ impl Win32AppState {
     }
 
     unsafe fn save_settings_from_ui(&mut self) {
+        SetFocus(self.btn_save_settings);
+        self.set_shortcut_recording(false);
         let ai_enabled =
             SendMessageW(self.chk_ai_enabled, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
         let b_idx = (SendMessageW(self.cmb_ai_backend, CB_GETCURSEL, 0, 0) as usize)
@@ -2991,11 +3148,11 @@ impl Win32AppState {
         }
 
         let hk_cfg = ShortcutConfig {
-            toggle: get_hwnd_text(self.edit_hk_toggle),
-            ocr: get_hwnd_text(self.edit_hk_ocr),
-            ai_dialog: get_hwnd_text(self.edit_hk_chat),
-            selection_translate: get_hwnd_text(self.edit_hk_sel_trans),
-            selection_ai_dialog: get_hwnd_text(self.edit_hk_sel_chat),
+            toggle: shortcut_recorder::value(self.edit_hk_toggle),
+            ocr: shortcut_recorder::value(self.edit_hk_ocr),
+            ai_dialog: shortcut_recorder::value(self.edit_hk_chat),
+            selection_translate: shortcut_recorder::value(self.edit_hk_sel_trans),
+            selection_ai_dialog: shortcut_recorder::value(self.edit_hk_sel_chat),
         };
         if let Err(e) = self.apply_shortcuts(&hk_cfg) {
             set_hwnd_text(self.lbl_settings_status, &e);
@@ -3020,8 +3177,15 @@ impl Win32AppState {
         let app_cfg = AppearanceConfig {
             panel_opacity: opacity,
             ocr_strip_newlines: ocr_strip,
+            normal_window_mode: self.settings.appearance().normal_window_mode,
         };
-        let _ = self.settings.save_appearance(app_cfg);
+        if let Err(error) = self.settings.save_appearance(app_cfg) {
+            set_hwnd_text(
+                self.lbl_settings_status,
+                &format!("保存通用设置失败: {error}"),
+            );
+            return;
+        }
         let alpha = (opacity * 255.0).round() as u8;
         SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
 
@@ -3257,7 +3421,7 @@ impl Win32AppState {
             self.update_view = view;
         }
         while let Ok(hk_ev) = GlobalHotKeyEvent::receiver().try_recv() {
-            if hk_ev.state == HotKeyState::Pressed {
+            if !self.recording_shortcut && hk_ev.state == HotKeyState::Pressed {
                 if let Some(action) = self.parsed_shortcuts.action_for_id(hk_ev.id) {
                     self.handle_hotkey_action(action);
                 }
@@ -3394,7 +3558,12 @@ unsafe extern "system" fn main_wnd_proc(
             let active_state = wparam & 0xFFFF;
             if active_state == WA_INACTIVE {
                 with_state(|st| {
-                    if !st.pinned && !st.ocr_in_flight && st.active_tab != TabMode::Settings {
+                    st.set_shortcut_recording(false);
+                    if !st.pinned
+                        && !st.settings.appearance().normal_window_mode
+                        && !st.ocr_in_flight
+                        && st.active_tab != TabMode::Settings
+                    {
                         st.hide_window();
                     }
                 });
@@ -3552,11 +3721,12 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
         }
         ID_BTN_OCR if code == BN_CLICKED => st.trigger_ocr(),
         ID_BTN_PIN if code == BN_CLICKED => st.set_pinned(!st.pinned),
+        ID_CHK_NORMAL_WINDOW if code == BN_CLICKED => st.save_normal_window_mode(),
 
         ID_EDIT_SOURCE if code == EN_CHANGE => {
+            st.refresh_source_input();
             if !st.suppress_source_change {
                 st.pending_auto_translate = Some(Instant::now() + AUTO_TRANSLATE_DEBOUNCE);
-                st.relayout_children();
             }
         }
         ID_CMB_SOURCE_LANG if code == CBN_SELCHANGE => {
@@ -3684,11 +3854,11 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
         }
         ID_BTN_HK_RESET if code == BN_CLICKED => {
             let def = ShortcutConfig::default();
-            set_hwnd_text(st.edit_hk_toggle, &def.toggle);
-            set_hwnd_text(st.edit_hk_ocr, &def.ocr);
-            set_hwnd_text(st.edit_hk_chat, &def.ai_dialog);
-            set_hwnd_text(st.edit_hk_sel_trans, &def.selection_translate);
-            set_hwnd_text(st.edit_hk_sel_chat, &def.selection_ai_dialog);
+            shortcut_recorder::set_value(st.edit_hk_toggle, &def.toggle);
+            shortcut_recorder::set_value(st.edit_hk_ocr, &def.ocr);
+            shortcut_recorder::set_value(st.edit_hk_chat, &def.ai_dialog);
+            shortcut_recorder::set_value(st.edit_hk_sel_trans, &def.selection_translate);
+            shortcut_recorder::set_value(st.edit_hk_sel_chat, &def.selection_ai_dialog);
         }
         ID_BTN_SAVE_SETTINGS if code == BN_CLICKED => st.save_settings_from_ui(),
 

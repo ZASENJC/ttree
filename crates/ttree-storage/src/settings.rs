@@ -297,6 +297,7 @@ impl SettingsStore {
         let clamped = AppearanceConfig {
             panel_opacity: AppearanceConfig::clamp_opacity(cfg.panel_opacity),
             ocr_strip_newlines: cfg.ocr_strip_newlines,
+            normal_window_mode: cfg.normal_window_mode,
         };
         let mut guard = self.cache.write().expect("settings lock poisoned");
         guard.raw_map.insert(
@@ -306,6 +307,10 @@ impl SettingsStore {
         guard.raw_map.insert(
             "appearance.ocr_strip_newlines".into(),
             Value::from(clamped.ocr_strip_newlines),
+        );
+        guard.raw_map.insert(
+            "appearance.normal_window_mode".into(),
+            Value::from(clamped.normal_window_mode),
         );
         write_json_map(&self.path, &guard.raw_map)?;
         guard.appearance = clamped;
@@ -550,6 +555,12 @@ fn load_appearance(map: &Map<String, Value>) -> AppearanceConfig {
     {
         cfg.ocr_strip_newlines = v;
     }
+    if let Some(v) = map
+        .get("appearance.normal_window_mode")
+        .and_then(Value::as_bool)
+    {
+        cfg.normal_window_mode = v;
+    }
     cfg
 }
 
@@ -588,6 +599,29 @@ fn load_window_size(map: &Map<String, Value>) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normal_window_mode_defaults_off_for_existing_settings_and_survives_reload() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            tmp.path(),
+            r#"{"appearance.panel_opacity":0.8,"appearance.ocr_strip_newlines":false}"#,
+        )
+        .unwrap();
+        let store = SettingsStore::open_at(tmp.path().to_path_buf());
+        assert!(!store.appearance().normal_window_mode);
+
+        for enabled in [true, false] {
+            let mut appearance = store.appearance();
+            appearance.normal_window_mode = enabled;
+            store.save_appearance(appearance).unwrap();
+
+            let reloaded = SettingsStore::open_at(tmp.path().to_path_buf());
+            assert_eq!(reloaded.appearance().normal_window_mode, enabled);
+            assert_eq!(reloaded.appearance().panel_opacity, 0.8);
+            assert!(!reloaded.appearance().ocr_strip_newlines);
+        }
+    }
 
     #[test]
     fn persists_and_reloads_settings_and_api_key_in_json() {

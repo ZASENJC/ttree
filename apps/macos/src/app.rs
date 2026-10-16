@@ -47,6 +47,10 @@ pub fn on_splitter_drag(splitter_id: u8, delta_down: f64) {
     with_ctx(|ctx| ctx.ctrl.on_splitter_drag(splitter_id, delta_down));
 }
 
+pub fn on_shortcut_recording(recording: bool) {
+    with_ctx(|ctx| ctx.ctrl.set_shortcut_recording(recording));
+}
+
 pub fn on_splitter_drag_end() {
     with_ctx(|ctx| ctx.ctrl.on_splitter_drag_end());
 }
@@ -71,8 +75,10 @@ define_class!(
         #[unsafe(method(handleTimer:))]
         fn handle_timer(&self, _timer: &AnyObject) {
             with_ctx(|ctx| {
+                let recording = crate::shortcut_recorder::is_recording(&ctx.ctrl.window);
+                ctx.ctrl.set_shortcut_recording(recording);
                 while let Ok(hk_ev) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if hk_ev.state == HotKeyState::Pressed {
+                    if !ctx.ctrl.recording_shortcut && hk_ev.state == HotKeyState::Pressed {
                         if let Some(action) = ctx.ctrl.parsed_shortcuts.action_for_id(hk_ev.id)
                         {
                             ctx.ctrl.handle_hotkey_action(action);

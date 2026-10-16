@@ -1,4 +1,4 @@
-//! macOS LaunchAgent 开机自启管理。
+//! 平台开机自启管理。
 
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 
@@ -14,10 +14,14 @@ fn build_auto_launch() -> Result<AutoLaunch, String> {
         .filter(|bundle| bundle.extension().is_some_and(|ext| ext == "app"))
         .unwrap_or(exe.as_path());
 
-    AutoLaunchBuilder::new()
+    let mut builder = AutoLaunchBuilder::new();
+    builder
         .set_app_name(APP_NAME)
         .set_app_path(&app_path.to_string_lossy())
-        .set_use_launch_agent(true)
+        .set_use_launch_agent(true);
+    #[cfg(target_os = "windows")]
+    builder.set_args(&["--hidden"]);
+    builder
         .build()
         .map_err(|e| format!("初始化开机自启失败: {e}"))
 }

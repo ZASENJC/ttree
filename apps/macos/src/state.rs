@@ -3,6 +3,8 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::too_many_arguments)]
 
+use crate::shortcut_recorder::ShortcutField;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,7 +31,9 @@ use ttree_core::{
     WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 use ttree_ocr::OcrOutcome;
-use ttree_platform::hotkey::{parse_shortcut_config, ParsedShortcuts, ShortcutAction};
+use ttree_platform::hotkey::{
+    parse_shortcut_config, register_shortcuts, ParsedShortcuts, ShortcutAction,
+};
 use ttree_storage::{HistoryStore, SettingsStore};
 
 use crate::ui_helpers::{
@@ -374,15 +378,15 @@ pub struct SettingsViewWidgets {
     pub sc_head: Retained<NSTextField>,
     pub btn_reset_sc: Retained<NSButton>,
     pub sc_lbl_toggle: Retained<NSTextField>,
-    pub sc_toggle_field: Retained<NSTextField>,
+    pub sc_toggle_field: Retained<ShortcutField>,
     pub sc_lbl_ocr: Retained<NSTextField>,
-    pub sc_ocr_field: Retained<NSTextField>,
+    pub sc_ocr_field: Retained<ShortcutField>,
     pub sc_lbl_ai: Retained<NSTextField>,
-    pub sc_ai_field: Retained<NSTextField>,
+    pub sc_ai_field: Retained<ShortcutField>,
     pub sc_lbl_sel_trans: Retained<NSTextField>,
-    pub sc_sel_trans_field: Retained<NSTextField>,
+    pub sc_sel_trans_field: Retained<ShortcutField>,
     pub sc_lbl_sel_ai: Retained<NSTextField>,
-    pub sc_sel_ai_field: Retained<NSTextField>,
+    pub sc_sel_ai_field: Retained<ShortcutField>,
     pub save_sc_btn: Retained<NSButton>,
     pub sc_hint: Retained<NSTextField>,
 
@@ -413,6 +417,7 @@ pub struct AppController {
     pub hotkey_mgr: GlobalHotKeyManager,
     pub parsed_shortcuts: ParsedShortcuts,
     pub registered_hotkeys: Vec<HotKey>,
+    pub recording_shortcut: bool,
 
     pub window: Retained<NSWindow>,
     pub effect_view: Retained<NSVisualEffectView>,
@@ -624,13 +629,15 @@ impl AppController {
         add_subview(&effect_view, &settings_ui.root);
 
         let sc_cfg = settings.shortcuts();
-        let parsed_shortcuts = parse_shortcut_config(&sc_cfg).unwrap_or_default();
         let mut registered_hotkeys = Vec::new();
-        for hk in parsed_shortcuts.unique_hotkeys() {
-            if hotkey_mgr.register(hk).is_ok() {
-                registered_hotkeys.push(hk);
-            }
-        }
+        let mut parsed_shortcuts = ParsedShortcuts::default();
+        let shortcut_result = parse_shortcut_config(&sc_cfg)
+            .map_err(|error| error.to_string())
+            .and_then(|parsed| {
+                register_shortcuts(&hotkey_mgr, &mut registered_hotkeys, &parsed)?;
+                parsed_shortcuts = parsed;
+                Ok(())
+            });
 
         let conversations = history.read_conversations().unwrap_or_default();
         let (active_conversation_id, current_messages) = match conversations.last() {
@@ -649,6 +656,7 @@ impl AppController {
             hotkey_mgr,
             parsed_shortcuts,
             registered_hotkeys,
+            recording_shortcut: false,
             window,
             effect_view,
             segmented_bg,
@@ -701,6 +709,9 @@ impl AppController {
         ctrl.refresh_ai_header_badge();
         ctrl.refresh_conversations_popup();
         ctrl.relayout_all(win_w, win_h);
+        if let Err(error) = shortcut_result {
+            ctrl.set_status(&error);
+        }
         ctrl
     }
 
@@ -1655,25 +1666,15 @@ impl AppController {
             action_sel,
         );
         let sc_lbl_toggle = make_label(mtm, dummy, "呼出翻译", 12.5, false, true);
-        let sc_toggle_field = make_text_field(mtm, dummy, &sc_cfg.toggle, "CmdOrCtrl+Shift+Space");
+        let sc_toggle_field = ShortcutField::new(mtm, dummy, &sc_cfg.toggle);
         let sc_lbl_ocr = make_label(mtm, dummy, "截图 OCR", 12.5, false, true);
-        let sc_ocr_field = make_text_field(mtm, dummy, &sc_cfg.ocr, "CmdOrCtrl+Shift+S");
+        let sc_ocr_field = ShortcutField::new(mtm, dummy, &sc_cfg.ocr);
         let sc_lbl_ai = make_label(mtm, dummy, "呼出 AI 对话", 12.5, false, true);
-        let sc_ai_field = make_text_field(mtm, dummy, &sc_cfg.ai_dialog, "Option+Space");
+        let sc_ai_field = ShortcutField::new(mtm, dummy, &sc_cfg.ai_dialog);
         let sc_lbl_sel_trans = make_label(mtm, dummy, "划词翻译", 12.5, false, true);
-        let sc_sel_trans_field = make_text_field(
-            mtm,
-            dummy,
-            &sc_cfg.selection_translate,
-            "可与「呼出翻译」共用同一按键",
-        );
+        let sc_sel_trans_field = ShortcutField::new(mtm, dummy, &sc_cfg.selection_translate);
         let sc_lbl_sel_ai = make_label(mtm, dummy, "划词 AI 对话", 12.5, false, true);
-        let sc_sel_ai_field = make_text_field(
-            mtm,
-            dummy,
-            &sc_cfg.selection_ai_dialog,
-            "可与「呼出 AI 对话」共用同一按键",
-        );
+        let sc_sel_ai_field = ShortcutField::new(mtm, dummy, &sc_cfg.selection_ai_dialog);
         let save_sc_btn = make_button(
             mtm,
             dummy,
@@ -1685,7 +1686,7 @@ impl AppController {
         let sc_hint = make_wrapping_label(
             mtm,
             top_rect(sec_h, 0.0, 260.0, content_w, 60.0),
-            "每个快捷键都可单独设置或留空关闭。「呼出翻译」与「划词翻译」（以及「呼出 AI 对话」与「划词 AI 对话」）支持共用同一个按键：有选中文本时自动执行划词，无选中文本则切换主窗口。",
+            "点击后按组合键；Delete 清空，Esc 取消，Tab 切换。保存后生效。呼出与对应划词操作可共用快捷键：选中文本时执行划词，否则切换窗口。",
             11.5,
             true,
         );
@@ -2668,14 +2669,11 @@ impl AppController {
             }
             ActionTag::ResetDefaultShortcuts => {
                 let def = ShortcutConfig::default();
-                set_field_string(&self.settings_ui.sc_toggle_field, &def.toggle);
-                set_field_string(&self.settings_ui.sc_ocr_field, &def.ocr);
-                set_field_string(&self.settings_ui.sc_ai_field, &def.ai_dialog);
-                set_field_string(
-                    &self.settings_ui.sc_sel_trans_field,
-                    &def.selection_translate,
-                );
-                set_field_string(&self.settings_ui.sc_sel_ai_field, &def.selection_ai_dialog);
+                self.settings_ui.sc_toggle_field.set_value(&def.toggle);
+                self.settings_ui.sc_ocr_field.set_value(&def.ocr);
+                self.settings_ui.sc_ai_field.set_value(&def.ai_dialog);
+                self.settings_ui.sc_sel_trans_field.set_value(&def.selection_translate);
+                self.settings_ui.sc_sel_ai_field.set_value(&def.selection_ai_dialog);
                 self.set_status("已填入默认快捷键，请点击「保存快捷键」");
             }
             ActionTag::OpacitySliderChanged => {
@@ -3038,6 +3036,8 @@ impl AppController {
     }
 
     fn save_all_settings(&mut self) {
+        self.window.makeFirstResponder(None);
+        self.set_shortcut_recording(false);
         let ai_input = AiTranslationConfig {
             enabled: self.settings_ui.ai_enabled_chk.state() == NSControlStateValueOn,
             backend: self.selected_ai_trans_backend(),
@@ -3076,24 +3076,25 @@ impl AppController {
         self.pending_clear_chat_key = false;
 
         let sc_input = ShortcutConfig {
-            toggle: get_field_string(&self.settings_ui.sc_toggle_field),
-            ocr: get_field_string(&self.settings_ui.sc_ocr_field),
-            ai_dialog: get_field_string(&self.settings_ui.sc_ai_field),
-            selection_translate: get_field_string(&self.settings_ui.sc_sel_trans_field),
-            selection_ai_dialog: get_field_string(&self.settings_ui.sc_sel_ai_field),
+            toggle: self.settings_ui.sc_toggle_field.value(),
+            ocr: self.settings_ui.sc_ocr_field.value(),
+            ai_dialog: self.settings_ui.sc_ai_field.value(),
+            selection_translate: self.settings_ui.sc_sel_trans_field.value(),
+            selection_ai_dialog: self.settings_ui.sc_sel_ai_field.value(),
         };
         match parse_shortcut_config(&sc_input) {
             Ok(parsed) => {
-                for old_hk in self.registered_hotkeys.drain(..) {
-                    let _ = self.hotkey_mgr.unregister(old_hk);
-                }
-                for hk in parsed.unique_hotkeys() {
-                    if self.hotkey_mgr.register(hk).is_ok() {
-                        self.registered_hotkeys.push(hk);
-                    }
+                if let Err(error) =
+                    register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &parsed)
+                {
+                    self.set_status(&error);
+                    return;
                 }
                 self.parsed_shortcuts = parsed;
-                let _ = self.settings.save_shortcuts(&sc_input);
+                if let Err(error) = self.settings.save_shortcuts(&sc_input) {
+                    self.set_status(&format!("保存快捷键失败: {error}"));
+                    return;
+                }
             }
             Err(e) => {
                 self.set_status(&format!("❌ {e}"));
@@ -3584,7 +3585,26 @@ impl AppController {
         }
     }
 
+    pub fn set_shortcut_recording(&mut self, recording: bool) {
+        if self.recording_shortcut == recording {
+            return;
+        }
+        self.recording_shortcut = recording;
+        while global_hotkey::GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+        let desired = if recording {
+            ParsedShortcuts::default()
+        } else {
+            self.parsed_shortcuts.clone()
+        };
+        match register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &desired) {
+            Ok(()) if recording => self.set_status("请按组合键；Delete 清空，Esc 取消"),
+            Ok(()) => self.set_status("录入完成，保存设置后生效"),
+            Err(error) => self.set_status(&error),
+        }
+    }
+
     pub fn on_window_did_resign_key(&mut self) {
+        self.set_shortcut_recording(false);
         if !self.is_pinned && self.active_tab != TabMode::Settings && !self.is_modal_open {
             self.hide_window();
         }

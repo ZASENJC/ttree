@@ -2,3 +2,4 @@
 pub mod autostart;
 pub mod hotkey;
 pub mod selection;
+pub mod shortcut_recorder;
