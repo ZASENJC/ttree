@@ -280,8 +280,8 @@ pub fn make_button(
         if let Some(layer) = btn.layer() {
             layer.setCornerRadius(6.0);
             let bg = pale_ink(0.05);
-            let cg_bg: *const AnyObject = msg_send![&*bg, CGColor];
-            let _: () = msg_send![&*layer, setBackgroundColor: cg_bg];
+            let cg_bg = bg.CGColor();
+            layer.setBackgroundColor(Some(&cg_bg));
         }
         btn.setTag(tag);
         btn.setTarget(Some(target));

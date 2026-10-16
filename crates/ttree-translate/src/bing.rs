@@ -14,8 +14,8 @@ use crate::{
     MAX_TRANSLATION_RESPONSE_BYTES,
 };
 
+const DEFAULT_ORIGIN: &str = "https://www.bing.com";
 const TRANSLATOR_URL: &str = "https://www.bing.com/translator";
-const TRANSLATE_URL: &str = "https://www.bing.com/ttranslatev3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const TOKEN_TTL: Duration = Duration::from_secs(45 * 60);
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
@@ -27,6 +27,7 @@ pub struct BingToken {
     pub iid: String,
     pub key: String,
     pub token: String,
+    pub origin: String,
 }
 
 #[derive(Clone)]
@@ -76,13 +77,30 @@ fn map_lang(code: &str) -> &str {
     }
 }
 
+fn is_allowed_bing_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "bing.com" || host.ends_with(".bing.com")
+}
+
+fn origin_from_url(url: &reqwest::Url) -> Option<String> {
+    if url.scheme() != "https" && url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let mut origin = format!("{}://{}", url.scheme(), host);
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    Some(origin)
+}
+
 pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     let client = shared_client(REQUEST_TIMEOUT, true);
 
     let (token, from_cache) = match get_cached_token(Instant::now()) {
         Some(t) => (t, true),
         None => {
-            let fresh = fetch_token(&client).await?;
+            let fresh = fetch_token(&client, TRANSLATOR_URL).await?;
             store_cached_token(fresh.clone(), Instant::now());
             (fresh, false)
         }
@@ -93,7 +111,7 @@ pub async fn translate(text: &str, source: &str, target: &str) -> Result<String,
         Err(_first_err) if from_cache => {
             // 缓存令牌可能提前失效，立即淘汰并刷新重试一次
             invalidate_cached_token();
-            let fresh = fetch_token(&client).await?;
+            let fresh = fetch_token(&client, TRANSLATOR_URL).await?;
             store_cached_token(fresh.clone(), Instant::now());
             translate_with_token(&client, &fresh, text, source, target).await
         }
@@ -108,26 +126,46 @@ async fn translate_with_token(
     source: &str,
     target: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{TRANSLATE_URL}?isVertical=1&IG={ig}&IID={iid}",
+    let origin = if token.origin.is_empty() {
+        DEFAULT_ORIGIN
+    } else {
+        token.origin.as_str()
+    };
+    let referer = format!("{origin}/translator");
+    let mut url = format!(
+        "{origin}/ttranslatev3?isVertical=1&IG={ig}&IID={iid}",
         ig = urlencoding::encode(&token.ig),
         iid = urlencoding::encode(&token.iid),
     );
+    let form = [
+        ("fromLang", map_lang(source)),
+        ("to", map_lang(target)),
+        ("text", text),
+        ("token", &token.token),
+        ("key", &token.key),
+    ];
 
-    let resp = client
-        .post(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Referer", TRANSLATOR_URL)
-        .form(&[
-            ("fromLang", map_lang(source)),
-            ("to", map_lang(target)),
-            ("text", text),
-            ("token", &token.token),
-            ("key", &token.key),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("必应翻译请求失败: {e}"))?;
+    let mut resp = None;
+    for _ in 0..=3 {
+        let current = client
+            .post(&url)
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", &referer)
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| format!("必应翻译请求失败: {e}"))?;
+
+        if current.status().is_redirection() {
+            if let Some(next_url) = resolve_redirect_url(&url, current.headers()) {
+                url = next_url;
+                continue;
+            }
+        }
+        resp = Some(current);
+        break;
+    }
+    let resp = resp.ok_or_else(|| "必应翻译重定向次数过多".to_string())?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -144,22 +182,52 @@ async fn translate_with_token(
         .ok_or_else(|| "必应翻译未返回译文".to_string())
 }
 
-async fn fetch_token(client: &reqwest::Client) -> Result<BingToken, String> {
-    let response = client
-        .get(TRANSLATOR_URL)
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await
-        .map_err(|e| format!("必应翻译页请求失败: {e}"))?;
+fn resolve_redirect_url(current_url: &str, headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let loc = headers.get(reqwest::header::LOCATION)?.to_str().ok()?;
+    let base = reqwest::Url::parse(current_url).ok()?;
+    let target = base.join(loc).ok()?;
+    let host = target.host_str()?;
+    let same_loopback = base.host_str() == Some(host) && (host == "127.0.0.1" || host == "localhost");
+    if (target.scheme() == "https" && is_allowed_bing_host(host)) || same_loopback {
+        Some(target.into())
+    } else {
+        None
+    }
+}
+
+async fn fetch_token(client: &reqwest::Client, translator_url: &str) -> Result<BingToken, String> {
+    let mut url = translator_url.to_string();
+    let mut response = None;
+    for _ in 0..=3 {
+        let current = client
+            .get(&url)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await
+            .map_err(|e| format!("必应翻译页请求失败: {e}"))?;
+        if current.status().is_redirection() {
+            if let Some(next_url) = resolve_redirect_url(&url, current.headers()) {
+                url = next_url;
+                continue;
+            }
+        }
+        response = Some(current);
+        break;
+    }
+    let response = response.ok_or_else(|| "必应翻译页重定向次数过多".to_string())?;
     if !response.status().is_success() {
         let status = response.status();
         let body = read_error_body(response).await;
         return Err(format!("必应翻译页返回状态 {status}: {body}"));
     }
+    let final_origin = origin_from_url(response.url()).unwrap_or_else(|| DEFAULT_ORIGIN.to_string());
     let html = read_limited_response(response, MAX_BING_PAGE_BYTES, "必应翻译页").await?;
     let html = std::str::from_utf8(&html).map_err(|e| format!("必应翻译页不是 UTF-8: {e}"))?;
 
-    parse_token(html).ok_or_else(|| "必应翻译令牌解析失败（端点可能已变更）".to_string())
+    let mut token =
+        parse_token(html).ok_or_else(|| "必应翻译令牌解析失败（端点可能已变更）".to_string())?;
+    token.origin = final_origin;
+    Ok(token)
 }
 
 pub fn parse_token(html: &str) -> Option<BingToken> {
@@ -188,6 +256,7 @@ pub fn parse_token(html: &str) -> Option<BingToken> {
         iid,
         key,
         token,
+        origin: DEFAULT_ORIGIN.to_string(),
     })
 }
 
@@ -210,6 +279,8 @@ pub fn parse_response(body: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn parses_bing_html_token_and_caches_with_ttl() {
@@ -227,5 +298,77 @@ mod tests {
             get_cached_token(now + TOKEN_TTL + Duration::from_secs(1)),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn follows_302_redirects_for_token_and_translation_post() {
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        let redirect_srv = tokio::spawn(async move {
+            let (mut socket, _) = redirect_listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let resp = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/translator-cn\r\nSet-Cookie: SNRHOP=1; Path=/\r\nContent-Length: 0\r\n\r\n",
+                target_addr.port()
+            );
+            socket.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        let target_srv = tokio::spawn(async move {
+            for step in 0..3 {
+                let (mut socket, _) = target_listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+                match step {
+                    0 => {
+                        assert!(req.starts_with("GET /translator-cn "), "{req}");
+                        let body = r#"IG:"FF00"; <div data-iid="translator.5028"></div> params_AbusePreventionHelper = [167060,"abcdef",3600000];"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        socket.write_all(resp.as_bytes()).await.unwrap();
+                    }
+                    1 => {
+                        assert!(req.starts_with("POST /ttranslatev3?isVertical=1&IG=FF00&IID=translator.5028 "), "{req}");
+                        let resp = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/ttranslatev3-cn?isVertical=1&IG=FF00&IID=translator.5028\r\nContent-Length: 0\r\n\r\n",
+                            target_addr.port()
+                        );
+                        socket.write_all(resp.as_bytes()).await.unwrap();
+                    }
+                    _ => {
+                        assert!(req.starts_with("POST /ttranslatev3-cn?isVertical=1&IG=FF00&IID=translator.5028 "), "{req}");
+                        assert!(req.contains("text=hello"), "{req}");
+                        let body = r#"[{"translations":[{"text":"你好","to":"zh-Hans"}]}]"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        socket.write_all(resp.as_bytes()).await.unwrap();
+                    }
+                }
+            }
+        });
+
+        let client = shared_client(Duration::from_secs(5), true);
+        let initial_url = format!("http://127.0.0.1:{}/translator", redirect_addr.port());
+        let token = fetch_token(&client, &initial_url).await.unwrap();
+        assert_eq!(token.origin, format!("http://127.0.0.1:{}", target_addr.port()));
+
+        let translated = translate_with_token(&client, &token, "hello", "en", "zh-CN")
+            .await
+            .unwrap();
+        assert_eq!(translated, "你好");
+
+        redirect_srv.await.unwrap();
+        target_srv.await.unwrap();
     }
 }

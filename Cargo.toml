@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["ZASENJC"]
 license = "MIT"
@@ -114,8 +114,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSVisualEffectView",
     "NSWindow",
     "objc2-core-foundation",
+    "objc2-core-graphics",
 ] }
-objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "objc2-core-graphics"] }
 windows = { version = "0.58", features = [
     "Foundation",
     "Foundation_Collections",

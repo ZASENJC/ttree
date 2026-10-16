@@ -37,6 +37,26 @@ impl Provider {
             Self::Bing => Self::Google,
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Google => "谷歌",
+            Self::Bing => "必应",
+        }
+    }
+}
+
+fn combine_provider_errors(
+    primary: Provider,
+    primary_err: String,
+    secondary: Provider,
+    secondary_err: String,
+) -> String {
+    format!(
+        "{}: {primary_err} ｜ {}: {secondary_err}",
+        primary.label(),
+        secondary.label()
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -154,9 +174,13 @@ async fn translate_chunk_hedged(text: &str, source: &str, target: &str) -> Resul
         res = &mut primary_fut => {
             match res {
                 Ok(out) => return Ok(out),
-                Err(_) => {
+                Err(primary_err) => {
                     // 主服务立即报错，直接等待备用服务
-                    return call_provider(secondary, text, source, target).await;
+                    return call_provider(secondary, text, source, target)
+                        .await
+                        .map_err(|secondary_err| {
+                            combine_provider_errors(primary, primary_err, secondary, secondary_err)
+                        });
                 }
             }
         }
@@ -171,13 +195,21 @@ async fn translate_chunk_hedged(text: &str, source: &str, target: &str) -> Resul
         res1 = &mut primary_fut => {
             match res1 {
                 Ok(out) => Ok(out),
-                Err(_) => secondary_fut.await,
+                Err(primary_err) => secondary_fut
+                    .await
+                    .map_err(|secondary_err| {
+                        combine_provider_errors(primary, primary_err, secondary, secondary_err)
+                    }),
             }
         }
         res2 = &mut secondary_fut => {
             match res2 {
                 Ok(out) => Ok(out),
-                Err(_) => primary_fut.await,
+                Err(secondary_err) => primary_fut
+                    .await
+                    .map_err(|primary_err| {
+                        combine_provider_errors(primary, primary_err, secondary, secondary_err)
+                    }),
             }
         }
     }
@@ -254,5 +286,19 @@ mod tests {
         let chunks = split_text(&input);
         assert!(chunks.len() > 1);
         assert_eq!(chunks.concat(), input);
+    }
+
+    #[test]
+    fn combines_primary_and_secondary_errors_when_both_fail() {
+        let msg = combine_provider_errors(
+            Provider::Bing,
+            "必应翻译页返回状态 302 Found".into(),
+            Provider::Google,
+            "谷歌翻译返回状态 429 Too Many Requests".into(),
+        );
+        assert_eq!(
+            msg,
+            "必应: 必应翻译页返回状态 302 Found ｜ 谷歌: 谷歌翻译返回状态 429 Too Many Requests"
+        );
     }
 }
