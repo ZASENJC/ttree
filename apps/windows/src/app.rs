@@ -11,6 +11,7 @@
 #![allow(non_snake_case, clippy::too_many_arguments)]
 
 mod dialogs;
+mod shortcut_recorder;
 mod ui;
 
 use crate::design::{BoxRect, TranslationLayout, SIDEBAR, TOOLBAR};
@@ -525,6 +526,7 @@ struct Win32AppState {
     history: Arc<HistoryStore>,
     hotkey_mgr: GlobalHotKeyManager,
     registered_hotkeys: Vec<HotKey>,
+    recording_shortcut: bool,
     parsed_shortcuts: ParsedShortcuts,
 
     hwnd: HWND,
@@ -806,6 +808,7 @@ pub fn run() {
             history,
             hotkey_mgr,
             registered_hotkeys: Vec::new(),
+            recording_shortcut: false,
             parsed_shortcuts: ParsedShortcuts::default(),
             hwnd,
             font_regular,
@@ -945,6 +948,11 @@ pub fn run() {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
+            with_state(|state| {
+                state.set_shortcut_recording(
+                    shortcut_recorder::is_field(GetFocus()) && IsWindowVisible(GetFocus()) != 0,
+                );
+            });
             // Let text-input subclasses handle Return before dialog navigation consumes it.
             if (msg.message == WM_KEYDOWN || msg.message == WM_CHAR)
                 && (msg.wParam == 0x0d || msg.wParam == 0x1b)
@@ -2299,7 +2307,7 @@ impl Win32AppState {
                 show(self.btn_hk_reset);
                 bg.label(
                     BoxRect::new(x, top + card_h + 58, fw, 20),
-                    "留空即可停用对应快捷键",
+                    "点击后按组合键；Backspace / Delete 清空，Esc 取消",
                     true,
                     true,
                 );
@@ -2427,6 +2435,7 @@ impl Win32AppState {
     }
 
     unsafe fn hide_window(&mut self) {
+        self.set_shortcut_recording(false);
         self.web_cancel.cancel_current();
         self.ai_cancel.cancel_current();
         ShowWindow(self.hwnd, SW_HIDE);
@@ -2434,9 +2443,33 @@ impl Win32AppState {
 
     fn apply_shortcuts(&mut self, cfg: &ShortcutConfig) -> Result<(), String> {
         let parsed = parse_shortcut_config(cfg).map_err(|e| e.to_string())?;
-        register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &parsed)?;
+        if !self.recording_shortcut {
+            register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &parsed)?;
+        }
         self.parsed_shortcuts = parsed;
         Ok(())
+    }
+
+    unsafe fn set_shortcut_recording(&mut self, recording: bool) {
+        if recording == self.recording_shortcut {
+            return;
+        }
+        self.recording_shortcut = recording;
+        // Discard pending presses so recording never opens a window or starts OCR.
+        while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
+        let desired = if recording {
+            ParsedShortcuts::default()
+        } else {
+            self.parsed_shortcuts.clone()
+        };
+        match register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &desired) {
+            Ok(()) if recording => set_hwnd_text(
+                self.lbl_settings_status,
+                "请按组合键；Backspace / Delete 清空，Esc 取消",
+            ),
+            Ok(()) => set_hwnd_text(self.lbl_settings_status, "录入完成，保存设置后生效"),
+            Err(error) => set_hwnd_text(self.lbl_settings_status, &error),
+        }
     }
 
     unsafe fn handle_hotkey_action(&mut self, action: ShortcutAction) {
@@ -2915,11 +2948,11 @@ impl Win32AppState {
         set_hwnd_text(self.edit_chat_key, &chat_cfg.api_key);
         set_hwnd_text(self.edit_chat_model, &chat_cfg.model);
 
-        set_hwnd_text(self.edit_hk_toggle, &hk_cfg.toggle);
-        set_hwnd_text(self.edit_hk_ocr, &hk_cfg.ocr);
-        set_hwnd_text(self.edit_hk_chat, &hk_cfg.ai_dialog);
-        set_hwnd_text(self.edit_hk_sel_trans, &hk_cfg.selection_translate);
-        set_hwnd_text(self.edit_hk_sel_chat, &hk_cfg.selection_ai_dialog);
+        shortcut_recorder::set_value(self.edit_hk_toggle, &hk_cfg.toggle);
+        shortcut_recorder::set_value(self.edit_hk_ocr, &hk_cfg.ocr);
+        shortcut_recorder::set_value(self.edit_hk_chat, &hk_cfg.ai_dialog);
+        shortcut_recorder::set_value(self.edit_hk_sel_trans, &hk_cfg.selection_translate);
+        shortcut_recorder::set_value(self.edit_hk_sel_chat, &hk_cfg.selection_ai_dialog);
 
         let op_idx = if app_cfg.panel_opacity >= 0.95 {
             0
@@ -2966,6 +2999,8 @@ impl Win32AppState {
     }
 
     unsafe fn save_settings_from_ui(&mut self) {
+        SetFocus(self.btn_save_settings);
+        self.set_shortcut_recording(false);
         let ai_enabled =
             SendMessageW(self.chk_ai_enabled, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
         let b_idx = (SendMessageW(self.cmb_ai_backend, CB_GETCURSEL, 0, 0) as usize)
@@ -3011,11 +3046,11 @@ impl Win32AppState {
         }
 
         let hk_cfg = ShortcutConfig {
-            toggle: get_hwnd_text(self.edit_hk_toggle),
-            ocr: get_hwnd_text(self.edit_hk_ocr),
-            ai_dialog: get_hwnd_text(self.edit_hk_chat),
-            selection_translate: get_hwnd_text(self.edit_hk_sel_trans),
-            selection_ai_dialog: get_hwnd_text(self.edit_hk_sel_chat),
+            toggle: shortcut_recorder::value(self.edit_hk_toggle),
+            ocr: shortcut_recorder::value(self.edit_hk_ocr),
+            ai_dialog: shortcut_recorder::value(self.edit_hk_chat),
+            selection_translate: shortcut_recorder::value(self.edit_hk_sel_trans),
+            selection_ai_dialog: shortcut_recorder::value(self.edit_hk_sel_chat),
         };
         if let Err(e) = self.apply_shortcuts(&hk_cfg) {
             set_hwnd_text(self.lbl_settings_status, &e);
@@ -3277,7 +3312,7 @@ impl Win32AppState {
             self.update_view = view;
         }
         while let Ok(hk_ev) = GlobalHotKeyEvent::receiver().try_recv() {
-            if hk_ev.state == HotKeyState::Pressed {
+            if !self.recording_shortcut && hk_ev.state == HotKeyState::Pressed {
                 if let Some(action) = self.parsed_shortcuts.action_for_id(hk_ev.id) {
                     self.handle_hotkey_action(action);
                 }
@@ -3414,6 +3449,7 @@ unsafe extern "system" fn main_wnd_proc(
             let active_state = wparam & 0xFFFF;
             if active_state == WA_INACTIVE {
                 with_state(|st| {
+                    st.set_shortcut_recording(false);
                     if !st.pinned && !st.ocr_in_flight && st.active_tab != TabMode::Settings {
                         st.hide_window();
                     }
@@ -3704,11 +3740,11 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
         }
         ID_BTN_HK_RESET if code == BN_CLICKED => {
             let def = ShortcutConfig::default();
-            set_hwnd_text(st.edit_hk_toggle, &def.toggle);
-            set_hwnd_text(st.edit_hk_ocr, &def.ocr);
-            set_hwnd_text(st.edit_hk_chat, &def.ai_dialog);
-            set_hwnd_text(st.edit_hk_sel_trans, &def.selection_translate);
-            set_hwnd_text(st.edit_hk_sel_chat, &def.selection_ai_dialog);
+            shortcut_recorder::set_value(st.edit_hk_toggle, &def.toggle);
+            shortcut_recorder::set_value(st.edit_hk_ocr, &def.ocr);
+            shortcut_recorder::set_value(st.edit_hk_chat, &def.ai_dialog);
+            shortcut_recorder::set_value(st.edit_hk_sel_trans, &def.selection_translate);
+            shortcut_recorder::set_value(st.edit_hk_sel_chat, &def.selection_ai_dialog);
         }
         ID_BTN_SAVE_SETTINGS if code == BN_CLICKED => st.save_settings_from_ui(),
 

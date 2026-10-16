@@ -5,6 +5,8 @@ mod app;
 mod state;
 #[cfg(target_os = "macos")]
 mod ui_helpers;
+#[cfg(target_os = "macos")]
+mod shortcut_recorder;
 
 #[cfg(target_os = "macos")]
 fn main() {

@@ -113,7 +113,7 @@ extern "system" {
     fn GetWindowLongPtrW(hwnd: HWND, index: i32) -> isize;
     fn SetViewportOrgEx(hdc: HDC, x: i32, y: i32, old: *mut POINT) -> BOOL;
     fn RedrawWindow(hwnd: HWND, rect: *const RECT, region: HANDLE, flags: u32) -> BOOL;
-    fn GetFocus() -> HWND;
+    pub fn GetFocus() -> HWND;
     fn GetKeyState(key: i32) -> i16;
     pub fn GetParent(hwnd: HWND) -> HWND;
     pub fn SetParent(hwnd: HWND, parent: HWND) -> HWND;
@@ -745,6 +745,9 @@ pub unsafe fn init_control(hwnd: HWND, class: &str, id: usize) {
         if class == "COMBOBOX" { 1 } else { 0 },
     );
     theme_control(hwnd);
+    if super::shortcut_recorder::is_field(hwnd) {
+        super::shortcut_recorder::init(hwnd);
+    }
     if class == "COMBOBOX" {
         SendMessageW(hwnd, CB_SETITEMHEIGHT, usize::MAX, scale(24) as LPARAM);
         SendMessageW(hwnd, CB_SETITEMHEIGHT, 0, scale(26) as LPARAM);
@@ -1373,6 +1376,9 @@ unsafe extern "system" fn control_proc(
     _id: usize,
     combo: usize,
 ) -> LRESULT {
+    if let Some(result) = super::shortcut_recorder::handle(hwnd, msg, w, l) {
+        return result;
+    }
     let checkbox = matches!(
         GetDlgCtrlID(hwnd) as usize,
         ID_CHK_AI_ENABLED | ID_CHK_OCR_NEWLINE | ID_CHK_AUTOSTART
