@@ -1,0 +1,1 @@
+{"name":"ttree-promo-loop","private":true,"version":"1.0.0","scripts":{"studio":"remotion studio src/index.tsx","render":"remotion render src/index.tsx TTree out/TTREE-30s.mp4 --codec h264 --crf 17 --pixel-format yuv420p"},"dependencies":{"@remotion/cli":"4.0.532","remotion":"4.0.532","react":"19.1.0","react-dom":"19.1.0"}}
