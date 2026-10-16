@@ -29,7 +29,9 @@ use ttree_core::{
     WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 use ttree_ocr::OcrOutcome;
-use ttree_platform::hotkey::{parse_shortcut_config, ParsedShortcuts, ShortcutAction};
+use ttree_platform::hotkey::{
+    parse_shortcut_config, register_shortcuts, ParsedShortcuts, ShortcutAction,
+};
 use ttree_storage::{HistoryStore, SettingsStore};
 
 use crate::ui_helpers::{
@@ -624,13 +626,15 @@ impl AppController {
         add_subview(&effect_view, &settings_ui.root);
 
         let sc_cfg = settings.shortcuts();
-        let parsed_shortcuts = parse_shortcut_config(&sc_cfg).unwrap_or_default();
         let mut registered_hotkeys = Vec::new();
-        for hk in parsed_shortcuts.unique_hotkeys() {
-            if hotkey_mgr.register(hk).is_ok() {
-                registered_hotkeys.push(hk);
-            }
-        }
+        let mut parsed_shortcuts = ParsedShortcuts::default();
+        let shortcut_result = parse_shortcut_config(&sc_cfg)
+            .map_err(|error| error.to_string())
+            .and_then(|parsed| {
+                register_shortcuts(&hotkey_mgr, &mut registered_hotkeys, &parsed)?;
+                parsed_shortcuts = parsed;
+                Ok(())
+            });
 
         let conversations = history.read_conversations().unwrap_or_default();
         let (active_conversation_id, current_messages) = match conversations.last() {
@@ -701,6 +705,9 @@ impl AppController {
         ctrl.refresh_ai_header_badge();
         ctrl.refresh_conversations_popup();
         ctrl.relayout_all(win_w, win_h);
+        if let Err(error) = shortcut_result {
+            ctrl.set_status(&error);
+        }
         ctrl
     }
 
@@ -3084,16 +3091,17 @@ impl AppController {
         };
         match parse_shortcut_config(&sc_input) {
             Ok(parsed) => {
-                for old_hk in self.registered_hotkeys.drain(..) {
-                    let _ = self.hotkey_mgr.unregister(old_hk);
-                }
-                for hk in parsed.unique_hotkeys() {
-                    if self.hotkey_mgr.register(hk).is_ok() {
-                        self.registered_hotkeys.push(hk);
-                    }
+                if let Err(error) =
+                    register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &parsed)
+                {
+                    self.set_status(&error);
+                    return;
                 }
                 self.parsed_shortcuts = parsed;
-                let _ = self.settings.save_shortcuts(&sc_input);
+                if let Err(error) = self.settings.save_shortcuts(&sc_input) {
+                    self.set_status(&format!("保存快捷键失败: {error}"));
+                    return;
+                }
             }
             Err(e) => {
                 self.set_status(&format!("❌ {e}"));

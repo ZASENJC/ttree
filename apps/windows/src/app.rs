@@ -36,7 +36,9 @@ use ttree_core::{
 };
 use ttree_ocr::OcrOutcome;
 use ttree_platform::autostart;
-use ttree_platform::hotkey::{parse_shortcut_config, ParsedShortcuts, ShortcutAction};
+use ttree_platform::hotkey::{
+    parse_shortcut_config, register_shortcuts, ParsedShortcuts, ShortcutAction,
+};
 use ttree_platform::selection::capture_selected_text;
 use ttree_storage::{HistoryStore, SettingsStore};
 
@@ -923,8 +925,11 @@ pub fn run() {
         app_state.build_child_controls(hinstance);
         SendMessageW(hwnd, 0x0127, (1 << 16) | 1, 0); // UIS_SET | UISF_HIDEFOCUS; keyboard navigation restores it.
         let sc = app_state.settings.shortcuts();
-        let _ = app_state.apply_shortcuts(&sc);
+        let shortcut_result = app_state.apply_shortcuts(&sc);
         app_state.populate_settings_fields();
+        if let Err(error) = shortcut_result {
+            set_hwnd_text(app_state.lbl_settings_status, &error);
+        }
         app_state.refresh_chat_controls();
         app_state.relayout_children();
 
@@ -2429,15 +2434,7 @@ impl Win32AppState {
 
     fn apply_shortcuts(&mut self, cfg: &ShortcutConfig) -> Result<(), String> {
         let parsed = parse_shortcut_config(cfg).map_err(|e| e.to_string())?;
-        for hk in self.registered_hotkeys.drain(..) {
-            let _ = self.hotkey_mgr.unregister(hk);
-        }
-        for hk in parsed.unique_hotkeys() {
-            self.hotkey_mgr
-                .register(hk)
-                .map_err(|e| format!("注册全局快捷键失败: {e}"))?;
-            self.registered_hotkeys.push(hk);
-        }
+        register_shortcuts(&self.hotkey_mgr, &mut self.registered_hotkeys, &parsed)?;
         self.parsed_shortcuts = parsed;
         Ok(())
     }
