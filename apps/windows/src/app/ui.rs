@@ -639,15 +639,17 @@ impl Drop for LayoutFrame {
         }
     }
 }
-pub unsafe fn visible(hwnd: HWND, show: bool) {
+pub unsafe fn shown(hwnd: HWND) -> bool {
     // WM_SETREDRAW temporarily removes WS_VISIBLE from the root. Inspect each
     // child's own flag rather than IsWindowVisible's inherited visibility.
-    let current = (GetWindowLongPtrW(hwnd, -16) as u32 & WS_VISIBLE) != 0;
-    if current != show {
+    (GetWindowLongPtrW(hwnd, -16) as u32 & WS_VISIBLE) != 0
+}
+pub unsafe fn visible(hwnd: HWND, show: bool) {
+    if shown(hwnd) != show {
         ShowWindow(hwnd, if show { SW_SHOW } else { SW_HIDE });
     }
 }
-unsafe fn edit_geometry(hwnd: HWND) {
+pub unsafe fn edit_geometry(hwnd: HWND) {
     let id = GetDlgCtrlID(hwnd) as usize;
     if !matches!(
         id,

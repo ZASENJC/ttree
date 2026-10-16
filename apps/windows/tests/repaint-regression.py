@@ -1,4 +1,4 @@
-"""Reproduce hover flicker and scroll ghosts using naturally presented screen pixels.
+"""Reproduce input/hover flicker and scroll ghosts on the native desktop.
 
 Run on an unlocked Windows desktop, for example:
   python apps/windows/tests/repaint-regression.py --exe target/release/ttree-windows.exe --artifacts target/repaint-regression
@@ -28,6 +28,13 @@ parser.add_argument(
     type=Path,
     help="Directory for screen samples and JSON result",
 )
+parser.add_argument(
+    "--input-only", action="store_true", help="Only check input repaint and clear behavior"
+)
+parser.add_argument(
+    "--window-class", default="TTreePureRustWin32MainClass",
+    help="Native window class (override for an isolated test build)",
+)
 args = parser.parse_args()
 exe = args.exe.resolve()
 out = args.artifacts.resolve()
@@ -41,6 +48,8 @@ dwm = ctypes.windll.dwmapi
 u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 u.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 u.SendMessageW.restype = ctypes.c_ssize_t
+u.SetWinEventHook.restype = wt.HANDLE
+u.UnhookWinEvent.argtypes = [wt.HANDLE]
 
 
 class RECT(ctypes.Structure):
@@ -80,12 +89,12 @@ profile = Path(os.environ["APPDATA"]) / "com.samwstu.ttree/settings.json"
 before = profile.read_bytes() if profile.exists() else None
 try:
     proc = subprocess.Popen(
-        [str(exe)],
+        [str(exe), "--hidden"],
         stdout=(out / "stdout.log").open("w"),
         stderr=(out / "stderr.log").open("w"),
     )
     app = Application(backend="win32").connect(process=proc.pid, timeout=15)
-    win = app.window(class_name="TTreePureRustWin32MainClass", visible_only=False)
+    win = app.window(class_name=args.window_class, visible_only=False)
     win.wait("exists", timeout=10)
     root_hwnd = win.handle
     for _ in range(6):
@@ -104,6 +113,116 @@ try:
         dwm.DwmFlush()
         r = win.rectangle()
         return ImageGrab.grab(bbox=(r.left, r.top, r.right, r.bottom))
+
+    # Observe actual Win32 geometry notifications, including intermediate sizes
+    # that a screenshot taken after SendMessage returns would miss.
+    source = c(201)
+    source.set_focus()
+    source.set_edit_text("输入")
+    geometry_events = []
+    event_callback_type = ctypes.WINFUNCTYPE(
+        None, wt.HANDLE, wt.DWORD, wt.HWND, wt.LONG, wt.LONG, wt.DWORD, wt.DWORD
+    )
+
+    @event_callback_type
+    def on_geometry_event(hook, event, hwnd, object_id, child_id, thread, stamp):
+        if hwnd == source.handle and object_id == 0:
+            geometry_events.append(event)
+
+    u.SetWinEventHook.argtypes = [
+        wt.DWORD, wt.DWORD, wt.HMODULE, event_callback_type,
+        wt.DWORD, wt.DWORD, wt.DWORD,
+    ]
+    hook = u.SetWinEventHook(
+        0x800B, 0x800B, None, on_geometry_event, proc.pid, 0, 0
+    )
+    assert hook, "could not observe native source input geometry"
+
+    def pump_events():
+        message = wt.MSG()
+        while u.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+            u.TranslateMessage(ctypes.byref(message))
+            u.DispatchMessageW(ctypes.byref(message))
+
+    try:
+        time.sleep(0.05)
+        pump_events()
+        geometry_events.clear()
+        bounds = source.rectangle()
+        first_frame = shot()
+        for char in "连续输入时窗口应该保持稳定 Native input stays stable 1234567890":
+            u.SendMessageW(source.handle, 0x102, ord(char), 0)
+            pump_events()
+            assert source.rectangle() == bounds
+        time.sleep(0.05)
+        pump_events()
+        report["typing_geometry_changes"] = len(geometry_events)
+        assert not geometry_events, (
+            f"typing resized the source input {len(geometry_events)} times"
+        )
+        geometry_events.clear()
+        # Exercise the native edit replacement path used by paste/selection.
+        for text in ["粘贴的内容", "replacement text", "最后一段输入"]:
+            u.SendMessageW(source.handle, 0xB1, 0, -1)  # EM_SETSEL
+            replacement = ctypes.create_unicode_buffer(text)
+            u.SendMessageW(source.handle, 0xC2, 1, ctypes.addressof(replacement))
+            pump_events()
+            assert source.window_text() == text and source.rectangle() == bounds
+        time.sleep(0.05)
+        pump_events()
+        # Native edit replacements can notify client/scrollbar location changes
+        # while retaining the same outer bounds (checked for every replacement).
+        report["paste_native_location_notifications"] = len(geometry_events)
+        first_frame.save(out / "input-first.png")
+        shot().save(out / "input-last.png")
+    finally:
+        u.UnhookWinEvent(hook)
+    report["checks"].append("continuous_input_and_paste_keep_native_geometry_stable")
+    source.set_edit_text("多行内容\r\n" * 30)
+    assert u.GetWindowLongW(source.handle, -16) & 0x200000
+    source.set_edit_text("短文本")
+    assert not u.GetWindowLongW(source.handle, -16) & 0x200000
+    assert source.rectangle() == bounds
+    report["checks"].append("input_scrollbar_tracks_text_overflow_without_window_layout")
+    assert c(206).is_visible()
+    source.set_edit_text("")
+    assert not c(206).is_visible()
+    assert source.rectangle().width() > bounds.width()
+    source.set_edit_text("恢复输入")
+    assert c(206).is_visible() and source.rectangle() == bounds
+    clear_bounds = c(206).rectangle()
+    u.SendMessageW(root_hwnd, 0x111, 206, 0)
+    assert source.window_text() == "" and not c(206).is_visible()
+    report["checks"].append("clear_action_and_empty_input_width_follow_text_state")
+    # The exposed strip contains the old clear button but no blinking caret.
+    # Check naturally presented pixels before requesting a reference redraw.
+    natural = shot()
+    u.RedrawWindow(root_hwnd, None, None, 0x585)
+    reference = shot()
+    window_bounds = win.rectangle()
+    exposed = (
+        bounds.right - window_bounds.left,
+        bounds.top - window_bounds.top,
+        clear_bounds.right - window_bounds.left,
+        bounds.bottom - window_bounds.top,
+    )
+    changed = sum(
+        1 for pixel in ImageChops.difference(
+            natural.crop(exposed), reference.crop(exposed)
+        ).getdata() if max(pixel[:3]) > 8
+    )
+    report["cleared_input_stale_pixels"] = changed
+    natural.save(out / "input-cleared.png")
+    assert changed == 0, f"clearing input left {changed} stale pixels"
+    report["checks"].append("clearing_input_repaints_exposed_strip_without_ghosts")
+
+    if args.input_only:
+        report["profile_unchanged"] = (
+            profile.read_bytes() if profile.exists() else None
+        ) == before
+        assert report["profile_unchanged"]
+        report["ok"] = True
+        raise SystemExit(0)
 
     hover = {}
     for ident in [104, 105, 103, 507]:

@@ -1702,6 +1702,42 @@ impl Win32AppState {
         )
     }
 
+    unsafe fn layout_source_input(&self, source: BoxRect, has_text: bool) {
+        // Commit only the final width: widening then narrowing a populated edit
+        // reformats its contents twice, even when the window layout is unchanged.
+        place(
+            self.edit_source,
+            14,
+            source.y + 6,
+            source.w - if has_text { 76 } else { 28 },
+            (source.h - 12).max(12),
+        );
+        if has_text {
+            place(self.btn_clear_trans, source.w - 58, source.y + 4, 44, 24);
+        }
+        visible(self.btn_clear_trans, has_text);
+    }
+
+    unsafe fn refresh_source_input(&self) {
+        if self.active_tab == TabMode::Translate {
+            let has_text = GetWindowTextLengthW(self.edit_source) > 0;
+            if shown(self.btn_clear_trans) != has_text {
+                let source = self.translation_layout().source;
+                self.layout_source_input(source, has_text);
+                let area = RECT {
+                    left: scale(source.x),
+                    top: scale(source.y),
+                    right: scale(source.x + source.w),
+                    bottom: scale(source.y + source.h),
+                };
+                InvalidateRect(self.hwnd, &area, 0);
+                InvalidateRect(self.edit_source, ptr::null(), 0);
+            }
+        }
+        // Text can add/remove wrapped lines without changing the edit's bounds.
+        edit_geometry(self.edit_source);
+    }
+
     unsafe fn relayout_children(&self) {
         let _frame = LayoutFrame::new(self.hwnd, self.hwnd);
         let (w, h) = self.client_size();
@@ -1786,13 +1822,7 @@ impl Win32AppState {
                 let l = self.translation_layout();
                 bg.surface(l.source, p.surface, 0);
                 bg.surface(l.languages, p.surface, 0);
-                place(
-                    self.edit_source,
-                    14,
-                    l.source.y + 6,
-                    w - 28,
-                    (l.source.h - 12).max(12),
-                );
+                self.layout_source_input(l.source, GetWindowTextLengthW(self.edit_source) > 0);
                 show(self.edit_source, true);
                 let ly = l.languages.y + (l.languages.h - 30) / 2;
                 let left = if w < 430 { 100 } else { 114 };
@@ -1805,22 +1835,6 @@ impl Win32AppState {
                 show(self.cmb_target_lang, true);
                 place(self.btn_trans_now, w - 60, ly + 2, 48, 26);
                 show(self.btn_trans_now, true);
-                show(
-                    self.btn_clear_trans,
-                    !get_hwnd_text(self.edit_source).is_empty(),
-                );
-                // Keep the source clear action in its own corner, never overlapping language controls.
-                if !get_hwnd_text(self.edit_source).is_empty() {
-                    place(self.btn_clear_trans, w - 58, l.source.y + 4, 44, 24);
-                    show(self.btn_clear_trans, true);
-                    place(
-                        self.edit_source,
-                        14,
-                        l.source.y + 6,
-                        w - 76,
-                        (l.source.h - 12).max(12),
-                    );
-                }
                 bg.grip(l.languages.y, w, p.line);
                 bg.grip(l.web.y, w, p.line);
                 place(self.lbl_web_header, 16, l.web.y + 7, w - 90, 17);
@@ -3563,9 +3577,9 @@ unsafe fn handle_wm_command(st: &mut Win32AppState, id: usize, code: u16) {
         ID_BTN_PIN if code == BN_CLICKED => st.set_pinned(!st.pinned),
 
         ID_EDIT_SOURCE if code == EN_CHANGE => {
+            st.refresh_source_input();
             if !st.suppress_source_change {
                 st.pending_auto_translate = Some(Instant::now() + AUTO_TRANSLATE_DEBOUNCE);
-                st.relayout_children();
             }
         }
         ID_CMB_SOURCE_LANG if code == CBN_SELCHANGE => {
