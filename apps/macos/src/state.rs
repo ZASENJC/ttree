@@ -14,6 +14,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{sel, MainThreadMarker};
 use objc2_app_kit::{
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSBox, NSBoxType, NSButton, NSControlStateValueOn, NSFloatingWindowLevel,
     NSModalResponseOK, NSNormalWindowLevel, NSOpenPanel, NSPopUpButton, NSScreen, NSScrollView,
     NSSecureTextField, NSSlider, NSTextField, NSTextView, NSView, NSVisualEffectView, NSWindow,
@@ -38,19 +39,21 @@ use ttree_storage::{HistoryStore, SettingsStore};
 
 use crate::ui_helpers::{
     add_subview, append_text_view_string, apply_text_view_line_spacing, clean_markdown_for_bubble,
-    clear_subviews, copy_to_pasteboard, get_field_string, get_text_view_string, make_button,
-    make_checkbox, make_divider, make_flat_button, make_flipped_view, make_label,
-    make_multiline_input, make_popup, make_scrollable_text_view, make_secure_field, make_slider,
-    make_split_bar, make_surface_box, make_symbol_button, make_text_field, make_wrapping_label,
-    make_wrapping_message_label, pale_ink, set_button_symbol, set_field_string,
-    set_flat_button_active, set_label_alignment_right, set_multiline_input_frame,
+    clear_subviews, copy_to_pasteboard, current_ink_tone, get_field_string, get_text_view_string,
+    is_dark_appearance, make_button, make_checkbox, make_divider, make_flat_button,
+    make_flipped_view, make_label, make_multiline_input, make_popup, make_scrollable_text_view,
+    make_secure_field, make_slider, make_split_bar, make_surface_box, make_symbol_button,
+    make_text_field, make_wrapping_label, make_wrapping_message_label, mark_view_tree_needs_display,
+    pale_ink, sample_window_backdrop_luminance, set_button_symbol, set_field_string,
+    set_flat_button_active, set_ink_tone, set_label_alignment_right, set_multiline_input_frame,
     set_multiline_input_hidden, set_split_bar_frame, set_text_view_string, set_text_view_styled,
-    set_wrapping_label_frame, top_rect, FlippedView, MultilineInputWidget, SplitBarWidget,
-    SPLITTER_HIT_HEIGHT,
+    set_wrapping_label_frame, step_ink_tone, target_ink_tone_for_luminance, top_rect, FlippedView,
+    MultilineInputWidget, SplitBarWidget, SPLITTER_HIT_HEIGHT,
 };
 
 const AUTO_TRANSLATE_DEBOUNCE: Duration = Duration::from_millis(650);
 const RESIZE_SAVE_DEBOUNCE: Duration = Duration::from_millis(350);
+const BACKDROP_SAMPLE_INTERVAL: Duration = Duration::from_millis(120);
 
 const SPLITTER_SOURCE: u8 = 1;
 const SPLITTER_LANG: u8 = 2;
@@ -474,6 +477,9 @@ pub struct AppController {
     pub is_programmatic_resize: bool,
     pub last_known_size: (f64, f64),
     pub pending_resize_save: Option<Instant>,
+    pub ink_tone: f64,
+    pub target_ink_tone: f64,
+    pub last_backdrop_sample: Option<Instant>,
 }
 
 impl AppController {
@@ -494,6 +500,13 @@ impl AppController {
         let ai_enabled = settings.ai_translation_for_request().enabled;
         let win_w = pane_layout.width;
         let win_h = pane_layout.translate_window_height(ai_enabled);
+        let app_appearance = NSApplication::sharedApplication(mtm).effectiveAppearance();
+        let initial_tone = if is_dark_appearance(&app_appearance) {
+            1.0
+        } else {
+            0.0
+        };
+        set_ink_tone(initial_tone);
 
         // ── 顶部栏：左上角 [翻译 | AI] 分段切换器，右上角图标功能区（全淡色，距顶边与左右边距留出舒适呼吸感） ──
         let segmented_bg =
@@ -702,6 +715,9 @@ impl AppController {
             is_programmatic_resize: false,
             last_known_size: (win_w, win_h),
             pending_resize_save: None,
+            ink_tone: initial_tone,
+            target_ink_tone: initial_tone,
+            last_backdrop_sample: None,
         };
 
         ctrl.refresh_hymt_ui_state();
@@ -2077,6 +2093,7 @@ impl AppController {
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
         self.window.makeKeyAndOrderFront(None);
+        self.sample_backdrop_and_step_ink(true);
         match self.active_tab {
             TabMode::Translate => {
                 let _ = self
@@ -3575,12 +3592,79 @@ impl AppController {
                 }
                 TabMode::Settings => {}
             }
+            self.sample_backdrop_and_step_ink(false);
         }
 
         if let Some(since) = self.pending_resize_save {
             if since.elapsed() >= RESIZE_SAVE_DEBOUNCE {
                 self.pending_resize_save = None;
                 self.settings.save_pane_layout(self.pane_layout);
+            }
+        }
+    }
+
+    pub fn on_window_did_move(&mut self) {
+        self.sample_backdrop_and_step_ink(false);
+    }
+
+    pub fn sample_backdrop_and_step_ink(&mut self, immediate: bool) {
+        if !self.window.isVisible() {
+            return;
+        }
+        let now = Instant::now();
+        let should_sample = immediate
+            || self
+                .last_backdrop_sample
+                .is_none_or(|t| now.duration_since(t) >= BACKDROP_SAMPLE_INTERVAL);
+        if should_sample {
+            self.last_backdrop_sample = Some(now);
+            let desired = if let Some(lum) = sample_window_backdrop_luminance(&self.window) {
+                target_ink_tone_for_luminance(lum, self.target_ink_tone)
+            } else {
+                let app_ap = NSApplication::sharedApplication(self.mtm).effectiveAppearance();
+                if is_dark_appearance(&app_ap) {
+                    1.0
+                } else {
+                    0.0
+                }
+            };
+            self.target_ink_tone = desired;
+        }
+
+        if immediate {
+            let changed = (self.ink_tone - self.target_ink_tone).abs() > 1e-4
+                || current_ink_tone().is_none_or(|c| (c - self.target_ink_tone).abs() > 1e-4);
+            self.ink_tone = self.target_ink_tone;
+            set_ink_tone(self.ink_tone);
+            if changed {
+                self.sync_adaptive_window_appearance();
+                mark_view_tree_needs_display(&self.effect_view);
+            }
+            return;
+        }
+
+        let prev_dark = self.ink_tone >= 0.5;
+        let (next_tone, changed) = step_ink_tone(self.ink_tone, self.target_ink_tone);
+        if changed {
+            self.ink_tone = next_tone;
+            set_ink_tone(self.ink_tone);
+            let next_dark = self.ink_tone >= 0.5;
+            if prev_dark != next_dark {
+                self.sync_adaptive_window_appearance();
+            }
+            mark_view_tree_needs_display(&self.effect_view);
+        }
+    }
+
+    fn sync_adaptive_window_appearance(&self) {
+        unsafe {
+            let name = if self.ink_tone >= 0.5 {
+                NSAppearanceNameDarkAqua
+            } else {
+                NSAppearanceNameAqua
+            };
+            if let Some(ap) = NSAppearance::appearanceNamed(name) {
+                self.window.setAppearance(Some(&ap));
             }
         }
     }
@@ -4640,5 +4724,29 @@ mod tests {
             clean_markdown_for_bubble(raw),
             "标题\n这是 重点内容 与 下划线。\n- 列表项"
         );
+    }
+
+    #[test]
+    fn adaptive_ink_tone_hysteresis_and_smooth_transition_converges() {
+        // 明亮背景 (lum = 0.92) -> 目标 0.0（深墨字）
+        assert_eq!(target_ink_tone_for_luminance(0.92, 1.0), 0.0);
+        // 暗色背景 (lum = 0.15) -> 目标 1.0（亮白字）
+        assert_eq!(target_ink_tone_for_luminance(0.15, 0.0), 1.0);
+        // 临界中间带 (0.44..0.56) 保持原状态防抖
+        assert_eq!(target_ink_tone_for_luminance(0.50, 0.0), 0.0);
+        assert_eq!(target_ink_tone_for_luminance(0.50, 1.0), 1.0);
+
+        let mut tone = 1.0_f64;
+        let mut steps = 0;
+        while (tone - 0.0).abs() > 1e-6 {
+            let (next, changed) = step_ink_tone(tone, 0.0);
+            assert!(changed);
+            assert!(next < tone);
+            tone = next;
+            steps += 1;
+            assert!(steps <= 25);
+        }
+        assert_eq!(tone, 0.0);
+        assert_eq!(step_ink_tone(0.0, 0.0), (0.0, false));
     }
 }

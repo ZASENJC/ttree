@@ -4,24 +4,223 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::cell::Cell;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
-    NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage, NSPasteboard,
-    NSPasteboardTypeString, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider,
-    NSTextAlignment, NSTextField, NSTextView, NSView,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBox, NSBoxType, NSButton,
+    NSButtonType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent,
+    NSFont, NSImage, NSPasteboard, NSPasteboardTypeString, NSPopUpButton, NSScreen, NSScrollView,
+    NSSecureTextField, NSSlider, NSTextAlignment, NSTextField, NSTextView, NSView, NSWindow,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
 
 pub const SPLITTER_HIT_HEIGHT: f64 = 7.0;
 
-/// 生成低饱和、柔和淡雅的自适应文本/线条颜色（严禁使用突兀的高对比或高饱和强调色）。
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGWindowListCreateImage(
+        screen_bounds: CGRect,
+        list_option: u32,
+        window_id: u32,
+        image_option: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGImageRelease(image: *mut std::ffi::c_void);
+    fn CGColorSpaceCreateDeviceRGB() -> *mut std::ffi::c_void;
+    fn CGColorSpaceRelease(space: *mut std::ffi::c_void);
+    fn CGBitmapContextCreate(
+        data: *mut u8,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: *mut std::ffi::c_void,
+        bitmap_info: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGContextDrawImage(
+        c: *mut std::ffi::c_void,
+        rect: CGRect,
+        image: *mut std::ffi::c_void,
+    );
+    fn CGContextRelease(c: *mut std::ffi::c_void);
+}
+
+const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_BELOW_WINDOW: u32 = 1 << 2;
+const K_CG_WINDOW_IMAGE_NOMINAL_RESOLUTION: u32 = 1 << 4;
+const K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST: u32 = 1;
+const K_CG_BITMAP_BYTE_ORDER_32_BIG: u32 = 4 << 12;
+
+/// 当前前景墨色亮度：`0.0` 代表深墨字（适配浅色/明亮背景），`1.0` 代表亮白字（适配深色/暗色背景）。
+/// 默认用 f64::NAN 表示尚未经过背景采样，此时回退跟随系统外观。
+static ADAPTIVE_INK_TONE: AtomicU64 = AtomicU64::new(f64::NAN.to_bits());
+
+pub fn current_ink_tone() -> Option<f64> {
+    let v = f64::from_bits(ADAPTIVE_INK_TONE.load(Ordering::Relaxed));
+    if v.is_nan() {
+        None
+    } else {
+        Some(v.clamp(0.0, 1.0))
+    }
+}
+
+pub fn set_ink_tone(tone: f64) {
+    ADAPTIVE_INK_TONE.store(tone.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+}
+
+pub fn is_dark_appearance(appearance: &NSAppearance) -> bool {
+    unsafe {
+        let names = NSArray::from_slice(&[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]);
+        appearance
+            .bestMatchFromAppearancesWithNames(&names)
+            .is_some_and(|matched| matched.isEqualToString(NSAppearanceNameDarkAqua))
+    }
+}
+
+/// 根据背景相对亮度计算目标墨色亮度（`0.0` 深墨字 ↔ `1.0` 亮白字），并带迟滞防抖。
+pub fn target_ink_tone_for_luminance(luminance: f64, current_tone: f64) -> f64 {
+    if luminance >= 0.56 {
+        0.0
+    } else if luminance <= 0.44 {
+        1.0
+    } else if current_tone < 0.5 {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// 将当前墨色亮度向目标亮度平滑插值推进；返回 `(新值, 是否发生可见变化)`。
+pub fn step_ink_tone(current: f64, target: f64) -> (f64, bool) {
+    let diff = target - current;
+    if diff.abs() < 0.008 {
+        let changed = (target - current).abs() > 1e-4;
+        return (target, changed);
+    }
+    let next = (current + diff * 0.28).clamp(0.0, 1.0);
+    (next, true)
+}
+
+/// 生成低饱和、柔和淡雅的动态自适应文本/线条颜色：
+/// - 每次绘制时由 `NSColor::colorWithName:dynamicProvider:` 动态求值（修复原本 `labelColor().colorWithAlphaComponent(...)` 在创建时把 RGB 固化成常量的缺陷）；
+/// - 同时支持跟随窗口后方实时背景亮度在深浅墨色之间平滑过渡。
 pub fn pale_ink(alpha: f64) -> Retained<NSColor> {
-    NSColor::labelColor().colorWithAlphaComponent(alpha as CGFloat)
+    let clamped_alpha = alpha.clamp(0.0, 1.0);
+    let block = RcBlock::new(move |appearance: NonNull<NSAppearance>| -> NonNull<NSColor> {
+        let ap = unsafe { appearance.as_ref() };
+        let tone = current_ink_tone().unwrap_or_else(|| if is_dark_appearance(ap) { 1.0 } else { 0.0 });
+        // 在明亮背景 (tone -> 0.0) 下适度提升低透明度灰阶的对比度，避免浅底上文字发虚
+        let light_boost = if clamped_alpha >= 0.25 {
+            (clamped_alpha * 1.14).min(0.92)
+        } else {
+            (clamped_alpha * 1.25).min(0.24)
+        };
+        let effective_alpha = clamped_alpha * tone + light_boost * (1.0 - tone);
+        let white = 0.06 + 0.92 * tone;
+        let color = NSColor::colorWithCalibratedWhite_alpha(
+            white as CGFloat,
+            effective_alpha as CGFloat,
+        );
+        NonNull::from(&*color)
+    });
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &block) }
+}
+
+/// 采样窗口正下方屏幕区域的平均相对亮度 (`0.0..=1.0`)。
+pub fn sample_window_backdrop_luminance(window: &NSWindow) -> Option<f64> {
+    if !window.isVisible() {
+        return None;
+    }
+    let win_num = window.windowNumber();
+    if win_num <= 0 {
+        return None;
+    }
+    let frame = window.frame();
+    if frame.size.width < 32.0 || frame.size.height < 32.0 {
+        return None;
+    }
+    let primary_h = NSScreen::screens(window.mtm())
+        .firstObject()
+        .map(|s| s.frame().size.height)
+        .unwrap_or(1080.0);
+    // 将 AppKit 左下角屏幕坐标转换为 Quartz 左上角全局坐标，取窗口中心 60% 区域减少边缘阴影干扰
+    let inset_x = frame.size.width * 0.20;
+    let inset_y = frame.size.height * 0.20;
+    let q_rect = CGRect::new(
+        CGPoint::new(frame.origin.x + inset_x, primary_h - (frame.origin.y + frame.size.height) + inset_y),
+        CGSize::new((frame.size.width - inset_x * 2.0).max(16.0), (frame.size.height - inset_y * 2.0).max(16.0)),
+    );
+
+    unsafe {
+        let img = CGWindowListCreateImage(
+            q_rect,
+            K_CG_WINDOW_LIST_OPTION_ON_SCREEN_BELOW_WINDOW,
+            win_num as u32,
+            K_CG_WINDOW_IMAGE_NOMINAL_RESOLUTION,
+        );
+        if img.is_null() {
+            return None;
+        }
+        let mut px = [0u8; 8 * 8 * 4];
+        let cs = CGColorSpaceCreateDeviceRGB();
+        if cs.is_null() {
+            CGImageRelease(img);
+            return None;
+        }
+        let ctx = CGBitmapContextCreate(
+            px.as_mut_ptr(),
+            8,
+            8,
+            8,
+            8 * 4,
+            cs,
+            K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST | K_CG_BITMAP_BYTE_ORDER_32_BIG,
+        );
+        if ctx.is_null() {
+            CGColorSpaceRelease(cs);
+            CGImageRelease(img);
+            return None;
+        }
+        CGContextDrawImage(
+            ctx,
+            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(8.0, 8.0)),
+            img,
+        );
+        CGContextRelease(ctx);
+        CGColorSpaceRelease(cs);
+        CGImageRelease(img);
+
+        let mut sum = 0.0;
+        let mut valid_pixels = 0usize;
+        for chunk in px.chunks_exact(4) {
+            if chunk[3] > 0 {
+                let r = chunk[0] as f64 / 255.0;
+                let g = chunk[1] as f64 / 255.0;
+                let b = chunk[2] as f64 / 255.0;
+                sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                valid_pixels += 1;
+            }
+        }
+        if valid_pixels == 0 {
+            None
+        } else {
+            Some((sum / valid_pixels as f64).clamp(0.0, 1.0))
+        }
+    }
+}
+
+/// 递归标记视图树需要重绘，使动态 `NSColor` 在过渡帧中即时刷新。
+pub fn mark_view_tree_needs_display(view: &NSView) {
+    view.setNeedsDisplay(true);
+    let subviews = view.subviews();
+    for i in 0..subviews.count() {
+        let child = subviews.objectAtIndex(i);
+        mark_view_tree_needs_display(&child);
+    }
 }
 
 /// 将以顶部为原点的 `(x, top_y, width, height)` 转换为 AppKit 默认左下角原点的 `NSRect`。
@@ -277,11 +476,12 @@ pub fn make_button(
         btn.setFont(Some(&NSFont::systemFontOfSize(12.0)));
         let tint = pale_ink(0.68);
         let _: () = msg_send![&*btn, setContentTintColor: Some(&*tint)];
+        if let Some(cell) = btn.cell() {
+            let bg = pale_ink(0.055);
+            let _: () = msg_send![&*cell, setBackgroundColor: Some(&*bg)];
+        }
         if let Some(layer) = btn.layer() {
             layer.setCornerRadius(6.0);
-            let bg = pale_ink(0.05);
-            let cg_bg = bg.CGColor();
-            layer.setBackgroundColor(Some(&cg_bg));
         }
         btn.setTag(tag);
         btn.setTarget(Some(target));

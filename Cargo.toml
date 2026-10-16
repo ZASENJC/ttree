@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["ZASENJC"]
 license = "MIT"
@@ -32,6 +32,7 @@ dirs = "6"
 auto-launch = "0.5"
 global-hotkey = "0.8"
 core-foundation = "0.10"
+block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSArray",
@@ -74,6 +75,8 @@ objc2-vision = { version = "0.3", features = [
     "VNTypes",
 ] }
 objc2-app-kit = { version = "0.3", features = [
+    "block2",
+    "NSAppearance",
     "NSApplication",
     "NSBezierPath",
     "NSBox",
@@ -81,6 +84,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSButtonCell",
     "NSCell",
     "NSColor",
+    "NSColorList",
     "NSControl",
     "NSEvent",
     "NSFont",

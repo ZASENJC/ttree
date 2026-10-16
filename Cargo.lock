@@ -3251,7 +3251,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "ttree-ai"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3279,13 +3279,15 @@ dependencies = [
 
 [[package]]
 name = "ttree-macos"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
+ "block2",
  "global-hotkey",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
  "objc2-quartz-core",
  "tokio",
@@ -3300,7 +3302,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-ocr"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "objc2",
  "objc2-core-foundation",
@@ -3317,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-platform"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -3332,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-storage"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -3343,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-translate"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -3356,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-updater"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3377,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "ttree-windows"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "global-hotkey",

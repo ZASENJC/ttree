@@ -127,6 +127,11 @@ define_class!(
             with_ctx(|ctx| ctx.ctrl.on_window_did_resize());
         }
 
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _notification: &AnyObject) {
+            with_ctx(|ctx| ctx.ctrl.on_window_did_move());
+        }
+
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn app_should_handle_reopen(&self, _app: &AnyObject, _has_visible: Bool) -> Bool {
             with_ctx(|ctx| {
