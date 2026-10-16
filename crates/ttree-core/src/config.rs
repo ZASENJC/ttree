@@ -358,6 +358,9 @@ pub struct AppearanceConfig {
     pub panel_opacity: f64,
     #[serde(default = "default_true")]
     pub ocr_strip_newlines: bool,
+    /// Windows 普通窗口：显示在任务栏与 Alt+Tab 中，失焦时保持显示。
+    #[serde(default)]
+    pub normal_window_mode: bool,
 }
 
 fn default_panel_opacity() -> f64 {
@@ -369,6 +372,7 @@ impl Default for AppearanceConfig {
         Self {
             panel_opacity: default_panel_opacity(),
             ocr_strip_newlines: true,
+            normal_window_mode: false,
         }
     }
 }

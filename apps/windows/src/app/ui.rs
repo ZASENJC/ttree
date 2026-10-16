@@ -50,6 +50,7 @@ const DT_CALCRECT: u32 = 0x400;
 const DT_NOPREFIX: u32 = 0x800;
 const DT_END_ELLIPSIS: u32 = 0x8000;
 const SRCCOPY: u32 = 0x00cc0020;
+const HALFTONE: i32 = 4;
 
 #[repr(C)]
 struct PAINTSTRUCT {
@@ -110,7 +111,8 @@ extern "system" {
     pub fn GetDpiForSystem() -> u32;
     pub fn GetWindowRect(hwnd: HWND, rect: *mut RECT) -> BOOL;
     fn GetDlgCtrlID(hwnd: HWND) -> i32;
-    fn GetWindowLongPtrW(hwnd: HWND, index: i32) -> isize;
+    pub fn GetWindowLongPtrW(hwnd: HWND, index: i32) -> isize;
+    pub fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) -> isize;
     fn SetViewportOrgEx(hdc: HDC, x: i32, y: i32, old: *mut POINT) -> BOOL;
     fn RedrawWindow(hwnd: HWND, rect: *const RECT, region: HANDLE, flags: u32) -> BOOL;
     pub fn GetFocus() -> HWND;
@@ -158,6 +160,20 @@ extern "system" {
         sy: i32,
         rop: u32,
     ) -> BOOL;
+    fn StretchBlt(
+        dest: HDC,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        src: HDC,
+        sx: i32,
+        sy: i32,
+        sw: i32,
+        sh: i32,
+        rop: u32,
+    ) -> BOOL;
+    fn SetStretchBltMode(hdc: HDC, mode: i32) -> i32;
 }
 #[link(name = "comctl32")]
 extern "system" {
@@ -797,27 +813,94 @@ fn px(r: BoxRect) -> RECT {
     }
 }
 unsafe fn fill(hdc: HDC, r: RECT, color: u32, radius: i32) {
-    let brush = CreateSolidBrush(color);
     if radius == 0 {
+        let brush = CreateSolidBrush(color);
         FillRect(hdc, &r, brush);
+        DeleteObject(brush);
     } else {
-        let pen = CreatePen(0, 1, color);
-        let old_b = SelectObject(hdc, brush);
-        let old_p = SelectObject(hdc, pen);
-        RoundRect(
-            hdc,
-            r.left,
-            r.top,
-            r.right,
-            r.bottom,
-            scale(radius * 2),
-            scale(radius * 2),
-        );
-        SelectObject(hdc, old_b);
-        SelectObject(hdc, old_p);
-        DeleteObject(pen);
+        rounded(hdc, r, color, scale(radius * 2));
     }
+}
+/// Solid rounded rectangle at the caller's scale. The pen matches the brush so
+/// the outline does not introduce a second color. GDI rounds corners without
+/// anti-aliasing, so pass a supersampled rect for smooth edges.
+unsafe fn rounded(hdc: HDC, r: RECT, color: u32, diameter: i32) {
+    let brush = CreateSolidBrush(color);
+    let pen = CreatePen(0, 1, color);
+    let old_b = SelectObject(hdc, brush);
+    let old_p = SelectObject(hdc, pen);
+    RoundRect(hdc, r.left, r.top, r.right, r.bottom, diameter, diameter);
+    SelectObject(hdc, old_b);
+    SelectObject(hdc, old_p);
+    DeleteObject(pen);
     DeleteObject(brush);
+}
+/// Draws the settings switch. GDI's `RoundRect` is not anti-aliased, and at 22
+/// logical pixels tall the staircase on the pill and on the knob reads as a
+/// low-resolution control. Both shapes are rasterized together at 4x and
+/// halftone downscaled. They share one offscreen pass on purpose: downscaling
+/// them separately would blend the knob's edge with the card instead of the
+/// track and leave a halo.
+unsafe fn draw_switch(
+    hdc: HDC,
+    track: RECT,
+    thumb: RECT,
+    track_color: u32,
+    thumb_color: u32,
+    background: u32,
+) {
+    const FACTOR: i32 = 4;
+    let width = (track.right - track.left).max(1);
+    let height = (track.bottom - track.top).max(1);
+    let dc = CreateCompatibleDC(hdc);
+    let bitmap = CreateCompatibleBitmap(hdc, width * FACTOR, height * FACTOR);
+    if dc.is_null() || bitmap.is_null() {
+        if !dc.is_null() {
+            DeleteDC(dc);
+        }
+        if !bitmap.is_null() {
+            DeleteObject(bitmap);
+        }
+        fill(hdc, track, track_color, height / 2);
+        fill(hdc, thumb, thumb_color, (thumb.bottom - thumb.top) / 2);
+        return;
+    }
+    let old_bitmap = SelectObject(dc, bitmap);
+    let area = RECT {
+        left: 0,
+        top: 0,
+        right: width * FACTOR,
+        bottom: height * FACTOR,
+    };
+    let backdrop = CreateSolidBrush(background);
+    FillRect(dc, &area, backdrop);
+    DeleteObject(backdrop);
+    rounded(dc, area, track_color, height * FACTOR);
+    let knob = RECT {
+        left: (thumb.left - track.left) * FACTOR,
+        top: (thumb.top - track.top) * FACTOR,
+        right: (thumb.right - track.left) * FACTOR,
+        bottom: (thumb.bottom - track.top) * FACTOR,
+    };
+    rounded(dc, knob, thumb_color, (thumb.bottom - thumb.top) * FACTOR);
+    let mode = SetStretchBltMode(hdc, HALFTONE);
+    StretchBlt(
+        hdc,
+        track.left,
+        track.top,
+        width,
+        height,
+        dc,
+        0,
+        0,
+        width * FACTOR,
+        height * FACTOR,
+        SRCCOPY,
+    );
+    SetStretchBltMode(hdc, mode);
+    SelectObject(dc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
 }
 unsafe fn text(hdc: HDC, s: &str, r: RECT, font: HFONT, color: u32, flags: u32) {
     let old = SelectObject(hdc, font);
@@ -1291,6 +1374,45 @@ unsafe fn draw_checkbox(hwnd: HWND, hdc: HDC) {
     fill(hdc, r, background, 0);
     let center = (r.top + r.bottom) / 2;
     let check = SendMessageW(hwnd, BM_GETCHECK, 0, 0) as usize == BST_CHECKED;
+    if GetDlgCtrlID(hwnd) as usize == ID_CHK_NORMAL_WINDOW {
+        let track = RECT {
+            left: r.right - scale(40),
+            top: center - scale(11),
+            right: r.right,
+            bottom: center + scale(11),
+        };
+        let thumb_left = track.left + scale(if check { 20 } else { 2 });
+        let thumb = RECT {
+            left: thumb_left,
+            top: track.top + scale(2),
+            right: thumb_left + scale(18),
+            bottom: track.bottom - scale(2),
+        };
+        // `p.line` is the card border and `p.pill` is the card fill, so an off
+        // track drawn with them disappears into the card it sits on.
+        draw_switch(
+            hdc,
+            track,
+            thumb,
+            if check { p.ink } else { p.faint },
+            p.pill,
+            background,
+        );
+        r.right = track.left - scale(12);
+        let f = VISUALS.with(|v| v.borrow().regular);
+        text(
+            hdc,
+            &get_hwnd_text(hwnd),
+            r,
+            f,
+            p.ink,
+            DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        if GetFocus() == hwnd {
+            DrawFocusRect(hdc, &r);
+        }
+        return;
+    }
     let box_r = RECT {
         left: scale(1),
         top: center - scale(7),
@@ -1381,7 +1503,7 @@ unsafe extern "system" fn control_proc(
     }
     let checkbox = matches!(
         GetDlgCtrlID(hwnd) as usize,
-        ID_CHK_AI_ENABLED | ID_CHK_OCR_NEWLINE | ID_CHK_AUTOSTART
+        ID_CHK_AI_ENABLED | ID_CHK_OCR_NEWLINE | ID_CHK_AUTOSTART | ID_CHK_NORMAL_WINDOW
     );
     let interactive =
         checkbox || combo != 0 || GetWindowLongPtrW(hwnd, -16) as u32 & 0xf == BS_OWNERDRAW;
