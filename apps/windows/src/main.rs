@@ -4,6 +4,8 @@
 mod app;
 #[cfg(any(target_os = "windows", test))]
 mod design;
+#[cfg(any(target_os = "windows", test))]
+mod startup;
 #[cfg(target_os = "windows")]
 fn main() {
     #[cfg(feature = "updater-smoke")]

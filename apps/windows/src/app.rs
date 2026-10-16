@@ -668,6 +668,15 @@ fn with_state<F: FnOnce(&mut Win32AppState)>(f: F) {
 }
 
 pub fn run() {
+    let show_on_launch = crate::startup::should_show(std::env::args_os().skip(1));
+    let _instance = match crate::startup::acquire(show_on_launch) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(error) => {
+            crate::startup::report_error(&error);
+            return;
+        }
+    };
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -689,7 +698,7 @@ pub fn run() {
 
     unsafe {
         let hinstance = GetModuleHandleW(ptr::null());
-        let class_name = wide_null("TTreePureRustWin32MainClass");
+        let class_name = wide_null(crate::startup::WINDOW_CLASS);
         let colors = palette();
         let bg_brush = CreateSolidBrush(colors.bg);
         let surface_brush = CreateSolidBrush(colors.surface);
@@ -925,7 +934,7 @@ pub fn run() {
         WIN_CTX.with(|cell| {
             *cell.borrow_mut() = Some(app_state);
         });
-        if std::env::args().any(|a| a == "--show") {
+        if show_on_launch {
             with_state(|st| st.show_and_focus());
         }
 
