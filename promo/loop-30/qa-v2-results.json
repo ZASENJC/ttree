@@ -1,0 +1,18 @@
+{
+  "duration_seconds": 30.0,
+  "width": 1920,
+  "height": 1080,
+  "fps": "30/1",
+  "frames": 900,
+  "audio_codec": "aac",
+  "audio_hz": "48000",
+  "black_frames": [],
+  "seam_mean_pixel_delta_255": 0.009596836419753086,
+  "adjacent_start_delta": 0.0025559413580246914,
+  "adjacent_end_delta": 0.007860725308641976,
+  "aac_peak_linear": 0.5807895064353943,
+  "aac_boundary_jump_linear": 0.004308376461267471,
+  "aac_boundary_jump_dbfs": -47.31372711069423,
+  "audio_sample_delta_p99": 0.03425845503807068,
+  "seam_below_normal_p99": true
+}
