@@ -3,8 +3,8 @@
 #![cfg(target_os = "macos")]
 
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::runtime::AnyObject;
-use objc2::{AnyThread, ClassType};
+use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{msg_send, AnyThread, ClassType};
 use objc2_core_graphics::CGImage;
 use objc2_core_image::{kCIContextUseSoftwareRenderer, CIContext};
 use objc2_core_ml::MLCPUComputeDevice;
@@ -43,7 +43,7 @@ pub fn recognize_bytes(bytes: &[u8]) -> Result<OcrOutcome, String> {
 }
 
 pub(crate) fn recognize_once(image: &CGImage, compatibility: bool) -> Result<String, String> {
-    unsafe {
+    let result = autoreleasepool(|_| unsafe {
         let request: Retained<VNRecognizeTextRequest> = VNRecognizeTextRequest::new();
         configure_request(&request, compatibility)?;
 
@@ -78,7 +78,29 @@ pub(crate) fn recognize_once(image: &CGImage, compatibility: bool) -> Result<Str
         })?;
 
         Ok(collect_text(&request))
+    });
+
+    if result.is_err() {
+        // macOS 27 的 Vision `-[VNCRImageReaderDetector isCRImageReaderViableAfterError:]` 仍比对旧版
+        // `CRImageReaderErrorDomain`，未能识别 Swift 桥接的 `TextRecognition.CRImageReaderError`，
+        // 导致 `VNSession.globalSession` 永久缓存失效的 `CRImageReader` 与底层 `E5RTProgramLibrary` 共享资源。
+        // 在请求关联对象释放并排出 autoreleasepool 后主动清理 `VNSession` 缓存，使后续重试重建模型实例。
+        release_vision_cached_resources();
     }
+
+    result
+}
+
+fn release_vision_cached_resources() {
+    autoreleasepool(|_| unsafe {
+        let Some(session_cls) = AnyClass::get(c"VNSession") else {
+            return;
+        };
+        let session: *mut AnyObject = msg_send![session_cls, globalSession];
+        if !session.is_null() {
+            let _: () = msg_send![session, releaseCachedResources];
+        }
+    });
 }
 
 fn configure_request(request: &VNRecognizeTextRequest, compatibility: bool) -> Result<(), String> {
@@ -198,5 +220,10 @@ mod tests {
         if objc2::available!(macos = 13.0) {
             assert!(request.automaticallyDetectsLanguage());
         }
+    }
+
+    #[test]
+    fn releases_vision_cached_resources_safely() {
+        release_vision_cached_resources();
     }
 }
